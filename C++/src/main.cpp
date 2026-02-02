@@ -70,7 +70,6 @@ PathVec getImageFilePaths(const std::string &inputPattern, int firstFrame, int l
     {
         std::cout << path << std::endl;
     }
-    std::cout << "Hello" << std::endl;
     return imagePaths;
 }
 
@@ -121,16 +120,16 @@ int main(int argc, char *argv[])
 #endif
     // load file paths here
 
-    // PathVec imageFilePaths = getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
-    PathVec imageFilePaths;
-    try {
-        imageFilePaths =
-            getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
-    } catch (const std::exception& e) {
-        std::cerr << "Runtime error in getImageFilePaths: " << e.what() << std::endl;
-    } catch (...) {
-        std::cerr << "Unknown runtime error in getImageFilePaths" << std::endl;
-    }
+    PathVec imageFilePaths = getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
+    // PathVec imageFilePaths;
+    // try {
+    //     imageFilePaths =
+    //         getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
+    // } catch (const std::exception& e) {
+    //     std::cerr << "Runtime error in getImageFilePaths: " << e.what() << std::endl;
+    // } catch (...) {
+    //     std::cerr << "Unknown runtime error in getImageFilePaths" << std::endl;
+    // }
 
     // load cells here
     CellFactory cellFactory(config);

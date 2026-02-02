@@ -34,7 +34,7 @@ PathVec getImageFilePaths(const std::string &inputPattern, int firstFrame, int l
     PathVec imagePaths;
     for (int i = firstFrame; lastFrame == -1 || i <= lastFrame; ++i)
     {
-        char buffer[100];
+        char buffer[512];
         sprintf(buffer, inputPattern.c_str(), i);
         fs::path file(buffer);
 
@@ -70,7 +70,7 @@ PathVec getImageFilePaths(const std::string &inputPattern, int firstFrame, int l
     {
         std::cout << path << std::endl;
     }
-
+    std::cout << "Hello" << std::endl;
     return imagePaths;
 }
 
@@ -120,10 +120,21 @@ int main(int argc, char *argv[])
     std::cout << "Using Linear Congruential generator (seeding every call)" << std::endl;
 #endif
     // load file paths here
-    PathVec imageFilePaths = getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
+
+    // PathVec imageFilePaths = getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
+    PathVec imageFilePaths;
+    try {
+        imageFilePaths =
+            getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
+    } catch (const std::exception& e) {
+        std::cerr << "Runtime error in getImageFilePaths: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Unknown runtime error in getImageFilePaths" << std::endl;
+    }
 
     // load cells here
     CellFactory cellFactory(config);
+
     std::map<Path, std::vector<Spheroid>> cells = cellFactory.createCells(args.initial, config.simulation.z_slices / 2,
                                                                         config.simulation.z_scaling);
     // create lineage here

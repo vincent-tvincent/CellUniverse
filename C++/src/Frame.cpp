@@ -29,7 +29,7 @@ Frame::Frame(const std::vector<cv::Mat> &realFrame, const SimulationConfig &simu
     // Calculate z_slices
     for (int i = 0; i < simulationConfig.z_slices; ++i)
     {
-        double zValue = i; //simulationConfig.z_scaling * (i - simulationConfig.z_slices / 2);
+        double zValue = simulationConfig.z_scaling * (i - simulationConfig.z_slices / 2);
         z_slices.push_back(zValue);
     }
     // TODO: Fix padding
@@ -183,7 +183,7 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
         {
             // Draw the outline of the cell on the image.
             // Passes the z-coordinate of the current slice for 3D context.
-            cell.drawOutline(outputFrame, 0, z);
+            cell.drawOutline(outputFrame, 255, z);
         }
 
         // Step 3: Ensure the output frame is an 8-bit image

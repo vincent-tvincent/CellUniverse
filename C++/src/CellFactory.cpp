@@ -37,7 +37,7 @@ std::map<Path, std::vector<Spheroid>> CellFactory::createCells(const Path &init_
         radius = std::stof(floatStr);
         // z -= z_offset;
         z *= z_scaling;
-        initialCells[filePath].push_back(Spheroid(SpheroidParams(cellName, x, y, z, radius)));
+        initialCells[fs::path(filePath).filename().string()].push_back(Spheroid(SpheroidParams(cellName, x, y, z, radius)));
         continue;
     }
     return initialCells;

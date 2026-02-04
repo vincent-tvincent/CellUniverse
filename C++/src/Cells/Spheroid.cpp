@@ -78,7 +78,7 @@ void Spheroid::drawOutline(cv::Mat &image, float color, float z) const
     cv::Point center(_position.x, _position.y);
     cv::Size axes(static_cast<int>(a_at_z), static_cast<int>(b_at_z));
     int thickness = 1;
-    cv::ellipse(image, center, axes, 0, 0, 360, cv::Scalar(outlineColor), thickness, cv::LINE_AA);
+    cv::ellipse(image, center, axes, 0, 0, 360, cv::Scalar(0, outlineColor, 0), thickness, cv::LINE_AA);
 }
 
 Spheroid Spheroid::getPerturbedCell() const

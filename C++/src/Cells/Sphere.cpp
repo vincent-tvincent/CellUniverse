@@ -54,7 +54,7 @@ void Sphere::drawOutline(cv::Mat &image, float color, float z) const
     }
     cv::Point center(_position.x, _position.y);
     int thickness = 1;
-    cv::circle(image, center, static_cast<int>(round(currentRadius)), cv::Scalar(outlineColor), thickness, cv::LINE_AA);
+    cv::circle(image, center, static_cast<int>(round(currentRadius)), cv::Scalar(0, outlineColor, 0), thickness, cv::LINE_AA);
 }
 
 Sphere Sphere::getPerturbedCell() const

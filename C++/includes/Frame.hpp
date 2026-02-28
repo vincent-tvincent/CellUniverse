@@ -29,6 +29,10 @@ public:
     std::vector<cv::Mat> generateSynthFrame();
     std::vector<cv::Mat> generateSynthFrameFast(Spheroid &oldCell, Spheroid &newCell);
     Cost calculateCost(const std::vector<cv::Mat> &synthFrame);
+    // Optimized cost calculation within a bounding box region
+    Cost calculateCostInBox(const std::vector<cv::Mat> &synthFrame, 
+                           const std::vector<float> &minCorner, 
+                           const std::vector<float> &maxCorner);
     std::vector<cv::Mat> generateOutputFrame();
     std::vector<cv::Mat> generateOutputSynthFrame();
     // DataFrame getCellsAsParams();

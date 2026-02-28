@@ -1,4 +1,5 @@
 #include "../includes/Frame.hpp"
+#include <limits>
 
 // Function to interpolate between two slices
 void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, 
@@ -115,6 +116,63 @@ Cost Frame::calculateCost(const std::vector<cv::Mat> &synthFrame)
     {
         totalCost += cv::norm(_realFrame[i], synthFrame[i], cv::NORM_L2);
     }
+    return totalCost;
+}
+
+// Optimized cost calculation within a bounding box region
+// Takes explicit bounding box corners to avoid redundant calculations
+Cost Frame::calculateCostInBox(const std::vector<cv::Mat> &synthFrame, 
+                              const std::vector<float> &minCorner, 
+                              const std::vector<float> &maxCorner)
+{
+    if (_realFrame.size() != synthFrame.size())
+    {
+        throw std::runtime_error("Mismatch in image stack sizes");
+    }
+
+    // Convert bounding box corners to pixel/voxel indices
+    int startX = static_cast<int>(std::floor(minCorner[0]));
+    int endX = static_cast<int>(std::ceil(maxCorner[0]));
+    int startY = static_cast<int>(std::floor(minCorner[1]));
+    int endY = static_cast<int>(std::ceil(maxCorner[1]));
+    int startZ = static_cast<int>(std::floor(minCorner[2]));
+    int endZ = static_cast<int>(std::ceil(maxCorner[2]));
+
+    // Clamp to valid ranges
+    startX = std::max(0, startX);
+    endX = std::min(endX, _realFrame[0].cols - 1);
+    startY = std::max(0, startY);
+    endY = std::min(endY, _realFrame[0].rows - 1);
+    startZ = std::max(0, startZ);
+    endZ = std::min(endZ, static_cast<int>(_realFrame.size() - 1));
+
+    // Only compute cost in the specified region
+    double totalCost = 0.0;
+
+    for (int z = startZ; z <= endZ && z < static_cast<int>(_realFrame.size()); ++z)
+    {
+        const cv::Mat &realSlice = _realFrame[z];
+        const cv::Mat &synthSlice = synthFrame[z];
+
+        if (realSlice.empty() || synthSlice.empty())
+            continue;
+
+        // Extract the ROI (Region of Interest) from both slices
+        cv::Rect roi(startX, startY, endX - startX + 1, endY - startY + 1);
+        
+        // Ensure ROI is within bounds
+        roi = roi & cv::Rect(0, 0, realSlice.cols, realSlice.rows);
+
+        if (roi.area() <= 0)
+            continue;
+
+        cv::Mat realRegion = realSlice(roi);
+        cv::Mat synthRegion = synthSlice(roi);
+
+        // Compute L2 norm only for this region
+        totalCost += cv::norm(realRegion, synthRegion, cv::NORM_L2);
+    }
+
     return totalCost;
 }
 
@@ -247,11 +305,13 @@ CostCallbackPair Frame::perturb()
     // Synthesize new synthetic image
     auto newSynthFrame = generateSynthFrameFast(oldCell, cells[index]);
 
-    // Get the cost of the new synthetic image
-    double newCost = calculateCost(newSynthFrame);
-
-    // If the difference is greater than the threshold, revert to the old cell
-    double oldCost = calculateCost(_synthFrame);
+    // Get the bounding box that contains both old and new cell positions
+    MinBox affectedBox = oldCell.calculateMinimumBox(cells[index]);
+    
+    // Compute cost ONLY in the affected region for both old and new frames
+    // This avoids computing on unchanged areas and compares apples-to-apples
+    double newCost = calculateCostInBox(newSynthFrame, affectedBox.first, affectedBox.second);
+    double oldCost = calculateCostInBox(_synthFrame, affectedBox.first, affectedBox.second);
 
     CallBackFunc callback = [this, newSynthFrame, oldCell, index](bool accept)
     {
@@ -365,8 +425,23 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
 
     // --- Post-split burn-in: optimize daughters before cost comparison ---
     auto bestSynthFrame = generateSynthFrame();
-    double bestCost = calculateCost(bestSynthFrame);
-    double oldCost = calculateCost(_synthFrame);
+    
+    // Compute bounding box union for all affected cells (parent + 2 daughters)
+    // Start with parent cell
+    auto [parentMin, parentMax] = oldCell.calculateCorners();
+    auto [d1Min, d1Max] = cells[d1Idx].calculateCorners();
+    auto [d2Min, d2Max] = cells[d2Idx].calculateCorners();
+    
+    // Compute union of all three cells
+    std::vector<float> unionMin(3), unionMax(3);
+    for (int i = 0; i < 3; ++i) {
+        unionMin[i] = std::min({parentMin[i], d1Min[i], d2Min[i]});
+        unionMax[i] = std::max({parentMax[i], d1Max[i], d2Max[i]});
+    }
+    
+    // Compare costs only in the affected region (not full image)
+    double bestCost = calculateCostInBox(bestSynthFrame, unionMin, unionMax);
+    double oldCost = calculateCostInBox(_synthFrame, unionMin, unionMax);
 
     auto savedSynthFrame = _synthFrame;
     _synthFrame = bestSynthFrame;
@@ -409,7 +484,7 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
         }
 
         auto trialFrame = generateSynthFrameFast(saved, cells[dIdx]);
-        double trialCost = calculateCost(trialFrame);
+        double trialCost = calculateCostInBox(trialFrame, unionMin, unionMax);
 
         if (trialCost < bestCost) {
             bestSynthFrame = trialFrame;
@@ -455,9 +530,10 @@ Cost Frame::costOfPerturb(const std::string &perturbParam, float perturbVal, siz
     Spheroid originalCell = cells[index]; // Store the original cell
     cells[index] = perturbedCell;       // Replace with the perturbed cell
 
-    // Generate new image stack and get new cost
-    auto newSynthFrame = generateSynthFrame();
-    double newCost = calculateCost(newSynthFrame);
+    // Generate new image stack (only affected region) and compute cost in that region
+    auto newSynthFrame = generateSynthFrameFast(originalCell, perturbedCell);
+    MinBox affectedBox = originalCell.calculateMinimumBox(perturbedCell);
+    double newCost = calculateCostInBox(newSynthFrame, affectedBox.first, affectedBox.second);
 
     // Reset cell to its old state
     cells[index] = originalCell;

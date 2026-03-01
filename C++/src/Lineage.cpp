@@ -1,5 +1,23 @@
 #include "../includes/Lineage.hpp"
 
+namespace {
+double maxInCurrentDynamicRange(int depth)
+{
+    switch (depth) {
+        case CV_8U:  return 255.0;
+        case CV_8S:  return 127.0;
+        case CV_16U: return 65535.0;
+        case CV_16S: return 32767.0;
+        case CV_32S: return 2147483647.0;
+        case CV_32F:
+        case CV_64F:
+            return 1.0;
+        default:
+            return 255.0;
+    }
+}
+} // namespace
+
 namespace utils
 {
     template <typename T>
@@ -24,6 +42,14 @@ namespace utils
             std::cout << std::endl; // Newline for each row
         }
     }
+    void applySigmoid(cv::Mat& img, float k = 10.f, float c = 0.5f)
+    {
+        // img.convertTo(img, CV_32F, 1.0 / 255.0);
+
+        cv::Mat tmp = -k * (img - c);
+        cv::exp(tmp, tmp);
+        img = 1.0f / (1.0f + tmp);
+    }
 }
 
 Image processImage(const Image &image, const BaseConfig &config)
@@ -39,7 +65,17 @@ Image processImage(const Image &image, const BaseConfig &config)
         processedImage = image.clone();
     }
 
-    processedImage.convertTo(processedImage, CV_32F, 1.0 / 255.0);
+    double maxValue = 0.0;
+    // cv::minMaxLoc(processedImage, nullptr, &maxValue);
+    // const double dynamicMax = maxInCurrentDynamicRange(processedImage.depth());
+    // const double amplifyRatio = (dynamicMax > 0.0) ? (dynamicMax/maxValue) : 1.0;
+    // const double scale = (amplifyRatio > 0.0) ? (1.0 / amplifyRatio) : 1.0;
+
+    processedImage.convertTo(processedImage, CV_32F, 1/255.0);
+    cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), 10.0);
+
+    utils::applySigmoid(processedImage,50.0, config.simulation.background_color);
+    utils::applySigmoid(processedImage,20.0, 0.5);
 
     // Gaussian blur the image
     // use 1.5 temporarily
@@ -386,7 +422,7 @@ void Lineage::saveCells(int frameIndex)
 
     for (const auto &cell : frame.cells) {
         SpheroidParams params = cell.getCellParams();
-        cell.printCellInfo();
+        // cell.printCellInfo();
         file << imageName << ","
              << params.name << ","
              << params.x << ","

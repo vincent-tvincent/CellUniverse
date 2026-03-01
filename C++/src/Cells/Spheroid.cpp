@@ -282,7 +282,7 @@ void Spheroid::drawOutline(cv::Mat &image, float color, float z) const {
                 }
             });
     } else if (channels == 3) {
-        const cv::Vec3f drawColor(0.0f, color, 0.0f);
+        const cv::Vec3f drawColor(color, color, color);
         scanSpheroidSlice(
             minX, maxX, minY, maxY,
             _position, static_cast<double>(z),
@@ -396,17 +396,17 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
     double brightnessSum = 0.0;
     int brightnessCount = 0;
 
-    scanSpheroidVolume(
-        image, minX, maxX, minY, maxY, minZ, maxZ, _position,
-        R_T, invA2, invB2, invC2,
-        [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
-            if (val <= 1.0) {
-                brightnessSum += pixel;
-                brightnessCount++;
-            }
-        });
-
-    float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
+    // scanSpheroidVolume(
+    //     image, minX, maxX, minY, maxY, minZ, maxZ, _position,
+    //     R_T, invA2, invB2, invC2,
+    //     [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
+    //         if (val <= 1.0) {
+    //             brightnessSum += pixel;
+    //             brightnessCount++;
+    //         }
+    //     });
+    //
+    // float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
 
 
 
@@ -427,7 +427,7 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
         image, minX, maxX, minY, maxY, minZ, maxZ, _position,
         R_T, invA2, invB2, invC2,
         [&](double dx, double dy, double dz, int x, int y, int z, float pixel, double /*val*/) {
-            if (pixel > meanBrightness) {
+            if (pixel > 0.0) {
                 // Skip pixel if it's closer to any neighbor than to this cell
                     float distSqToSelf = static_cast<float>(dx * dx + dy * dy + dz * dz);
                     bool closerToNeighbor = false;

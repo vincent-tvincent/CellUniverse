@@ -75,7 +75,7 @@ std::vector<cv::Mat> Frame::generateSynthFrame()
         Image synthImage = cv::Mat(shape, CV_32F, cv::Scalar(simulationConfig.background_color)); // Assuming background color is in cv::Scalar format
         for (const auto &cell : cells)
         {
-            cell.printCellInfo();
+            // cell.printCellInfo();
             // cell.print();
             cell.draw(synthImage, simulationConfig, nullptr, z);
         }
@@ -175,7 +175,8 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
         // Draw outlines for each cell
         for (const auto &cell : cells)
         {
-            cell.drawOutline(outputFrame, 1.0, z); // Assuming drawOutline takes a cv::Scalar for color
+            cell.drawOutline(outputFrame, 0.7, z);
+            // cell.drawOutline(outputFrame, 1.0, z); // Assuming drawOutline takes a cv::Scalar for color
         }
 
         // Convert to 8-bit image if necessary

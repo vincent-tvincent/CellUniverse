@@ -282,7 +282,7 @@ void Spheroid::drawOutline(cv::Mat &image, float color, float z) const {
                 }
             });
     } else if (channels == 3) {
-        const cv::Vec3f drawColor(0.0f, color, 0.0f);
+        const cv::Vec3f drawColor(color, color, color);
         scanSpheroidSlice(
             minX, maxX, minY, maxY,
             _position, static_cast<double>(z),
@@ -410,16 +410,16 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
     int brightnessCount = 0;
 
     scanSpheroidVolume(
-        image, minX, maxX, minY, maxY, minZ, maxZ, _position,
-        R_T, invA2, invB2, invC2,
-        [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
-            if (val <= 1.0) {
-                brightnessSum += pixel;
-                brightnessCount++;
-            }
-        });
+         image, minX, maxX, minY, maxY, minZ, maxZ, _position,
+         R_T, invA2, invB2, invC2,
+         [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
+             if (val <= 1.0) {
+                 brightnessSum += pixel;
+                 brightnessCount++;
+             }
+         });
 
-    float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
+     float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
 
 
 
@@ -531,6 +531,7 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
     float elongationRatio = 1.0f;
 
     if (rawPoints.size() >= 3) {
+        // Build centered data matrix
         int n = static_cast<int>(rawPoints.size());
         cv::Mat data(n, 3, CV_32F);
         for (int i = 0; i < n; ++i) {

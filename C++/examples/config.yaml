@@ -46,6 +46,8 @@ cell:
 simulation:
   iterations_per_cell: 350
   background_color: 0.39
+  #iterations_per_cell: 500
+  #background_color: 0.47
   cell_color: 0.53
   padding: 0
   z_scaling: 7

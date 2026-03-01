@@ -254,15 +254,15 @@ int main(int argc, char *argv[])
 
     std::cout << "Processing finished. Close the window manually to exit." << std::endl;
     // Keep window alive until user closes it
-    while (true)
-    {
-        int key = cv::waitKey(30);
-        // If window was manually closed
-        if (cv::getWindowProperty("Cell Lineage (Realtime)", cv::WND_PROP_VISIBLE) < 1)
-        {
-            break;
-        }
-    }
+    // while (true)
+    // {
+    //     int key = cv::waitKey(30);
+    //     // If window was manually closed
+    //     if (cv::getWindowProperty("Cell Lineage (Realtime)", cv::WND_PROP_VISIBLE) < 1)
+    //     {
+    //         break;
+    //     }
+    // }
 
     return 0;
 }

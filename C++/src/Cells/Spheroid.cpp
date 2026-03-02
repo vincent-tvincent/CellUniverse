@@ -360,7 +360,7 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
     float effC = (preOptMinorR > 0.0f) ? std::max((float)c, preOptMinorR) : (float)c;
     float maxR = std::max({effA, effB, effC});
 
-    float splitSearchRadius = maxR * 3.0f;
+    float splitSearchRadius = maxR * 5.0f;
 
     // PCA center: use pre-opt position when available so PCA sees both blobs
     // from the original midpoint, not the Phase-1-shifted position.

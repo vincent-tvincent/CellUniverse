@@ -65,7 +65,7 @@ Image processImage(const Image &image, const BaseConfig &config)
         processedImage = image.clone();
     }
 
-    double maxValue = 0.0;
+    // double maxValue = 0.0;
     // cv::minMaxLoc(processedImage, nullptr, &maxValue);
     // const double dynamicMax = maxInCurrentDynamicRange(processedImage.depth());
     // const double amplifyRatio = (dynamicMax > 0.0) ? (dynamicMax/maxValue) : 1.0;

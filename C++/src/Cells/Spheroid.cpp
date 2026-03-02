@@ -357,7 +357,7 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
     float effC = (preOptMinorR > 0.0f) ? std::max((float)c, preOptMinorR) : (float)c;
     float maxR = std::max({effA, effB, effC});
 
-    float splitSearchRadius = maxR * 3.0f;
+    float splitSearchRadius = maxR * 5.0f;
 
     if (preOptMajorR > 0.0f && (effA > (float)a || effC > (float)c)) {
         std::cout << "[Split PreOpt] " << _name

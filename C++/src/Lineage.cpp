@@ -183,6 +183,12 @@ void rescaleStack(std::vector<cv::Mat> &slices, double invScale)
         cv::max(slice, 0.0f, slice);
     }
 }
+
+struct LoadedFrameData {
+    std::vector<cv::Mat> linearZSlices;
+    float sigmoidCenter = 0.0f;
+    std::vector<int> calibrationZIndices;
+};
 } // namespace
 
 namespace utils
@@ -219,7 +225,7 @@ namespace utils
     }
 }
 
-Image processImage(const Image &image, const BaseConfig &config, double scaleFactor, float sigmoidCenterOverride)
+Image preprocessLinear(const Image &image, const BaseConfig &config, double scaleFactor)
 {
     Image processedImage;
 
@@ -245,6 +251,14 @@ Image processImage(const Image &image, const BaseConfig &config, double scaleFac
     SimulationConfig simConfig = config.simulation;
     const double blurSigma = (simConfig.blur_sigma > 0.0f) ? simConfig.blur_sigma : 1.5;
     cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), blurSigma);
+    return processedImage;
+}
+
+Image processImage(const Image &image, const BaseConfig &config, double scaleFactor, float sigmoidCenterOverride)
+{
+    Image processedImage = preprocessLinear(image, config, scaleFactor);
+
+    SimulationConfig simConfig = config.simulation;
     const float sigmoidK = (simConfig.sigmoid_k > 0.0f) ? simConfig.sigmoid_k : 30.0f;
     float sigmoidCenter =
         (simConfig.sigmoid_center >= 0.0f) ? simConfig.sigmoid_center : config.simulation.background_color;
@@ -257,9 +271,10 @@ Image processImage(const Image &image, const BaseConfig &config, double scaleFac
     return processedImage;
 }
 
-std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &config, float *frameBackgroundOut)
+LoadedFrameData loadFrameLinearData(const std::string &imageFile, const BaseConfig &config)
 {
-    std::vector<cv::Mat> processedZSlices; // vector of matrices, each matrix is a 2D image
+    LoadedFrameData loadedFrame;
+    std::vector<cv::Mat> linearZSlices; // vector of matrices, each matrix is a 2D image
     std::vector<cv::Mat> interpolatedZSlices;
     float frameBackground = config.simulation.background_color;
 
@@ -281,7 +296,7 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
         if (img.empty())
         {
             std::cout << "Error: Could not read the TIFF image" << std::endl;
-            return processedZSlices;
+            return loadedFrame;
         }
 
         // Convert to grayscale first, but defer preprocessing until after z-interpolation.
@@ -337,12 +352,11 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
                   << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
 
         // Apply preprocessing on the full interpolated stack.
-        processedZSlices.reserve(interpolatedGrayZSlices.size());
+        linearZSlices.reserve(interpolatedGrayZSlices.size());
         for (const auto &slice : interpolatedGrayZSlices) {
-            processedZSlices.push_back(processImage(slice, config, avgSliceMax, sigmoidCenter));
+            linearZSlices.push_back(preprocessLinear(slice, config, avgSliceMax));
         }
 
-        // Update frame background baseline from processed calibration area.
         std::vector<int> processedCalibZ;
         if (hasCalibrationZone(config.simulation)) {
             const int z0 = std::max(0, config.simulation.calibration_z);
@@ -353,13 +367,8 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
                 processedCalibZ.push_back(z * expandFactor);
             }
         }
-        const double processedCalibrationBg =
-            computeCalibrationZoneMeanAtZIndices(processedZSlices, config.simulation, processedCalibZ);
-        if (processedCalibrationBg >= 0.0) {
-            frameBackground = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
-            std::cout << "[Calibration] processed_background=" << frameBackground << std::endl;
-        }
-        interpolatedZSlices = std::move(processedZSlices);
+        interpolatedZSlices = std::move(linearZSlices);
+        loadedFrame.calibrationZIndices = std::move(processedCalibZ);
 
         // [PATCH] Validate synthetic slice count (only for TIFF branch)
         if (interpolatedZSlices.size() != numSynthSlices) {
@@ -376,7 +385,7 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
         if (img.empty())
         {
             std::cout << "Error: Could not read the image" << std::endl;
-            return processedZSlices;
+            return loadedFrame;
         }
 
         if (img.channels() == 3)
@@ -400,20 +409,14 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
                   << " (from_calibration_center=" << frameBackground
                   << ", config_center=" << config.simulation.sigmoid_center
                   << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
-        processedZSlices.push_back(processImage(img, config, avgSliceMax, frameBackground));
-        const double processedCalibrationBg = computeCalibrationZoneMean(processedZSlices, config.simulation);
-        if (processedCalibrationBg >= 0.0) {
-            frameBackground = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
-            std::cout << "[Calibration] processed_background=" << frameBackground << std::endl;
-        }
-        interpolatedZSlices = std::move(processedZSlices);
+        linearZSlices.push_back(preprocessLinear(img, config, avgSliceMax));
+        interpolatedZSlices = std::move(linearZSlices);
     }
 
-    if (frameBackgroundOut != nullptr) {
-        *frameBackgroundOut = frameBackground;
-    }
-    std::cout << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;
-    return interpolatedZSlices;
+    loadedFrame.sigmoidCenter = frameBackground;
+    loadedFrame.linearZSlices = std::move(interpolatedZSlices);
+    std::cout << std::to_string(loadedFrame.linearZSlices.size()) << "slices built successfully" << std::endl;
+    return loadedFrame;
 }
 
 
@@ -430,7 +433,9 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
     {
         std::vector<Image> real_frame;
         float frameBackground = config.simulation.background_color;
-        real_frame = loadFrame(imagePaths[i], config, &frameBackground);
+        LoadedFrameData loadedFrame = loadFrameLinearData(imagePaths[i], config);
+        real_frame = std::move(loadedFrame.linearZSlices);
+        float frameSigmoidCenter = loadedFrame.sigmoidCenter;
 
         const double currentMeanBeforeAlign = computeStackMean(real_frame);
         if (prevFrameMean > 1e-9 && currentMeanBeforeAlign > 1e-9) {
@@ -442,11 +447,36 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
                               << " ratio=" << brightnessRatio
                               << " apply_scale=" << invScale << std::endl;
                     rescaleStack(real_frame, invScale);
-                    frameBackground = static_cast<float>(std::clamp(frameBackground * invScale, 0.0, 1.0));
+                    frameSigmoidCenter = static_cast<float>(std::clamp(frameSigmoidCenter * invScale, 0.0, 1.0));
                 }
             }
         }
         prevFrameMean = computeStackMean(real_frame);
+
+        const float sigmoidK = (config.simulation.sigmoid_k > 0.0f) ? config.simulation.sigmoid_k : 30.0f;
+        const float sigmoidCenterUsed = frameSigmoidCenter + config.simulation.sigmoid_center_offset;
+        std::cout << "[Sigmoid] center_used=" << sigmoidCenterUsed
+                  << " (from_calibration_center=" << frameSigmoidCenter
+                  << ", config_center=" << config.simulation.sigmoid_center
+                  << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
+        for (auto &slice : real_frame) {
+            utils::applySigmoid(slice, sigmoidK, sigmoidCenterUsed);
+        }
+
+        double processedCalibrationBg = -1.0;
+        if (!loadedFrame.calibrationZIndices.empty()) {
+            processedCalibrationBg =
+                computeCalibrationZoneMeanAtZIndices(real_frame, config.simulation, loadedFrame.calibrationZIndices);
+        } else {
+            processedCalibrationBg = computeCalibrationZoneMean(real_frame, config.simulation);
+        }
+        if (processedCalibrationBg >= 0.0) {
+            frameBackground = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
+            std::cout << "[Calibration] processed_background=" << frameBackground << std::endl;
+        } else {
+            std::cout << "[Calibration] no valid processed calibration voxels; fallback background="
+                      << frameBackground << std::endl;
+        }
 
         fs::path path(imagePaths[i]);
         //        std::cout << "Filename: " << path.filename() << std::endl;
@@ -466,6 +496,8 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
         }
     }
 }
+
+
 void Lineage::optimize(int frameIndex)
 {
     if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
@@ -600,6 +632,15 @@ void Lineage::optimize(int frameIndex)
             Spheroid child1 = frame.cells[frame.cells.size() - 2];
             Spheroid child2 = frame.cells[frame.cells.size() - 1];
             candidates.push_back({name, child1, child2, costDiff, relGain});
+        } else {
+            std::cout << "[Split Skip] " << name
+                      << " absGate=" << (passAbsGate ? "pass" : "fail")
+                      << " relGate=" << (passRelGate ? "pass" : "fail")
+                      << " diff=" << costDiff
+                      << " split_cost=" << config.prob.split_cost
+                      << " rel_gain=" << relGain
+                      << " min_rel_gain=" << minRelativeSplitGain
+                      << std::endl;
         }
 
         // Always revert this trial candidate.

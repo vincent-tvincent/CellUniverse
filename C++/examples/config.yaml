@@ -51,10 +51,10 @@ simulation:
   padding: 0
   z_scaling: 7
   # pre-processing parameters
-  blur_sigma: 7.0
-  sigmoid_k: 70.0
+  blur_sigma: 10.0
+  sigmoid_k: 85.0
   sigmoid_center: 0.445
-  sigmoid_center_offset: 0.045
+  sigmoid_center_offset: 0.046
   # background calibration zone (must contain no cells)
   # (calibration_x, calibration_y, calibration_z) is the upper-left-front corner
   calibration_x: 20

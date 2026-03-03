@@ -24,7 +24,11 @@ add_executable(${PROJECT_NAME}
         ${cwd}/src/LineageViewer.cpp
         ${cwd}/src/Cells/Sphere.cpp
         ${cwd}/src/Cells/Spheroid.cpp
+        ${cwd}/src/EmbryoBrightTracker.cpp
 )
+
+add_subdirectory(tests)
+add_subdirectory(lib/yaml-cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
@@ -36,5 +40,3 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE lib/yaml-cpp/include)
-add_subdirectory(tests)
-add_subdirectory(lib/yaml-cpp)

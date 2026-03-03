@@ -12,6 +12,7 @@
 #include <algorithm>
 
 #include "LineageViewer.hpp"
+#include "EmbryoBrightTracker.hpp"
 
 class Args
 {
@@ -177,15 +178,23 @@ Args initArgs(char *argv[]) {
 int main(int argc, char *argv[])
 {
     // check user input
+    // Optional 7th arg: mode = old | new
     if (argc < 7)
     {
-        std::cerr << "Usage: celluniverse <firstFrame> <lastFrame> <input_pattern_or_dir_or_file> <output_dir> <config.yaml> <initial.csv>\n";
+        std::cerr << "Usage: celluniverse <firstFrame> <lastFrame> <input_pattern_or_dir_or_file> <output_dir> <config.yaml> <initial.csv> [mode]\n";
+        std::cerr << "       mode: old (default) | new\n";
         return 1;
     }
 
-
-    // parse args
+    // parse args (existing behavior)
     Args args = initArgs(argv);
+
+    // Optional mode
+    std::string mode = "old";
+    if (argc >= 8)
+    {
+        mode = argv[7];
+    }
 
     // load config
     BaseConfig config;
@@ -195,24 +204,57 @@ int main(int argc, char *argv[])
     // load file paths
     PathVec imageFilePaths = getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
 
-    // load cells
+    if (imageFilePaths.empty())
+    {
+        std::cerr << "[FATAL] No input frames found. Check input path/pattern and frame range.\n";
+        return 1;
+    }
+
     // [PATCH] Provide the first-frame filename for 4-column initial CSV (cell_type,z,y,x).
     // CellFactory needs a frame key (e.g., "t000.tif") to attach initial cells.
-    // We pass it via an environment variable to avoid changing function signatures.
-    if (!imageFilePaths.empty()) {
-        const std::string firstFrameFile = imageFilePaths.front().filename().string();
-        setenv("CELLUNIVERSE_INITIAL_FRAME_FILE", firstFrameFile.c_str(), 1);
-        std::cout << "[INFO] CELLUNIVERSE_INITIAL_FRAME_FILE=" << firstFrameFile << std::endl;
-    } else {
-        std::cerr << "[WARN] imageFilePaths is empty; cannot set initial frame filename." << std::endl;
+    const std::string firstFrameFile = imageFilePaths.front().filename().string();
+    setenv("CELLUNIVERSE_INITIAL_FRAME_FILE", firstFrameFile.c_str(), 1);
+    std::cout << "[INFO] CELLUNIVERSE_INITIAL_FRAME_FILE=" << firstFrameFile << std::endl;
+
+    // If user chose new algorithm, run it and exit (does NOT touch old algorithm logic).
+    if (mode == "new")
+    {
+        EmbryoBrightTracker tracker(config, args.output);
+
+        auto start = std::chrono::steady_clock::now();
+        tracker.run(imageFilePaths);
+        auto end = std::chrono::steady_clock::now();
+
+        std::chrono::duration<double> elapsed_seconds = end - start;
+        std::cout << "Time elapsed: " << elapsed_seconds.count() << " seconds" << std::endl;
+
+        std::cout << "Processing finished. Close the window manually to exit." << std::endl;
+        while (true)
+        {
+            cv::waitKey(30);
+            if (cv::getWindowProperty("Cell Lineage (Realtime)", cv::WND_PROP_VISIBLE) < 1)
+            {
+                break;
+            }
+        }
+        return 0;
     }
+    else if (mode != "old")
+    {
+        std::cerr << "[FATAL] Unknown mode: " << mode << "\n";
+        std::cerr << "Use: old | new\n";
+        return 1;
+    }
+
+    // =========================
+    // OLD algorithm path (unchanged logic)
+    // =========================
 
     // load cells here
     CellFactory cellFactory(config);
-    std::map<Path, std::vector<Spheroid>> cells = cellFactory.createCells(args.initial, config.simulation.z_slices / 2,
-                                                                        config.simulation.z_scaling);
-    // // create lineage here
-    // Lineage lineage = Lineage(cells, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
+    std::map<Path, std::vector<Spheroid>> cells =
+        cellFactory.createCells(args.initial, config.simulation.z_slices / 2, config.simulation.z_scaling);
+
     // create lineage
     Lineage lineage = Lineage(cells, imageFilePaths, config, args.output, args.continueFrom);
 
@@ -220,10 +262,9 @@ int main(int argc, char *argv[])
 
     // Run
     auto start = std::chrono::steady_clock::now();
-    for (int frame = 0; frame < lineage.length(); ++frame)
+    for (int frame = 0; frame < (int)lineage.length(); ++frame)
     {
         lineage.optimize(frame);
-
 
         // Build 2D viz list: rawName + x,y from current detected cells
         std::vector<LineageViewer::CellViz> viz;
@@ -241,25 +282,18 @@ int main(int argc, char *argv[])
         viewer.update(frame, viz);
 
         lineage.copyCellsForward(frame + 1);
-
         lineage.saveImages(frame);
-
         lineage.saveCells(frame);
     }
     auto end = std::chrono::steady_clock::now(); // timer end
 
-
-    // end this program
     std::chrono::duration<double> elapsed_seconds = end - start;
-
     std::cout << "Time elapsed: " << elapsed_seconds.count() << " seconds" << std::endl;
 
     std::cout << "Processing finished. Close the window manually to exit." << std::endl;
-    // Keep window alive until user closes it
     while (true)
     {
-        int key = cv::waitKey(30);
-        // If window was manually closed
+        cv::waitKey(30);
         if (cv::getWindowProperty("Cell Lineage (Realtime)", cv::WND_PROP_VISIBLE) < 1)
         {
             break;

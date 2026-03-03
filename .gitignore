@@ -381,3 +381,8 @@ cellviewer*.sh
 .vs
 .dask-worker-space
 dask-worker-space/
+C++/output/
+C++/examples/output*/
+C++/cmake-build-*/
+C++/build/
+.DS_Store

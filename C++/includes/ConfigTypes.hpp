@@ -15,12 +15,15 @@ public:
     int padding;
     float z_scaling;
     float blur_sigma;
+    float sigmoid_k;
+    float sigmoid_center;
     int z_slices;
     std::vector<int> z_values;
 
     // Constructor with default values
     SimulationConfig() : iterations_per_cell(0), background_color(0.0f), cell_color(0.0f),
-                         padding(0), z_scaling(1.0), blur_sigma(0.0f), z_slices(-1) {
+                         padding(0), z_scaling(1.0f), blur_sigma(0.0f),
+                         sigmoid_k(30.0f), sigmoid_center(-1.0f), z_slices(-1) {
     }
     void explodeConfig(const YAML::Node node) {
         iterations_per_cell = node["iterations_per_cell"].as<int>();
@@ -28,7 +31,15 @@ public:
         cell_color = node["cell_color"].as<float>();
         padding = node["padding"].as<int>();
         z_scaling = node["z_scaling"].as<float>();
-        blur_sigma = node["blur_sigma"].as<float>();
+        if (node["blur_sigma"]) {
+            blur_sigma = node["blur_sigma"].as<float>();
+        }
+        if (node["sigmoid_k"]) {
+            sigmoid_k = node["sigmoid_k"].as<float>();
+        }
+        if (node["sigmoid_center"]) {
+            sigmoid_center = node["sigmoid_center"].as<float>();
+        }
     }
     void printConfig() {
         std::cout << "Simulation Config\n";
@@ -38,6 +49,8 @@ public:
         std::cout << "padding: " << padding << std::endl;
         std::cout << "z_scaling: " << z_scaling << std::endl;
         std::cout << "blur_sigma: " << blur_sigma << std::endl;
+        std::cout << "sigmoid_k: " << sigmoid_k << std::endl;
+        std::cout << "sigmoid_center: " << sigmoid_center << std::endl;
         std::cout << "z_slices: " << z_slices << std::endl;
     }
 };

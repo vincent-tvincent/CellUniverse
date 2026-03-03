@@ -336,16 +336,14 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
             float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
             auto pi = cells[i].getCellParams();
             auto pd = cells[di].getCellParams();
-            float majorThresh = (pi.majorRadius + pd.majorRadius) * 0.95f;
-            float minorThresh = (pi.minorRadius + pd.minorRadius) * 0.95f;
-            if (dist < majorThresh && dist < minorThresh) {
+            float overlapThresh = (pi.majorRadius + pd.majorRadius) * 0.9f;
+            if (dist < overlapThresh) {
                 overlapDetected = true;
                 std::string dLabel = (di == d1Idx) ? "c1" : "c2";
                 std::cout << "[Split Overlap] " << oldCell.getCellParams().name
                           << " daughter " << dLabel << " overlaps with " << pi.name
                           << " dist=" << dist
-                          << " majorThresh=" << majorThresh
-                          << " minorThresh=" << minorThresh << std::endl;
+                          << " overlapThresh=" << overlapThresh << std::endl;
                 break;
             }
         }
@@ -387,8 +385,7 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
             float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y + diff.z * diff.z);
             auto pi = cells[i].getCellParams();
             auto pd = cells[dIdx].getCellParams();
-            if (dist < (pi.majorRadius + pd.majorRadius) * 0.8f &&
-                dist < (pi.minorRadius + pd.minorRadius) * 0.8f) {
+            if (dist < (pi.majorRadius + pd.majorRadius) * 0.75f) {
                 burnInValid = false;
                 break;
             }

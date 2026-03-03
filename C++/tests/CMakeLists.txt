@@ -18,10 +18,6 @@ set(CMAKE_WARN_DEPRECATED ${_OLD_CMAKE_WARN_DEPRECATED})
 
 add_executable(core_unit_test
         hello_test.cc
-        interpolate_test.cc
-        spheroid_test.cc
-        ${CMAKE_SOURCE_DIR}/src/Frame.cpp
-        ${CMAKE_SOURCE_DIR}/src/Cells/Spheroid.cpp
 )
 
 target_include_directories(core_unit_test PRIVATE

@@ -45,11 +45,15 @@ cell:
 # Simulation settings
 simulation:
   iterations_per_cell: 500
-  background_color: 0.47
-  cell_color: 0.53
+  # value after pre-processing
+  background_color: 0.1
+  cell_color: 0.6
   padding: 0
   z_scaling: 7
-  blur_sigma: 0
+  # pre-processing parameters
+  blur_sigma: 5.0
+  sigmoid_k: 70.0
+  sigmoid_center: 0.47
 
 # Probability of changes
 prob:

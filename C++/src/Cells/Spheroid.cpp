@@ -393,26 +393,34 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
     const double invB2 = 1.0 / (b * b);
     const double invC2 = 1.0 / (c * c);
 
-    double brightnessSum = 0.0;
-    int brightnessCount = 0;
+    // Compute local brightness stats in the split search box and use an
+    // adaptive threshold. This avoids treating weak background as split evidence.
+    double roiSum = 0.0;
+    double roiSqSum = 0.0;
+    double roiMax = 0.0;
+    int roiCount = 0;
+    for (int zz = minZ; zz <= maxZ; ++zz) {
+        for (int yy = minY; yy <= maxY; ++yy) {
+            const float *row = image[zz].ptr<float>(yy);
+            for (int xx = minX; xx <= maxX; ++xx) {
+                const double px = row[xx];
+                roiSum += px;
+                roiSqSum += px * px;
+                roiMax = std::max(roiMax, px);
+                ++roiCount;
+            }
+        }
+    }
+    const double roiMean = (roiCount > 0) ? (roiSum / roiCount) : 0.0;
+    const double roiVar = (roiCount > 0) ? std::max(0.0, roiSqSum / roiCount - roiMean * roiMean) : 0.0;
+    const double roiStd = std::sqrt(roiVar);
+    float pixelThreshold = static_cast<float>(roiMean + 0.5 * roiStd);
+    pixelThreshold = std::max(pixelThreshold, 0.05f);
+    pixelThreshold = std::min(pixelThreshold, static_cast<float>(roiMax * 0.95));
 
-    // scanSpheroidVolume(
-    //     image, minX, maxX, minY, maxY, minZ, maxZ, _position,
-    //     R_T, invA2, invB2, invC2,
-    //     [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
-    //         if (val <= 1.0) {
-    //             brightnessSum += pixel;
-    //             brightnessCount++;
-    //         }
-    //     });
-    //
-    // float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
-
-
-
-    // Second pass: collect bright pixels within an expanded boundary (2.0x radius).
+    // Second pass: collect bright pixels within the split search box.
     // The expansion captures daughter blobs that may extend beyond the parent's boundary.
-    // Only pixels brighter than the mean are included (cell tissue, not background).
+    // Only pixels above local adaptive threshold are included.
     // Skip pixels closer to a neighbor cell than to this cell (prevents PCA contamination).
     // Store raw image-space coordinates for centroid-based daughter placement.
     std::vector<cv::Point3f> rawPoints;
@@ -427,7 +435,7 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
         image, minX, maxX, minY, maxY, minZ, maxZ, _position,
         R_T, invA2, invB2, invC2,
         [&](double dx, double dy, double dz, int x, int y, int z, float pixel, double /*val*/) {
-            if (pixel > 0.0) {
+            if (pixel > pixelThreshold) {
                 // Skip pixel if it's closer to any neighbor than to this cell
                     float distSqToSelf = static_cast<float>(dx * dx + dy * dy + dz * dz);
                     bool closerToNeighbor = false;
@@ -459,6 +467,14 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
     // Per-axis normalization equalizes the axes so PCA detects bimodal
     // structure (two blobs = split) regardless of direction.
     cv::Point3f split_axis;
+    float elongationRatio = 1.0f;
+
+    if (rawPoints.size() < 24) {
+        std::cout << "[Split Skip] " << _name
+                  << " insufficient bright support (" << rawPoints.size()
+                  << ", threshold=" << pixelThreshold << ")" << std::endl;
+        return std::make_tuple(*this, *this, false);
+    }
 
     if (rawPoints.size() >= 3) {
         // Build centered data matrix
@@ -525,7 +541,7 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
             split_axis = cv::Point3f(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
         }
 
-        float elongationRatio = (lambda2 > 1e-6f) ? (lambda1 / lambda2) : 1.0f;
+        elongationRatio = (lambda2 > 1e-6f) ? (lambda1 / lambda2) : 1.0f;
         std::cout << "[PCA Split] " << _name
                   << " elongation_ratio=" << elongationRatio
                   << " split_axis=(" << split_axis.x << ", " << split_axis.y << ", " << split_axis.z << ")"
@@ -534,12 +550,13 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
                   << " stddev=(" << sx << ", " << sy << ", " << sz << ")"
                   << std::endl;
     } else {
-        std::cout << "[PCA Split] " << _name
-                  << " only " << rawPoints.size() << " bright pixels found. Using random split axis."
-                  << std::endl;
-        double theta = ((double)rand() / RAND_MAX) * 2 * M_PI;
-        double phi = ((double)rand() / RAND_MAX) * M_PI;
-        split_axis = cv::Point3f(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+        return std::make_tuple(*this, *this, false);
+    }
+
+    if (elongationRatio < 1.12f) {
+        std::cout << "[Split Skip] " << _name
+                  << " weak PCA anisotropy (elongation_ratio=" << elongationRatio << ")" << std::endl;
+        return std::make_tuple(*this, *this, false);
     }
 
     // Step 4: Centroid-based daughter placement.
@@ -583,6 +600,14 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
     cv::Point3f new_position1, new_position2;
 
     if (count1 > 0 && count2 > 0) {
+        const int minClusterPoints = std::max(8, static_cast<int>(0.12 * rawPoints.size()));
+        if (count1 < minClusterPoints || count2 < minClusterPoints) {
+            std::cout << "[Split Skip] " << _name
+                      << " imbalanced clusters (" << count1 << "/" << count2
+                      << ", min=" << minClusterPoints << ")" << std::endl;
+            return std::make_tuple(*this, *this, false);
+        }
+
         // Use actual centroid positions — this is where the bright pixel
         // clusters really are. Daughters may initially overlap each other,
         // which is expected since they split from a single parent. The
@@ -597,6 +622,13 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
             (new_position1.x - new_position2.x) * (new_position1.x - new_position2.x) +
             (new_position1.y - new_position2.y) * (new_position1.y - new_position2.y) +
             (new_position1.z - new_position2.z) * (new_position1.z - new_position2.z));
+        const float minSeparation = static_cast<float>(0.9 * daughterMajorRadius);
+        if (sep < minSeparation) {
+            std::cout << "[Split Skip] " << _name
+                      << " centroid separation too small (" << sep
+                      << " < " << minSeparation << ")" << std::endl;
+            return std::make_tuple(*this, *this, false);
+        }
 
         std::cout << "[Split Placement] centroid-based:"
                   << " c1=(" << new_position1.x << "," << new_position1.y << "," << new_position1.z << ")"

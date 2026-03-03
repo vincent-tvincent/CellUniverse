@@ -16,6 +16,32 @@ double maxInCurrentDynamicRange(int depth)
             return 255.0;
     }
 }
+
+double computeAverageSliceMax(const std::vector<cv::Mat> &slices)
+{
+    if (slices.empty()) {
+        return 255.0;
+    }
+
+    double maxSum = 0.0;
+    size_t maxCount = 0;
+    for (const auto &slice : slices) {
+        if (slice.empty()) {
+            continue;
+        }
+        double maxValue = 0.0;
+        cv::minMaxLoc(slice, nullptr, &maxValue);
+        maxSum += maxValue;
+        ++maxCount;
+    }
+
+    if (maxCount == 0) {
+        return 255.0;
+    }
+
+    const double avgMax = maxSum / static_cast<double>(maxCount);
+    return (avgMax > 0.0) ? avgMax : 255.0;
+}
 } // namespace
 
 namespace utils
@@ -52,7 +78,7 @@ namespace utils
     }
 }
 
-Image processImage(const Image &image, const BaseConfig &config)
+Image processImage(const Image &image, const BaseConfig &config, double scaleFactor)
 {
     Image processedImage;
 
@@ -71,18 +97,17 @@ Image processImage(const Image &image, const BaseConfig &config)
     // const double amplifyRatio = (dynamicMax > 0.0) ? (dynamicMax/maxValue) : 1.0;
     // const double scale = (amplifyRatio > 0.0) ? (1.0 / amplifyRatio) : 1.0;
 
-    processedImage.convertTo(processedImage, CV_32F, 1/255.0);
-    cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), 10.0);
-
-    utils::applySigmoid(processedImage,50.0, config.simulation.background_color);
-    utils::applySigmoid(processedImage,20.0, 0.5);
-
-    // Gaussian blur the image
-    // use 1.5 temporarily
-    // TODO: use GaussianBlur with custom sigma
+    const double safeScale = (scaleFactor > 0.0) ? scaleFactor : 255.0;
+    // std::cout << scaleFactor << std::endl;
+    processedImage.convertTo(processedImage, CV_32F, 1.0 / safeScale);
+    cv::min(processedImage, 1.0f, processedImage);
     SimulationConfig simConfig = config.simulation;
-    //    std::cout << "The blur sigma is: " <<  simConfig.blur_sigma << std::endl;
-    cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), 1.5);
+    const double blurSigma = (simConfig.blur_sigma > 0.0f) ? simConfig.blur_sigma : 1.5;
+    cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), blurSigma);
+    const float sigmoidK = (simConfig.sigmoid_k > 0.0f) ? simConfig.sigmoid_k : 30.0f;
+    const float sigmoidCenter =
+        (simConfig.sigmoid_center >= 0.0f) ? simConfig.sigmoid_center : config.simulation.background_color;
+    utils::applySigmoid(processedImage, sigmoidK, sigmoidCenter);
 
     return processedImage;
 }
@@ -113,13 +138,14 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
             return processedZSlices;
         }
 
-        // Iterate through tiffImage, begin coversion to black and white, blurring
-        for (unsigned i = 0; i < numTiffSlices; ++i) // should we end at == slices?
+        // Convert to grayscale first, but defer preprocessing until after z-interpolation.
+        std::vector<cv::Mat> grayZSlices;
+        grayZSlices.reserve(numTiffSlices);
+        for (unsigned i = 0; i < numTiffSlices; ++i)
         {
-            cv::Mat slice = tiffImage[i].clone();
-            cv::cvtColor(slice, slice, cv::COLOR_BGR2GRAY);
-            cv::Mat processedImg = processImage(slice, config);
-            processedZSlices.push_back(processedImg);
+            cv::Mat graySlice;
+            cv::cvtColor(tiffImage[i], graySlice, cv::COLOR_BGR2GRAY);
+            grayZSlices.push_back(graySlice);
         }
 
         const int expandFactor = config.simulation.z_scaling; 
@@ -131,18 +157,29 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
         // for checking
         // std::cout << "Number of synthetic slices: " << numSynthSlices << std::endl;
         
-        // iterate through synthslices and interpolate between each "real" slice
+        // Interpolate grayscale slices first.
+        std::vector<cv::Mat> interpolatedGrayZSlices;
+        interpolatedGrayZSlices.reserve(numSynthSlices);
         for (int synthSlice = 0; synthSlice < numSynthSlices; ++synthSlice) {
             int tiffSlice = int(synthSlice / expandFactor); // "real" slice index
             if (synthSlice % expandFactor == 0) {
-                interpolatedZSlices.push_back(processedZSlices[tiffSlice]);
+                interpolatedGrayZSlices.push_back(grayZSlices[tiffSlice]);
             } else if (synthSlice % expandFactor == 1) {
-                interpolateSlices(processedZSlices[tiffSlice],
-                                  processedZSlices[tiffSlice + 1],
-                                  interpolatedZSlices,
+                interpolateSlices(grayZSlices[tiffSlice],
+                                  grayZSlices[tiffSlice + 1],
+                                  interpolatedGrayZSlices,
                                   expandFactor - 1);
             }
         }
+
+        const double avgSliceMax = computeAverageSliceMax(interpolatedGrayZSlices);
+
+        // Apply preprocessing on the full interpolated stack.
+        processedZSlices.reserve(interpolatedGrayZSlices.size());
+        for (const auto &slice : interpolatedGrayZSlices) {
+            processedZSlices.push_back(processImage(slice, config, avgSliceMax));
+        }
+        interpolatedZSlices = std::move(processedZSlices);
 
         // [PATCH] Validate synthetic slice count (only for TIFF branch)
         if (interpolatedZSlices.size() != numSynthSlices) {
@@ -167,7 +204,9 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
             cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
         }
 
-        processedZSlices.push_back(processImage(img, config));
+        const double avgSliceMax = computeAverageSliceMax({img});
+        processedZSlices.push_back(processImage(img, config, avgSliceMax));
+        interpolatedZSlices = std::move(processedZSlices);
     }
 
     std::cout << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;

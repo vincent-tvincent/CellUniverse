@@ -46,14 +46,22 @@ cell:
 simulation:
   iterations_per_cell: 500
   # value after pre-processing
-  background_color: 0.1
-  cell_color: 0.6
+  background_color: 0.01
+  cell_color: 0.5
   padding: 0
   z_scaling: 7
   # pre-processing parameters
-  blur_sigma: 5.0
+  blur_sigma: 7.0
   sigmoid_k: 70.0
-  sigmoid_center: 0.47
+  sigmoid_center: 0.445
+  sigmoid_center_offset: 0.045
+  # background calibration zone (must contain no cells)
+  # (calibration_x, calibration_y, calibration_z) is the upper-left-front corner
+  calibration_x: 20
+  calibration_y: 20
+  calibration_z: 0
+  calibration_width: 50
+  calibration_height: 31
 
 # Probability of changes
 prob:

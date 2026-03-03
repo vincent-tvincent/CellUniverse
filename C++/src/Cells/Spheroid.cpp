@@ -357,7 +357,8 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
     float effC = (preOptMinorR > 0.0f) ? std::max((float)c, preOptMinorR) : (float)c;
     float maxR = std::max({effA, effB, effC});
 
-    float splitSearchRadius = maxR * 5.0f;
+    // Conservative search window to reduce contamination from nearby structures.
+    float splitSearchRadius = maxR * 3.0f;
 
     if (preOptMajorR > 0.0f && (effA > (float)a || effC > (float)c)) {
         std::cout << "[Split PreOpt] " << _name
@@ -536,9 +537,9 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
         if (norm > 1e-6f) {
             split_axis = ev_image * (1.0f / norm);
         } else {
-            double theta = ((double)rand() / RAND_MAX) * 2 * M_PI;
-            double phi = ((double)rand() / RAND_MAX) * M_PI;
-            split_axis = cv::Point3f(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+            std::cout << "[Split Skip] " << _name
+                      << " degenerate PCA axis (norm=" << norm << ")" << std::endl;
+            return std::make_tuple(*this, *this, false);
         }
 
         elongationRatio = (lambda2 > 1e-6f) ? (lambda1 / lambda2) : 1.0f;
@@ -637,12 +638,9 @@ std::tuple<Spheroid, Spheroid, bool> Spheroid::getSplitCells(const std::vector<c
                   << " daughterMajorR=" << daughterMajorRadius
                   << " daughterMinorR=" << daughterMinorRadius << std::endl;
     } else {
-        // All pixels on one side — fall back to small offset along split axis
-        float offset = static_cast<float>(daughterMajorRadius * 0.5);
-        new_position1 = _position + split_axis * offset;
-        new_position2 = _position - split_axis * offset;
-        std::cout << "[Split Placement] one-sided (" << count1 << "/" << count2
-                  << "), using fixed offset=" << offset << std::endl;
+        std::cout << "[Split Skip] " << _name
+                  << " one-sided projection (" << count1 << "/" << count2 << ")" << std::endl;
+        return std::make_tuple(*this, *this, false);
     }
 
 

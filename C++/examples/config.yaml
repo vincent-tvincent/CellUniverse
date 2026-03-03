@@ -70,7 +70,7 @@ prob:
   perturbation: 0.97
   split: 0.03
   split_cost: 1 # accpet more than -value
-  split_elongation_threshold: 4 # skip split burn-in if PCA elongation ratio < this
+  split_elongation_threshold: 1.3 # skip split burn-in if PCA elongation ratio < this
 #  combine: 0.1
 #  camera_shift: 0.0
 

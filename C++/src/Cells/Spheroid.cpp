@@ -349,7 +349,8 @@ Spheroid Spheroid::getParameterizedCell(std::unordered_map<std::string, float> p
 std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::vector<cv::Mat> &image, float z_scaling,
     const std::vector<cv::Point3f> &neighborCenters,
     float preOptMajorR, float preOptMinorR,
-    float preOptX, float preOptY, float preOptZ) const {
+    float preOptX, float preOptY, float preOptZ,
+    float frameBackground) const {
     // Step 1: Get the bounding box, expanded for split detection.
     // Use pre-optimization radii if available (Phase 1 may collapse the cell).
     // Use pre-optimization position if available (Phase 1 may shift the cell
@@ -360,7 +361,7 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
     float effC = (preOptMinorR > 0.0f) ? std::max((float)c, preOptMinorR) : (float)c;
     float maxR = std::max({effA, effB, effC});
 
-    float splitSearchRadius = maxR * 5.0f;
+    float splitSearchRadius = maxR * 3.0f;
 
     // PCA center: use pre-opt position when available so PCA sees both blobs
     // from the original midpoint, not the Phase-1-shifted position.
@@ -430,20 +431,22 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
     float pixelThreshold = static_cast<float>(roiMean + 0.5 * roiStd);
     pixelThreshold = std::max(pixelThreshold, 0.05f);
     pixelThreshold = std::min(pixelThreshold, static_cast<float>(roiMax * 0.95));
-    double brightnessSum = 0.0;
-    int brightnessCount = 0;
-
-    scanSpheroidVolume(
-         image, minX, maxX, minY, maxY, minZ, maxZ, _position,
-         R_T, invA2, invB2, invC2,
-         [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
-             if (val <= 1.0) {
-                 brightnessSum += pixel;
-                 brightnessCount++;
-             }
-         });
-
-     float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
+    // Recenter pass should not include near-background voxels.
+    const float recenterThreshold = std::max(pixelThreshold, frameBackground + 0.015f);
+    // double brightnessSum = 0.0;
+    // int brightnessCount = 0;
+    //
+    // scanSpheroidVolume(
+    //      image, minX, maxX, minY, maxY, minZ, maxZ, _position,
+    //      R_T, invA2, invB2, invC2,
+    //      [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
+    //          if (val <= 1.0) {
+    //              brightnessSum += pixel;
+    //              brightnessCount++;
+    //          }
+    //      });
+    //
+    //  float meanBrightness = (brightnessCount > 0) ? (float)(brightnessSum / brightnessCount) : 0.4f;
 
     // Second pass: collect bright pixels within the split search box.
     // The expansion captures daughter blobs that may extend beyond the parent's boundary.
@@ -524,7 +527,7 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
                 image, minX, maxX, minY, maxY, minZ, maxZ, _position,
                 R_T, invA2, invB2, invC2,
                 [&](double /*dx*/, double /*dy*/, double /*dz*/, int x, int y, int z, float pixel, double /*val*/) {
-                    if (pixel > meanBrightness) {
+                    if (pixel > recenterThreshold) {
                         float selfDx = static_cast<float>(x) - pcaCenter.x;
                         float selfDy = static_cast<float>(y) - pcaCenter.y;
                         float selfDz = static_cast<float>(z) - pcaCenter.z;

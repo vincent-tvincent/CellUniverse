@@ -540,20 +540,14 @@ void Lineage::optimize(int frameIndex)
 
     // ============================================================
     // Phase 2: Post-optimization split detection
-    // Greedy acceptance: evaluate candidates from current baseline,
-    // apply only the best one, then recompute and repeat.
-    // This avoids accepting multiple overlapping candidates that each
-    // looked good only against an outdated baseline.
+    // Evaluate each original cell independently from the same baseline.
+    // Revert each trial, then apply all accepted splits together.
     // ============================================================
     const size_t initialCellCount = frame.cells.size();
     std::cout << "[Phase 2] Split detection for frame " << displayFrame
               << " (" << initialCellCount << " cells)" << std::endl;
 
-    const double splitAttemptProb = std::clamp(static_cast<double>(config.prob.split), 0.0, 1.0);
-    const double minRelativeSplitGain = 0.001; // require >=0.1% relative cost reduction
-    const size_t maxSplitsThisFrame = std::max<size_t>(1, initialCellCount);
-    std::mt19937 splitRng(std::random_device{}());
-    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    const double minRelativeSplitGain = 0.01; // require >=1.0% relative cost reduction
 
     struct SplitCandidate {
         std::string parentName;
@@ -562,35 +556,25 @@ void Lineage::optimize(int frameIndex)
         double costDiff;
         double relGain;
     };
-    size_t splitsApplied = 0;
-    for (size_t splitRound = 0; splitRound < maxSplitsThisFrame; ++splitRound) {
-        if (splitAttemptProb <= 0.0) {
-            break;
-        }
+    std::vector<SplitCandidate> candidates;
+    candidates.reserve(initialCellCount);
+    const double baselineCost = frame.calculateCost(frame.getSynthFrame());
 
-        const double baselineCost = frame.calculateCost(frame.getSynthFrame());
-        SplitCandidate bestCandidate;
-        bool hasBest = false;
+    std::vector<std::string> cellNames;
+    cellNames.reserve(frame.cells.size());
+    for (const auto &cell : frame.cells) {
+        cellNames.push_back(cell.getCellParams().name);
+    }
 
-        std::vector<std::string> cellNames;
-        cellNames.reserve(frame.cells.size());
-        for (const auto &cell : frame.cells) {
-            cellNames.push_back(cell.getCellParams().name);
-        }
-
-        for (const auto &name : cellNames) {
-            if (splitAttemptProb < 1.0 && u01(splitRng) > splitAttemptProb) {
-                continue;
+    for (const auto &name : cellNames) {
+        size_t idx = SIZE_MAX;
+        for (size_t j = 0; j < frame.cells.size(); ++j) {
+            if (frame.cells[j].getCellParams().name == name) {
+                idx = j;
+                break;
             }
-
-            size_t idx = SIZE_MAX;
-            for (size_t j = 0; j < frame.cells.size(); ++j) {
-                if (frame.cells[j].getCellParams().name == name) {
-                    idx = j;
-                    break;
-                }
-            }
-            if (idx == SIZE_MAX) continue;
+        }
+        if (idx == SIZE_MAX) continue;
 
         // Look up pre-optimization radii and position for this cell
         float preOptMajorR = 0.0f, preOptMinorR = 0.0f;
@@ -608,52 +592,46 @@ void Lineage::optimize(int frameIndex)
         costDiff = result.first;
         std::function<void(bool)> callback = result.second;
 
-            const double relGain = (baselineCost > 1e-9) ? (-costDiff / baselineCost) : 0.0;
-            const bool passAbsGate = costDiff < -config.prob.split_cost;
-            const bool passRelGate = relGain >= minRelativeSplitGain;
+        const double relGain = (baselineCost > 1e-9) ? (-costDiff / baselineCost) : 0.0;
+        const bool passAbsGate = costDiff < -config.prob.split_cost;
+        const bool passRelGate = relGain >= minRelativeSplitGain;
 
-            if (passAbsGate && passRelGate) {
-                Spheroid child1 = frame.cells[frame.cells.size() - 2];
-                Spheroid child2 = frame.cells[frame.cells.size() - 1];
-
-                if (!hasBest || costDiff < bestCandidate.costDiff) {
-                    bestCandidate = {name, child1, child2, costDiff, relGain};
-                    hasBest = true;
-                }
-            }
-
-            // Always revert this trial candidate.
-            callback(false);
+        if (passAbsGate && passRelGate) {
+            Spheroid child1 = frame.cells[frame.cells.size() - 2];
+            Spheroid child2 = frame.cells[frame.cells.size() - 1];
+            candidates.push_back({name, child1, child2, costDiff, relGain});
         }
 
-        if (!hasBest) {
-            break;
-        }
+        // Always revert this trial candidate.
+        callback(false);
+    }
 
+    size_t splitsApplied = 0;
+    for (const auto &candidate : candidates) {
         size_t idx = SIZE_MAX;
         for (size_t j = 0; j < frame.cells.size(); ++j) {
-            if (frame.cells[j].getCellParams().name == bestCandidate.parentName) {
+            if (frame.cells[j].getCellParams().name == candidate.parentName) {
                 idx = j;
                 break;
             }
         }
         if (idx == SIZE_MAX) {
-            break;
+            continue;
         }
 
         frame.cells.erase(frame.cells.begin() + idx);
-        frame.cells.push_back(bestCandidate.child1);
-        frame.cells.push_back(bestCandidate.child2);
-        frame.regenerateSynthFrame();
+        frame.cells.push_back(candidate.child1);
+        frame.cells.push_back(candidate.child2);
         splitsApplied++;
 
-        std::cout << "[Split Accepted] " << bestCandidate.parentName << " split in frame "
-                  << displayFrame << " (diff=" << bestCandidate.costDiff
-                  << ", rel_gain=" << bestCandidate.relGain << ")" << std::endl;
+        std::cout << "[Split Accepted] " << candidate.parentName << " split in frame "
+                  << displayFrame << " (diff=" << candidate.costDiff
+                  << ", rel_gain=" << candidate.relGain << ")" << std::endl;
     }
 
     // Regenerate synth frame and run post-split perturbation
     if (splitsApplied > 0) {
+        frame.regenerateSynthFrame();
         size_t postSplitIters = 2 * config.simulation.iterations_per_cell * splitsApplied;
         for (size_t j = 0; j < postSplitIters; ++j) {
             auto presult = frame.perturb();

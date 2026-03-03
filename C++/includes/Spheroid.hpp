@@ -118,7 +118,8 @@ class Spheroid
         std::tuple<Spheroid, Spheroid, bool, float> getSplitCells(const std::vector<cv::Mat> &image, float z_scaling,
             const std::vector<cv::Point3f> &neighborCenters = {},
             float preOptMajorR = 0.0f, float preOptMinorR = 0.0f,
-            float preOptX = 0.0f, float preOptY = 0.0f, float preOptZ = 0.0f) const;
+            float preOptX = 0.0f, float preOptY = 0.0f, float preOptZ = 0.0f,
+            float frameBackground = 0.0f) const;
 
         std::vector<std::pair<float, cv::Vec3f>> performPCA(const std::vector<cv::Point3f> &points) const;
 

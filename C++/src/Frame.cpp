@@ -304,7 +304,10 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
     Spheroid child2;
     bool valid;
     float elongationRatio;
-    std::tie(child1, child2, valid, elongationRatio) = oldCell.getSplitCells(_realFrame, simulationConfig.z_scaling, neighborCenters, preOptMajorR, preOptMinorR, preOptX, preOptY, preOptZ);
+    std::tie(child1, child2, valid, elongationRatio) = oldCell.getSplitCells(
+        _realFrame, simulationConfig.z_scaling, neighborCenters,
+        preOptMajorR, preOptMinorR, preOptX, preOptY, preOptZ,
+        simulationConfig.background_color);
     if (!valid)
     {
         std::cout << "[Split Skip] " << oldCell.getCellParams().name

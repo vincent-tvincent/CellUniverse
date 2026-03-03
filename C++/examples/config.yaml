@@ -71,6 +71,18 @@ prob:
   split: 0.03
   split_cost: 1 # accpet more than -value
   split_elongation_threshold: 1.3 # skip split burn-in if PCA elongation ratio < this
+  min_relative_split_gain_base: 0.01
+  min_relative_split_gain_strict: 0.02
+  phase1_accept_rate_threshold: 0.02
+  enable_brightness_recovery: true
+  nonsplit_shrink_trigger_ratio: 0.78
+  nonsplit_recover_target_ratio: 0.90
+  split_shrink_trigger_ratio: 0.55
+  split_recover_target_ratio: 0.80
+  brightness_retry_step: 0.02
+  brightness_retry_max_attempts: 10
+  brightness_retry_iters_per_attempt: 120
+  brightness_retry_background_margin: 0.01
 #  combine: 0.1
 #  camera_shift: 0.0
 

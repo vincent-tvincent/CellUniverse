@@ -40,6 +40,8 @@ public:
                                   float splitElongationThreshold = 1.3f);
     Cost gradientDescent();
     std::vector<cv::Mat> getSynthFrame();
+    const std::vector<cv::Mat> &getRealFrame() const { return _realFrame; }
+    float getBackgroundColor() const { return simulationConfig.background_color; }
     void regenerateSynthFrame() { _synthFrame = generateSynthFrame(); }
     std::string getImageName() const { return imageName; }
     std::vector<Spheroid> cells;

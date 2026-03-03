@@ -1,4 +1,5 @@
 #include "../includes/Lineage.hpp"
+#include <set>
 
 namespace {
 double maxInCurrentDynamicRange(int depth)
@@ -495,6 +496,8 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
             frames.emplace_back(real_frame, frameSimConfig, std::vector<Spheroid>(), outputPath, file_name);
         }
     }
+
+    initializeBrightnessFromGroundTruth();
 }
 
 
@@ -506,6 +509,32 @@ void Lineage::optimize(int frameIndex)
     }
 
     Frame &frame = frames[frameIndex];
+    constexpr double kPi = 3.14159265358979323846;
+
+    auto spheroidVolume = [kPi](const Spheroid &cell) -> double {
+        const auto p = cell.getCellParams();
+        return (4.0 / 3.0) * kPi * static_cast<double>(p.majorRadius) *
+               static_cast<double>(p.majorRadius) * static_cast<double>(p.minorRadius);
+    };
+    auto shapeVolume = [kPi](float majorR, float minorR) -> double {
+        return (4.0 / 3.0) * kPi * static_cast<double>(majorR) *
+               static_cast<double>(majorR) * static_cast<double>(minorR);
+    };
+    auto findCellIndexByName = [&frame](const std::string &name) -> size_t {
+        for (size_t i = 0; i < frame.cells.size(); ++i) {
+            if (frame.cells[i].getCellParams().name == name) {
+                return i;
+            }
+        }
+        return SIZE_MAX;
+    };
+
+    std::map<std::string, double> previousVolumes;
+    if (frameIndex > 0) {
+        for (const auto &prevCell : frames[frameIndex - 1].cells) {
+            previousVolumes[prevCell.getCellParams().name] = spheroidVolume(prevCell);
+        }
+    }
 
     // Regenerate _synthFrame so it reflects the current cells.
     // After copyCellsForward(), _synthFrame is stale (background-only from
@@ -520,12 +549,9 @@ void Lineage::optimize(int frameIndex)
     Cost costDiff = 0;
     double residSum = 0;
     double residCount = 0;
+    size_t phase1AcceptedCount = 0;
     double ovrResidual = 0;
 
-    // Save pre-optimization cell shapes before Phase 1.
-    // Phase 1 may collapse elongated/pancaked cells to spheres, shrinking the
-    // search area for split detection. We preserve the original radii so the
-    // PCA search boundary doesn't shrink.
     struct PreOptShape {
         float majorR;
         float minorR;
@@ -538,10 +564,6 @@ void Lineage::optimize(int frameIndex)
                                      params.x, params.y, params.z};
     }
 
-    // ============================================================
-    // Phase 1: Perturbation-only optimization
-    // Settle all existing cells into their best positions first.
-    // ============================================================
     int displayFrame = firstFrame + frameIndex;
     std::cout << "[Phase 1] Perturbation optimization for frame " << displayFrame
               << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)" << std::endl;
@@ -567,19 +589,26 @@ void Lineage::optimize(int frameIndex)
         auto result = frame.perturb();
         costDiff = result.first;
         std::function<void(bool)> accept = result.second;
-        accept(costDiff < 0);
+        const bool accepted = (costDiff < 0);
+        accept(accepted);
+        if (accepted) {
+            phase1AcceptedCount++;
+        }
     }
 
-    // ============================================================
-    // Phase 2: Post-optimization split detection
-    // Evaluate each original cell independently from the same baseline.
-    // Revert each trial, then apply all accepted splits together.
-    // ============================================================
     const size_t initialCellCount = frame.cells.size();
     std::cout << "[Phase 2] Split detection for frame " << displayFrame
               << " (" << initialCellCount << " cells)" << std::endl;
 
-    const double minRelativeSplitGain = 0.01; // require >=1.0% relative cost reduction
+    const double acceptedFrac =
+        (totalIterations > 0) ? (static_cast<double>(phase1AcceptedCount) / static_cast<double>(totalIterations)) : 0.0;
+    const double minRelativeSplitGain =
+        (acceptedFrac < config.prob.phase1_accept_rate_threshold)
+            ? config.prob.min_relative_split_gain_strict
+            : config.prob.min_relative_split_gain_base;
+    std::cout << "[Phase 2 Gate] frame " << displayFrame
+              << " phase1_accept_rate=" << acceptedFrac
+              << " min_rel_gain=" << minRelativeSplitGain << std::endl;
 
     struct SplitCandidate {
         std::string parentName;
@@ -587,6 +616,7 @@ void Lineage::optimize(int frameIndex)
         Spheroid child2;
         double costDiff;
         double relGain;
+        double expectedDaughterVolume;
     };
     std::vector<SplitCandidate> candidates;
     candidates.reserve(initialCellCount);
@@ -599,16 +629,11 @@ void Lineage::optimize(int frameIndex)
     }
 
     for (const auto &name : cellNames) {
-        size_t idx = SIZE_MAX;
-        for (size_t j = 0; j < frame.cells.size(); ++j) {
-            if (frame.cells[j].getCellParams().name == name) {
-                idx = j;
-                break;
-            }
+        const size_t idx = findCellIndexByName(name);
+        if (idx == SIZE_MAX) {
+            continue;
         }
-        if (idx == SIZE_MAX) continue;
 
-        // Look up pre-optimization radii and position for this cell
         float preOptMajorR = 0.0f, preOptMinorR = 0.0f;
         float preOptX = 0.0f, preOptY = 0.0f, preOptZ = 0.0f;
         auto it = preOptShapes.find(name);
@@ -631,7 +656,10 @@ void Lineage::optimize(int frameIndex)
         if (passAbsGate && passRelGate) {
             Spheroid child1 = frame.cells[frame.cells.size() - 2];
             Spheroid child2 = frame.cells[frame.cells.size() - 1];
-            candidates.push_back({name, child1, child2, costDiff, relGain});
+            const double parentVol = (preOptMajorR > 0.0f && preOptMinorR > 0.0f)
+                                         ? shapeVolume(preOptMajorR, preOptMinorR)
+                                         : spheroidVolume(frame.cells[idx]);
+            candidates.push_back({name, child1, child2, costDiff, relGain, parentVol * 0.5});
         } else {
             std::cout << "[Split Skip] " << name
                       << " absGate=" << (passAbsGate ? "pass" : "fail")
@@ -643,19 +671,20 @@ void Lineage::optimize(int frameIndex)
                       << std::endl;
         }
 
-        // Always revert this trial candidate.
         callback(false);
     }
 
     size_t splitsApplied = 0;
+    struct AcceptedSplit {
+        std::string parentName;
+        std::string child1Name;
+        std::string child2Name;
+        double expectedDaughterVolume;
+    };
+    std::vector<AcceptedSplit> acceptedSplits;
+    acceptedSplits.reserve(candidates.size());
     for (const auto &candidate : candidates) {
-        size_t idx = SIZE_MAX;
-        for (size_t j = 0; j < frame.cells.size(); ++j) {
-            if (frame.cells[j].getCellParams().name == candidate.parentName) {
-                idx = j;
-                break;
-            }
-        }
+        size_t idx = findCellIndexByName(candidate.parentName);
         if (idx == SIZE_MAX) {
             continue;
         }
@@ -665,12 +694,16 @@ void Lineage::optimize(int frameIndex)
         frame.cells.push_back(candidate.child2);
         splitsApplied++;
 
+        acceptedSplits.push_back({candidate.parentName,
+                                  candidate.child1.getCellParams().name,
+                                  candidate.child2.getCellParams().name,
+                                  candidate.expectedDaughterVolume});
+
         std::cout << "[Split Accepted] " << candidate.parentName << " split in frame "
                   << displayFrame << " (diff=" << candidate.costDiff
                   << ", rel_gain=" << candidate.relGain << ")" << std::endl;
     }
 
-    // Regenerate synth frame and run post-split perturbation
     if (splitsApplied > 0) {
         frame.regenerateSynthFrame();
         size_t postSplitIters = 2 * config.simulation.iterations_per_cell * splitsApplied;
@@ -678,6 +711,161 @@ void Lineage::optimize(int frameIndex)
             auto presult = frame.perturb();
             presult.second(presult.first < 0);
         }
+    }
+
+    if (config.prob.enable_brightness_recovery && frameIndex > 0 && !frame.cells.empty()) {
+        const float brightnessFloor = std::clamp(frame.getBackgroundColor() + config.prob.brightness_retry_background_margin, 0.0f, 1.0f);
+        const int maxAttempts = std::max(0, config.prob.brightness_retry_max_attempts);
+        const int itersPerAttempt = std::max(0, config.prob.brightness_retry_iters_per_attempt);
+        const float step = std::max(0.001f, config.prob.brightness_retry_step);
+
+        std::set<std::string> splitChildren;
+        for (const auto &s : acceptedSplits) {
+            splitChildren.insert(s.child1Name);
+            splitChildren.insert(s.child2Name);
+        }
+
+        auto runBrightnessRecovery = [&](const std::string &name, double targetVolume, const std::string &reason) {
+            if (targetVolume <= 0.0 || maxAttempts <= 0) {
+                return;
+            }
+            size_t idx = findCellIndexByName(name);
+            if (idx == SIZE_MAX) {
+                return;
+            }
+
+            for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+                idx = findCellIndexByName(name);
+                if (idx == SIZE_MAX) {
+                    return;
+                }
+                const double currentVolume = spheroidVolume(frame.cells[idx]);
+                if (currentVolume >= targetVolume) {
+                    std::cout << "[Brightness Recovery] frame " << displayFrame
+                              << " cell=" << name
+                              << " status=success"
+                              << " reason=" << reason
+                              << " attempts=" << (attempt - 1)
+                              << " volume=" << currentVolume
+                              << " target=" << targetVolume << std::endl;
+                    return;
+                }
+
+                const float oldBrightness = frame.cells[idx].getBrightness();
+                if (oldBrightness <= brightnessFloor + 1e-6f) {
+                    std::cout << "[Brightness Recovery] frame " << displayFrame
+                              << " cell=" << name
+                              << " status=stopped_floor"
+                              << " reason=" << reason
+                              << " attempts=" << (attempt - 1)
+                              << " brightness=" << oldBrightness
+                              << " floor=" << brightnessFloor
+                              << " volume=" << currentVolume
+                              << " target=" << targetVolume << std::endl;
+                    return;
+                }
+
+                const float newBrightness = std::max(brightnessFloor, oldBrightness - step);
+                frame.cells[idx].setBrightness(newBrightness, true);
+                frame.regenerateSynthFrame();
+                for (int k = 0; k < itersPerAttempt; ++k) {
+                    auto recoveryPerturb = frame.perturb();
+                    recoveryPerturb.second(recoveryPerturb.first < 0);
+                }
+
+                const double volumeAfter = spheroidVolume(frame.cells[idx]);
+                std::cout << "[Brightness Recovery] frame " << displayFrame
+                          << " cell=" << name
+                          << " reason=" << reason
+                          << " attempt=" << attempt
+                          << " brightness=" << oldBrightness << "->" << newBrightness
+                          << " volume=" << currentVolume << "->" << volumeAfter
+                          << " target=" << targetVolume << std::endl;
+            }
+
+            idx = findCellIndexByName(name);
+            if (idx != SIZE_MAX) {
+                const double finalVolume = spheroidVolume(frame.cells[idx]);
+                std::cout << "[Brightness Recovery] frame " << displayFrame
+                          << " cell=" << name
+                          << " status=max_attempts"
+                          << " reason=" << reason
+                          << " attempts=" << maxAttempts
+                          << " final_volume=" << finalVolume
+                          << " target=" << targetVolume << std::endl;
+            }
+        };
+
+        for (const auto &cell : frame.cells) {
+            const auto name = cell.getCellParams().name;
+            if (splitChildren.find(name) != splitChildren.end()) {
+                continue;
+            }
+            auto prevIt = previousVolumes.find(name);
+            if (prevIt == previousVolumes.end()) {
+                continue;
+            }
+            const double prevVolume = prevIt->second;
+            if (prevVolume <= 0.0) {
+                continue;
+            }
+            const double curVolume = spheroidVolume(cell);
+            if (curVolume < prevVolume * config.prob.nonsplit_shrink_trigger_ratio) {
+                const double targetVolume = prevVolume * config.prob.nonsplit_recover_target_ratio;
+                runBrightnessRecovery(name, targetVolume, "non_split_shrink");
+            }
+        }
+
+        for (const auto &splitInfo : acceptedSplits) {
+            const double triggerVolume = splitInfo.expectedDaughterVolume * config.prob.split_shrink_trigger_ratio;
+            const double targetVolume = splitInfo.expectedDaughterVolume * config.prob.split_recover_target_ratio;
+            for (const auto &childName : {splitInfo.child1Name, splitInfo.child2Name}) {
+                const size_t idx = findCellIndexByName(childName);
+                if (idx == SIZE_MAX) {
+                    continue;
+                }
+                const double childVolume = spheroidVolume(frame.cells[idx]);
+                if (childVolume < triggerVolume) {
+                    runBrightnessRecovery(childName, targetVolume, "split_shrink");
+                }
+            }
+        }
+    }
+
+    updateFrameCellBrightness(frameIndex);
+}
+
+void Lineage::initializeBrightnessFromGroundTruth() {
+    if (frames.empty()) {
+        return;
+    }
+    if (frames[0].cells.empty()) {
+        std::cout << "[Brightness Init] frame 1 has no initial cells; skipped" << std::endl;
+        return;
+    }
+    updateFrameCellBrightness(0);
+    std::cout << "[Brightness Init] initialized " << frames[0].cells.size()
+              << " cells from frame 1 ground truth" << std::endl;
+}
+
+void Lineage::updateFrameCellBrightness(int frameIndex) {
+    if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size()) {
+        return;
+    }
+    Frame &frame = frames[frameIndex];
+    const auto &realFrame = frame.getRealFrame();
+    for (auto &cell : frame.cells) {
+        const auto params = cell.getCellParams();
+        const float oldBrightness = cell.getBrightness();
+        const float measuredBrightness = cell.estimateBrightnessFromFrame(realFrame);
+        cell.setBrightness(measuredBrightness, true);
+        std::cout << "[Brightness Update] frame " << (firstFrame + frameIndex)
+                  << " cell=" << params.name
+                  << " old=" << oldBrightness
+                  << " new=" << cell.getBrightness()
+                  << " min=" << cell.getBrightnessMin()
+                  << " max=" << cell.getBrightnessMax()
+                  << std::endl;
     }
 }
 

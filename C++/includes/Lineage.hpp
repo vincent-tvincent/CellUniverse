@@ -43,6 +43,8 @@ public:
     std::vector<std::string> getCellNames(int frameIndex) const;
 
 private:
+   void initializeBrightnessFromGroundTruth();
+   void updateFrameCellBrightness(int frameIndex);
    BaseConfig config;
    std::vector<Frame> frames;
    std::string outputPath;

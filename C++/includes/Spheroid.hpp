@@ -33,14 +33,15 @@ public:
     float theta_x; // rotation about x-axis (radians)
     float theta_y; // rotation about y-axis (radians)
     float theta_z; // rotation about z-axis (radians)
+    float brightness;
 
-    SpheroidParams() : CellParams(""), x(0), y(0), z(0), majorRadius(0), minorRadius(0), theta_x(0), theta_y(0), theta_z(0) {}
+    SpheroidParams() : CellParams(""), x(0), y(0), z(0), majorRadius(0), minorRadius(0), theta_x(0), theta_y(0), theta_z(0), brightness(0.5f) {}
     SpheroidParams(const std::string &name, float x, float y, float z, float majorRadius, float minorRadius)
-        : CellParams(name), x(x), y(y), z(z), majorRadius(majorRadius), minorRadius(minorRadius), theta_x(0), theta_y(0), theta_z(0) {}
+        : CellParams(name), x(x), y(y), z(z), majorRadius(majorRadius), minorRadius(minorRadius), theta_x(0), theta_y(0), theta_z(0), brightness(0.5f) {}
     SpheroidParams(const std::string &name, float x, float y, float z, float majorRadius, float minorRadius, float theta_x, float theta_y, float theta_z)
-        : CellParams(name), x(x), y(y), z(z), majorRadius(majorRadius), minorRadius(minorRadius), theta_x(theta_x), theta_y(theta_y), theta_z(theta_z) {}
+        : CellParams(name), x(x), y(y), z(z), majorRadius(majorRadius), minorRadius(minorRadius), theta_x(theta_x), theta_y(theta_y), theta_z(theta_z), brightness(0.5f) {}
     SpheroidParams(const std::string &name, float x, float y, float z, std::vector<float> _x_vec, std::vector<float> _y_vec, std::vector<float> _z_vec)
-        : CellParams(name), x(x), y(y), z(z), x_vec(_x_vec), y_vec(_y_vec), z_vec(_z_vec)
+        : CellParams(name), x(x), y(y), z(z), x_vec(_x_vec), y_vec(_y_vec), z_vec(_z_vec), brightness(0.5f)
         {
             // assuming this is the x and y vectors are the same and z is the smaller one
             majorRadius = std::sqrt((_x_vec[0]*_x_vec[0])+(_x_vec[1]*_x_vec[1])+(_x_vec[2]*_x_vec[2]));
@@ -82,6 +83,10 @@ class Spheroid
         double _theta_x;  // rotation angle about x-axis (radians)
         double _theta_y;  // rotation angle about y-axis (radians)
         double _theta_z;  // rotation angle about z-axis (radians)
+        float _brightness;
+        float _brightnessMin;
+        float _brightnessMax;
+        bool _brightnessInitialized;
         bool dormant;
 
         // Inverse rotation: transforms world-space displacement back to local (upright) frame
@@ -99,7 +104,8 @@ class Spheroid
         
         Spheroid(const SpheroidParams &init_props);
         
-        Spheroid() : _major_radius(0), _minor_radius(0), _rotation(0), _theta_x(0), _theta_y(0), _theta_z(0), dormant(false) {}
+        Spheroid() : _major_radius(0), _minor_radius(0), _rotation(0), _theta_x(0), _theta_y(0), _theta_z(0),
+                     _brightness(0.5f), _brightnessMin(0.5f), _brightnessMax(0.5f), _brightnessInitialized(false), dormant(false) {}
 
         void printCellInfo() const {
             std::cout << "Spheroid name: " << _name << " x: " << _position.x << " y: " << _position.y << " z: " << _position.z << " majorRadius: " << _major_radius << " minorRadius: " << _minor_radius << " theta_x: " << _theta_x << " theta_y: " << _theta_y << " theta_z: " << _theta_z << " isDormant: " << dormant << std::endl;
@@ -120,6 +126,13 @@ class Spheroid
             float preOptMajorR = 0.0f, float preOptMinorR = 0.0f,
             float preOptX = 0.0f, float preOptY = 0.0f, float preOptZ = 0.0f,
             float frameBackground = 0.0f) const;
+
+        float estimateBrightnessFromFrame(const std::vector<cv::Mat> &frame) const;
+        void setBrightness(float brightness, bool updateHistory = true);
+        float getBrightness() const { return _brightness; }
+        float getBrightnessMin() const { return _brightnessMin; }
+        float getBrightnessMax() const { return _brightnessMax; }
+        bool hasBrightnessHistory() const { return _brightnessInitialized; }
 
         std::vector<std::pair<float, cv::Vec3f>> performPCA(const std::vector<cv::Point3f> &points) const;
 

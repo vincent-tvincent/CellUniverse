@@ -1,6 +1,7 @@
 #include "../../includes/Spheroid.hpp"
 #include <random>
 #include <type_traits>
+#include <limits>
 // #include <iostream>
 
 namespace {
@@ -157,6 +158,8 @@ Spheroid::Spheroid(const SpheroidParams &init_props)
           _major_radius(init_props.majorRadius), _minor_radius(init_props.minorRadius),  // BUG FIX: was majorRadius
           _rotation(0),
           _theta_x(init_props.theta_x), _theta_y(init_props.theta_y), _theta_z(init_props.theta_z),
+          _brightness(init_props.brightness), _brightnessMin(init_props.brightness), _brightnessMax(init_props.brightness),
+          _brightnessInitialized(true),
           dormant(false)
 {
     _major_radius = std::fmax(_major_radius, cellConfig.minMajorRadius);
@@ -175,6 +178,7 @@ Spheroid::Spheroid(const SpheroidParams &init_props)
     if (a <= 0 || b <= 0 || c <= 0) {
         throw std::invalid_argument("Spheroid radii must be positive");
     }
+    setBrightness(_brightness, true);
 
     // No matrix construction needed — draw() uses analytic inverse rotation
     // // DEBUG: Print to verify values — remove after confirming correctness
@@ -249,7 +253,8 @@ void Spheroid::draw(cv::Mat &image, SimulationConfig simulationConfig, cv::Mat *
         R_T, invA2, invB2, invC2,
         [&](int x, int y, double val) {
             if (val <= 1.0) {
-                image.at<float>(y, x) = simulationConfig.cell_color;
+                const float drawBrightness = _brightnessInitialized ? _brightness : simulationConfig.cell_color;
+                image.at<float>(y, x) = drawBrightness;
             }
         });
 }
@@ -306,7 +311,12 @@ void Spheroid::drawOutline(cv::Mat &image, float color, float z) const {
         _theta_x + cellConfig.thetaX.getPerturbOffset(),
         _theta_y + cellConfig.thetaY.getPerturbOffset(),
         _theta_z + cellConfig.thetaZ.getPerturbOffset());
-    return Spheroid(spheroidParams);
+    Spheroid perturbed(spheroidParams);
+    perturbed._brightness = _brightness;
+    perturbed._brightnessMin = _brightnessMin;
+    perturbed._brightnessMax = _brightnessMax;
+    perturbed._brightnessInitialized = _brightnessInitialized;
+    return perturbed;
 }
 
 Spheroid Spheroid::getParameterizedCell(std::unordered_map<std::string, float> params) const {
@@ -343,7 +353,12 @@ Spheroid Spheroid::getParameterizedCell(std::unordered_map<std::string, float> p
         _theta_x + thetaXOffset,
         _theta_y + thetaYOffset,
         _theta_z + thetaZOffset);
-    return Spheroid(spheroidParams);
+    Spheroid parameterized(spheroidParams);
+    parameterized._brightness = _brightness;
+    parameterized._brightnessMin = _brightnessMin;
+    parameterized._brightnessMax = _brightnessMax;
+    parameterized._brightnessInitialized = _brightnessInitialized;
+    return parameterized;
 }
 
 std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::vector<cv::Mat> &image, float z_scaling,
@@ -744,6 +759,14 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
     Spheroid cell2(SpheroidParams(
         _name + "1", new_position2.x, new_position2.y, new_position2.z,
         daughterMajorRadius, daughterMinorRadius, _theta_x, _theta_y, _theta_z));
+    cell1._brightness = _brightness;
+    cell2._brightness = _brightness;
+    cell1._brightnessMin = _brightnessMin;
+    cell1._brightnessMax = _brightnessMax;
+    cell2._brightnessMin = _brightnessMin;
+    cell2._brightnessMax = _brightnessMax;
+    cell1._brightnessInitialized = _brightnessInitialized;
+    cell2._brightnessInitialized = _brightnessInitialized;
 
     bool constraints = cell1.checkConstraints() && cell2.checkConstraints();
     return std::make_tuple(Spheroid(cell1), Spheroid(cell2), constraints, elongationRatio);
@@ -792,7 +815,60 @@ bool Spheroid::checkConstraints() const {
 }
 
 SpheroidParams Spheroid::getCellParams() const {
-    return SpheroidParams(_name, _position.x, _position.y, _position.z, _major_radius, _minor_radius, _theta_x, _theta_y, _theta_z);
+    SpheroidParams params(_name, _position.x, _position.y, _position.z, _major_radius, _minor_radius, _theta_x, _theta_y, _theta_z);
+    params.brightness = _brightness;
+    return params;
+}
+
+void Spheroid::setBrightness(float brightness, bool updateHistory) {
+    const float clamped = std::clamp(brightness, 0.0f, 1.0f);
+    _brightness = clamped;
+    if (!_brightnessInitialized) {
+        _brightnessMin = clamped;
+        _brightnessMax = clamped;
+        _brightnessInitialized = true;
+        return;
+    }
+    if (updateHistory) {
+        _brightnessMin = std::min(_brightnessMin, clamped);
+        _brightnessMax = std::max(_brightnessMax, clamped);
+    }
+}
+
+float Spheroid::estimateBrightnessFromFrame(const std::vector<cv::Mat> &frame) const {
+    if (frame.empty()) {
+        return _brightness;
+    }
+    const float maxR = std::max({static_cast<float>(a), static_cast<float>(b), static_cast<float>(c)});
+    int minX = std::max(0, static_cast<int>(std::floor(_position.x - maxR)));
+    int maxX = std::min(frame[0].cols - 1, static_cast<int>(std::ceil(_position.x + maxR)));
+    int minY = std::max(0, static_cast<int>(std::floor(_position.y - maxR)));
+    int maxY = std::min(frame[0].rows - 1, static_cast<int>(std::ceil(_position.y + maxR)));
+    int minZ = std::max(0, static_cast<int>(std::floor(_position.z - maxR)));
+    int maxZ = std::min(static_cast<int>(frame.size()) - 1, static_cast<int>(std::ceil(_position.z + maxR)));
+
+    std::array<double, 9> R_T;
+    generateInverseRotationMatrix(R_T);
+    const double invA2 = 1.0 / (a * a);
+    const double invB2 = 1.0 / (b * b);
+    const double invC2 = 1.0 / (c * c);
+
+    double brightnessSum = 0.0;
+    size_t brightnessCount = 0;
+    scanSpheroidVolume(
+        frame, minX, maxX, minY, maxY, minZ, maxZ, _position,
+        R_T, invA2, invB2, invC2,
+        [&](int /*x*/, int /*y*/, int /*z*/, float pixel, double val) {
+            if (val <= 1.0) {
+                brightnessSum += pixel;
+                brightnessCount++;
+            }
+        });
+
+    if (brightnessCount == 0) {
+        return _brightness;
+    }
+    return std::clamp(static_cast<float>(brightnessSum / static_cast<double>(brightnessCount)), 0.0f, 1.0f);
 }
 
 [[nodiscard]] std::pair<std::vector<float>, std::vector<float>> Spheroid::calculateCorners() const {

@@ -17,13 +17,21 @@ public:
     float blur_sigma;
     float sigmoid_k;
     float sigmoid_center;
+    float sigmoid_center_offset;
+    int calibration_x;
+    int calibration_y;
+    int calibration_z;
+    int calibration_width;
+    int calibration_height;
     int z_slices;
     std::vector<int> z_values;
 
     // Constructor with default values
     SimulationConfig() : iterations_per_cell(0), background_color(0.0f), cell_color(0.0f),
                          padding(0), z_scaling(1.0f), blur_sigma(0.0f),
-                         sigmoid_k(30.0f), sigmoid_center(-1.0f), z_slices(-1) {
+                         sigmoid_k(30.0f), sigmoid_center(-1.0f), sigmoid_center_offset(0.045f),
+                         calibration_x(-1), calibration_y(-1), calibration_z(-1),
+                         calibration_width(0), calibration_height(0), z_slices(-1) {
     }
     void explodeConfig(const YAML::Node node) {
         iterations_per_cell = node["iterations_per_cell"].as<int>();
@@ -40,6 +48,24 @@ public:
         if (node["sigmoid_center"]) {
             sigmoid_center = node["sigmoid_center"].as<float>();
         }
+        if (node["sigmoid_center_offset"]) {
+            sigmoid_center_offset = node["sigmoid_center_offset"].as<float>();
+        }
+        if (node["calibration_x"]) {
+            calibration_x = node["calibration_x"].as<int>();
+        }
+        if (node["calibration_y"]) {
+            calibration_y = node["calibration_y"].as<int>();
+        }
+        if (node["calibration_z"]) {
+            calibration_z = node["calibration_z"].as<int>();
+        }
+        if (node["calibration_width"]) {
+            calibration_width = node["calibration_width"].as<int>();
+        }
+        if (node["calibration_height"]) {
+            calibration_height = node["calibration_height"].as<int>();
+        }
     }
     void printConfig() {
         std::cout << "Simulation Config\n";
@@ -51,6 +77,12 @@ public:
         std::cout << "blur_sigma: " << blur_sigma << std::endl;
         std::cout << "sigmoid_k: " << sigmoid_k << std::endl;
         std::cout << "sigmoid_center: " << sigmoid_center << std::endl;
+        std::cout << "sigmoid_center_offset: " << sigmoid_center_offset << std::endl;
+        std::cout << "calibration_x: " << calibration_x << std::endl;
+        std::cout << "calibration_y: " << calibration_y << std::endl;
+        std::cout << "calibration_z: " << calibration_z << std::endl;
+        std::cout << "calibration_width: " << calibration_width << std::endl;
+        std::cout << "calibration_height: " << calibration_height << std::endl;
         std::cout << "z_slices: " << z_slices << std::endl;
     }
 };

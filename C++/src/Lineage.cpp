@@ -23,24 +23,165 @@ double computeAverageSliceMax(const std::vector<cv::Mat> &slices)
         return 255.0;
     }
 
-    double maxSum = 0.0;
-    size_t maxCount = 0;
+    std::vector<double> sliceMaxima;
+    sliceMaxima.reserve(slices.size());
+    double globalMax = 0.0;
     for (const auto &slice : slices) {
         if (slice.empty()) {
             continue;
         }
         double maxValue = 0.0;
         cv::minMaxLoc(slice, nullptr, &maxValue);
-        maxSum += maxValue;
-        ++maxCount;
+        sliceMaxima.push_back(maxValue);
+        globalMax = std::max(globalMax, maxValue);
     }
 
-    if (maxCount == 0) {
+    if (sliceMaxima.empty()) {
         return 255.0;
     }
 
-    const double avgMax = maxSum / static_cast<double>(maxCount);
-    return (avgMax > 0.0) ? avgMax : 255.0;
+    const double informativeThreshold = std::max(1.0, globalMax * 0.10);
+    std::vector<double> informativeMaxima;
+    informativeMaxima.reserve(sliceMaxima.size());
+    for (double m : sliceMaxima) {
+        if (m >= informativeThreshold) {
+            informativeMaxima.push_back(m);
+        }
+    }
+    if (informativeMaxima.empty()) {
+        informativeMaxima = sliceMaxima;
+    }
+
+    std::sort(informativeMaxima.begin(), informativeMaxima.end());
+    const size_t mid = informativeMaxima.size() / 2;
+    double medianMax = informativeMaxima[mid];
+    if (informativeMaxima.size() % 2 == 0 && informativeMaxima.size() > 1) {
+        medianMax = 0.5 * (informativeMaxima[mid - 1] + informativeMaxima[mid]);
+    }
+
+    const double scaleFloor = std::max(1.0, globalMax * 0.05);
+    const double robustScale = std::max(medianMax, scaleFloor);
+    return (robustScale > 0.0) ? robustScale : 255.0;
+}
+
+bool hasCalibrationZone(const SimulationConfig &sim)
+{
+    return sim.calibration_width > 0 && sim.calibration_height > 0 &&
+           sim.calibration_x >= 0 && sim.calibration_y >= 0 && sim.calibration_z >= 0;
+}
+
+double computeCalibrationZoneMean(const std::vector<cv::Mat> &slices, const SimulationConfig &sim)
+{
+    if (!hasCalibrationZone(sim) || slices.empty()) {
+        return -1.0;
+    }
+
+    const int nSlices = static_cast<int>(slices.size());
+    const int z0 = std::clamp(sim.calibration_z, 0, nSlices - 1);
+    const int zCount = std::max(1, sim.calibration_height);
+    const int z1 = std::min(nSlices, z0 + zCount);
+
+    double sum = 0.0;
+    long long count = 0;
+    for (int z = z0; z < z1; ++z) {
+        const cv::Mat &slice = slices[z];
+        if (slice.empty()) {
+            continue;
+        }
+
+        const int x0 = std::max(0, sim.calibration_x);
+        const int y0 = std::max(0, sim.calibration_y);
+        const int x1 = std::min(slice.cols, sim.calibration_x + sim.calibration_width);
+        const int y1 = std::min(slice.rows, sim.calibration_y + sim.calibration_width);
+        if (x0 >= x1 || y0 >= y1) {
+            continue;
+        }
+
+        const cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
+        const double roiMean = cv::mean(slice(roi))[0];
+        const long long roiPixels = static_cast<long long>(roi.width) * roi.height;
+        sum += roiMean * static_cast<double>(roiPixels);
+        count += roiPixels;
+    }
+
+    if (count == 0) {
+        return -1.0;
+    }
+    return sum / static_cast<double>(count);
+}
+
+double computeCalibrationZoneMeanAtZIndices(const std::vector<cv::Mat> &slices,
+                                            const SimulationConfig &sim,
+                                            const std::vector<int> &zIndices)
+{
+    if (!hasCalibrationZone(sim) || slices.empty() || zIndices.empty()) {
+        return -1.0;
+    }
+
+    double sum = 0.0;
+    long long count = 0;
+    for (int z : zIndices) {
+        if (z < 0 || z >= static_cast<int>(slices.size())) {
+            continue;
+        }
+        const cv::Mat &slice = slices[z];
+        if (slice.empty()) {
+            continue;
+        }
+
+        const int x0 = std::max(0, sim.calibration_x);
+        const int y0 = std::max(0, sim.calibration_y);
+        const int x1 = std::min(slice.cols, sim.calibration_x + sim.calibration_width);
+        const int y1 = std::min(slice.rows, sim.calibration_y + sim.calibration_width);
+        if (x0 >= x1 || y0 >= y1) {
+            continue;
+        }
+
+        const cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
+        const double roiMean = cv::mean(slice(roi))[0];
+        const long long roiPixels = static_cast<long long>(roi.width) * roi.height;
+        sum += roiMean * static_cast<double>(roiPixels);
+        count += roiPixels;
+    }
+
+    if (count == 0) {
+        return -1.0;
+    }
+    return sum / static_cast<double>(count);
+}
+
+double computeStackMean(const std::vector<cv::Mat> &slices)
+{
+    if (slices.empty()) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    long long count = 0;
+    for (const auto &slice : slices) {
+        if (slice.empty()) {
+            continue;
+        }
+        const double sliceMean = cv::mean(slice)[0];
+        const long long pixels = static_cast<long long>(slice.rows) * slice.cols;
+        sum += sliceMean * static_cast<double>(pixels);
+        count += pixels;
+    }
+    if (count == 0) {
+        return 0.0;
+    }
+    return sum / static_cast<double>(count);
+}
+
+void rescaleStack(std::vector<cv::Mat> &slices, double invScale)
+{
+    for (auto &slice : slices) {
+        if (slice.empty()) {
+            continue;
+        }
+        slice *= invScale;
+        cv::min(slice, 1.0f, slice);
+        cv::max(slice, 0.0f, slice);
+    }
 }
 } // namespace
 
@@ -78,7 +219,7 @@ namespace utils
     }
 }
 
-Image processImage(const Image &image, const BaseConfig &config, double scaleFactor)
+Image processImage(const Image &image, const BaseConfig &config, double scaleFactor, float sigmoidCenterOverride)
 {
     Image processedImage;
 
@@ -105,17 +246,22 @@ Image processImage(const Image &image, const BaseConfig &config, double scaleFac
     const double blurSigma = (simConfig.blur_sigma > 0.0f) ? simConfig.blur_sigma : 1.5;
     cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), blurSigma);
     const float sigmoidK = (simConfig.sigmoid_k > 0.0f) ? simConfig.sigmoid_k : 30.0f;
-    const float sigmoidCenter =
+    float sigmoidCenter =
         (simConfig.sigmoid_center >= 0.0f) ? simConfig.sigmoid_center : config.simulation.background_color;
+    if (sigmoidCenterOverride >= 0.0f) {
+        sigmoidCenter = sigmoidCenterOverride;
+    }
+    sigmoidCenter += simConfig.sigmoid_center_offset;
     utils::applySigmoid(processedImage, sigmoidK, sigmoidCenter);
 
     return processedImage;
 }
 
-std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &config)
+std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &config, float *frameBackgroundOut)
 {
     std::vector<cv::Mat> processedZSlices; // vector of matrices, each matrix is a 2D image
     std::vector<cv::Mat> interpolatedZSlices;
+    float frameBackground = config.simulation.background_color;
 
     // Get the file extension
     std::string extension = imageFile.substr(imageFile.find_last_of('.') + 1);
@@ -173,11 +319,45 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
         }
 
         const double avgSliceMax = computeAverageSliceMax(interpolatedGrayZSlices);
+        // Calibration z-indexing is defined on the original (pre-interpolation) stack.
+        const double rawCalibrationBg = computeCalibrationZoneMean(grayZSlices, config.simulation);
+        if (rawCalibrationBg >= 0.0) {
+            frameBackground = static_cast<float>(std::clamp(rawCalibrationBg / avgSliceMax, 0.0, 1.0));
+            std::cout << "[Calibration] raw_mean=" << rawCalibrationBg
+                      << " scale=" << avgSliceMax
+                      << " sigmoid_center=" << frameBackground << std::endl;
+        } else {
+            std::cout << "[Calibration] no valid raw calibration voxels; fallback center="
+                      << frameBackground << std::endl;
+        }
+        const float sigmoidCenter = frameBackground;
+        std::cout << "[Sigmoid] center_used=" << (sigmoidCenter + config.simulation.sigmoid_center_offset)
+                  << " (from_calibration_center=" << sigmoidCenter
+                  << ", config_center=" << config.simulation.sigmoid_center
+                  << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
 
         // Apply preprocessing on the full interpolated stack.
         processedZSlices.reserve(interpolatedGrayZSlices.size());
         for (const auto &slice : interpolatedGrayZSlices) {
-            processedZSlices.push_back(processImage(slice, config, avgSliceMax));
+            processedZSlices.push_back(processImage(slice, config, avgSliceMax, sigmoidCenter));
+        }
+
+        // Update frame background baseline from processed calibration area.
+        std::vector<int> processedCalibZ;
+        if (hasCalibrationZone(config.simulation)) {
+            const int z0 = std::max(0, config.simulation.calibration_z);
+            const int z1 = std::min(static_cast<int>(grayZSlices.size()),
+                                    config.simulation.calibration_z + std::max(1, config.simulation.calibration_height));
+            processedCalibZ.reserve(std::max(0, z1 - z0));
+            for (int z = z0; z < z1; ++z) {
+                processedCalibZ.push_back(z * expandFactor);
+            }
+        }
+        const double processedCalibrationBg =
+            computeCalibrationZoneMeanAtZIndices(processedZSlices, config.simulation, processedCalibZ);
+        if (processedCalibrationBg >= 0.0) {
+            frameBackground = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
+            std::cout << "[Calibration] processed_background=" << frameBackground << std::endl;
         }
         interpolatedZSlices = std::move(processedZSlices);
 
@@ -204,11 +384,34 @@ std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &c
             cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
         }
 
-        const double avgSliceMax = computeAverageSliceMax({img});
-        processedZSlices.push_back(processImage(img, config, avgSliceMax));
+        const std::vector<cv::Mat> singleSliceStack{img};
+        const double avgSliceMax = computeAverageSliceMax(singleSliceStack);
+        const double rawCalibrationBg = computeCalibrationZoneMean(singleSliceStack, config.simulation);
+        if (rawCalibrationBg >= 0.0) {
+            frameBackground = static_cast<float>(std::clamp(rawCalibrationBg / avgSliceMax, 0.0, 1.0));
+            std::cout << "[Calibration] raw_mean=" << rawCalibrationBg
+                      << " scale=" << avgSliceMax
+                      << " sigmoid_center=" << frameBackground << std::endl;
+        } else {
+            std::cout << "[Calibration] no valid raw calibration voxels; fallback center="
+                      << frameBackground << std::endl;
+        }
+        std::cout << "[Sigmoid] center_used=" << (frameBackground + config.simulation.sigmoid_center_offset)
+                  << " (from_calibration_center=" << frameBackground
+                  << ", config_center=" << config.simulation.sigmoid_center
+                  << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
+        processedZSlices.push_back(processImage(img, config, avgSliceMax, frameBackground));
+        const double processedCalibrationBg = computeCalibrationZoneMean(processedZSlices, config.simulation);
+        if (processedCalibrationBg >= 0.0) {
+            frameBackground = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
+            std::cout << "[Calibration] processed_background=" << frameBackground << std::endl;
+        }
         interpolatedZSlices = std::move(processedZSlices);
     }
 
+    if (frameBackgroundOut != nullptr) {
+        *frameBackgroundOut = frameBackground;
+    }
     std::cout << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;
     return interpolatedZSlices;
 }
@@ -222,25 +425,44 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
                  int continueFrom)
 : config(config), outputPath(outputPath), firstFrame(firstFrame)
 {
+    double prevFrameMean = -1.0;
     for (size_t i = 0; i < imagePaths.size(); ++i)
     {
         std::vector<Image> real_frame;
-        real_frame = loadFrame(imagePaths[i], config);
-        // loadFrame interpolate frames, update to config is needed
-        config.simulation.z_slices = real_frame.size();
+        float frameBackground = config.simulation.background_color;
+        real_frame = loadFrame(imagePaths[i], config, &frameBackground);
+
+        const double currentMeanBeforeAlign = computeStackMean(real_frame);
+        if (prevFrameMean > 1e-9 && currentMeanBeforeAlign > 1e-9) {
+            const double brightnessRatio = currentMeanBeforeAlign / prevFrameMean;
+            if (brightnessRatio > 1e-6) {
+                const double invScale = 1.0 / brightnessRatio;
+                if (std::abs(brightnessRatio - 1.0) > 0.01) {
+                    std::cout << "[Frame Align] frame_index=" << i
+                              << " ratio=" << brightnessRatio
+                              << " apply_scale=" << invScale << std::endl;
+                    rescaleStack(real_frame, invScale);
+                    frameBackground = static_cast<float>(std::clamp(frameBackground * invScale, 0.0, 1.0));
+                }
+            }
+        }
+        prevFrameMean = computeStackMean(real_frame);
 
         fs::path path(imagePaths[i]);
         //        std::cout << "Filename: " << path.filename() << std::endl;
         std::string file_name = path.filename();
+        SimulationConfig frameSimConfig = config.simulation;
+        frameSimConfig.z_slices = static_cast<int>(real_frame.size());
+        frameSimConfig.background_color = frameBackground;
 
         if ((continueFrom == -1 || i < continueFrom) && initialCells.find(file_name) != initialCells.end())
         {
             const std::vector<Spheroid> &cells = initialCells.at(file_name);
-            frames.emplace_back(real_frame, config.simulation, cells, outputPath, file_name);
+            frames.emplace_back(real_frame, frameSimConfig, cells, outputPath, file_name);
         }
         else
         {
-            frames.emplace_back(real_frame, config.simulation, std::vector<Spheroid>(), outputPath, file_name);
+            frames.emplace_back(real_frame, frameSimConfig, std::vector<Spheroid>(), outputPath, file_name);
         }
     }
 }
@@ -318,37 +540,57 @@ void Lineage::optimize(int frameIndex)
 
     // ============================================================
     // Phase 2: Post-optimization split detection
-    // Evaluate each cell's split independently against the same
-    // baseline state. Collect all candidates, then apply them
-    // together and run post-split perturbation.
+    // Greedy acceptance: evaluate candidates from current baseline,
+    // apply only the best one, then recompute and repeat.
+    // This avoids accepting multiple overlapping candidates that each
+    // looked good only against an outdated baseline.
     // ============================================================
-    std::vector<std::string> cellNames;
-    for (const auto &cell : frame.cells) {
-        cellNames.push_back(cell.getCellParams().name);
-    }
-
+    const size_t initialCellCount = frame.cells.size();
     std::cout << "[Phase 2] Split detection for frame " << displayFrame
-              << " (" << cellNames.size() << " cells)" << std::endl;
+              << " (" << initialCellCount << " cells)" << std::endl;
 
-    // Evaluate each split independently, reverting after each attempt
+    const double splitAttemptProb = std::clamp(static_cast<double>(config.prob.split), 0.0, 1.0);
+    const double minRelativeSplitGain = 0.001; // require >=0.1% relative cost reduction
+    const size_t maxSplitsThisFrame = std::max<size_t>(1, initialCellCount);
+    std::mt19937 splitRng(std::random_device{}());
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+
     struct SplitCandidate {
         std::string parentName;
         Spheroid child1;
         Spheroid child2;
         double costDiff;
+        double relGain;
     };
-    std::vector<SplitCandidate> candidates;
-
-    for (const auto &name : cellNames) {
-        // Find current index of this cell by name
-        size_t idx = SIZE_MAX;
-        for (size_t j = 0; j < frame.cells.size(); ++j) {
-            if (frame.cells[j].getCellParams().name == name) {
-                idx = j;
-                break;
-            }
+    size_t splitsApplied = 0;
+    for (size_t splitRound = 0; splitRound < maxSplitsThisFrame; ++splitRound) {
+        if (splitAttemptProb <= 0.0) {
+            break;
         }
-        if (idx == SIZE_MAX) continue;
+
+        const double baselineCost = frame.calculateCost(frame.getSynthFrame());
+        SplitCandidate bestCandidate;
+        bool hasBest = false;
+
+        std::vector<std::string> cellNames;
+        cellNames.reserve(frame.cells.size());
+        for (const auto &cell : frame.cells) {
+            cellNames.push_back(cell.getCellParams().name);
+        }
+
+        for (const auto &name : cellNames) {
+            if (splitAttemptProb < 1.0 && u01(splitRng) > splitAttemptProb) {
+                continue;
+            }
+
+            size_t idx = SIZE_MAX;
+            for (size_t j = 0; j < frame.cells.size(); ++j) {
+                if (frame.cells[j].getCellParams().name == name) {
+                    idx = j;
+                    break;
+                }
+            }
+            if (idx == SIZE_MAX) continue;
 
         // Look up pre-optimization radii and position for this cell
         float preOptMajorR = 0.0f, preOptMinorR = 0.0f;
@@ -366,42 +608,53 @@ void Lineage::optimize(int frameIndex)
         costDiff = result.first;
         std::function<void(bool)> callback = result.second;
 
-        if (costDiff < -config.prob.split_cost) {
-            // Record daughter cells before reverting
-            Spheroid child1 = frame.cells[frame.cells.size() - 2];
-            Spheroid child2 = frame.cells[frame.cells.size() - 1];
-            candidates.push_back({name, child1, child2, costDiff});
-            std::cout << "[Split Candidate] " << name << " in frame "
-                      << displayFrame << " (diff=" << costDiff << ")" << std::endl;
+            const double relGain = (baselineCost > 1e-9) ? (-costDiff / baselineCost) : 0.0;
+            const bool passAbsGate = costDiff < -config.prob.split_cost;
+            const bool passRelGate = relGain >= minRelativeSplitGain;
+
+            if (passAbsGate && passRelGate) {
+                Spheroid child1 = frame.cells[frame.cells.size() - 2];
+                Spheroid child2 = frame.cells[frame.cells.size() - 1];
+
+                if (!hasBest || costDiff < bestCandidate.costDiff) {
+                    bestCandidate = {name, child1, child2, costDiff, relGain};
+                    hasBest = true;
+                }
+            }
+
+            // Always revert this trial candidate.
+            callback(false);
         }
 
-        // Always revert so next cell is evaluated from the same baseline
-        callback(false);
-    }
+        if (!hasBest) {
+            break;
+        }
 
-    // Apply all accepted splits
-    for (const auto &candidate : candidates) {
         size_t idx = SIZE_MAX;
         for (size_t j = 0; j < frame.cells.size(); ++j) {
-            if (frame.cells[j].getCellParams().name == candidate.parentName) {
+            if (frame.cells[j].getCellParams().name == bestCandidate.parentName) {
                 idx = j;
                 break;
             }
         }
-        if (idx == SIZE_MAX) continue;
+        if (idx == SIZE_MAX) {
+            break;
+        }
 
         frame.cells.erase(frame.cells.begin() + idx);
-        frame.cells.push_back(candidate.child1);
-        frame.cells.push_back(candidate.child2);
+        frame.cells.push_back(bestCandidate.child1);
+        frame.cells.push_back(bestCandidate.child2);
+        frame.regenerateSynthFrame();
+        splitsApplied++;
 
-        std::cout << "[Split Accepted] " << candidate.parentName << " split in frame "
-                  << displayFrame << " (diff=" << candidate.costDiff << ")" << std::endl;
+        std::cout << "[Split Accepted] " << bestCandidate.parentName << " split in frame "
+                  << displayFrame << " (diff=" << bestCandidate.costDiff
+                  << ", rel_gain=" << bestCandidate.relGain << ")" << std::endl;
     }
 
     // Regenerate synth frame and run post-split perturbation
-    if (!candidates.empty()) {
-        frame.regenerateSynthFrame();
-        size_t postSplitIters = 2 * config.simulation.iterations_per_cell * candidates.size();
+    if (splitsApplied > 0) {
+        size_t postSplitIters = 2 * config.simulation.iterations_per_cell * splitsApplied;
         for (size_t j = 0; j < postSplitIters; ++j) {
             auto presult = frame.perturb();
             presult.second(presult.first < 0);

@@ -613,6 +613,9 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
             double theta = ((double)rand() / RAND_MAX) * 2 * M_PI;
             double phi = ((double)rand() / RAND_MAX) * M_PI;
             split_axis = cv::Point3f(sin(phi) * cos(theta), sin(phi) * sin(theta), cos(phi));
+            //std::cout << "[Split Skip] " << _name
+            //         << " degenerate PCA axis (norm=" << norm << ")" << std::endl;
+            //return std::make_tuple(*this, *this, false,0.0f);
         }
 
         elongationRatio = (lambda2 > 1e-6f) ? (lambda1 / lambda2) : 1.0f;
@@ -703,12 +706,12 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
             (new_position1.y - new_position2.y) * (new_position1.y - new_position2.y) +
             (new_position1.z - new_position2.z) * (new_position1.z - new_position2.z));
         const float minSeparation = static_cast<float>(0.9 * daughterMajorRadius);
-        if (sep < minSeparation) {
-            std::cout << "[Split Skip] " << _name
-                      << " centroid separation too small (" << sep
-                      << " < " << minSeparation << ")" << std::endl;
-            return std::make_tuple(*this, *this, false,0.0f);
-        }
+        //if (sep < minSeparation) {
+        //    std::cout << "[Split Skip] " << _name
+        //              << " centroid separation too small (" << sep
+        //              << " < " << minSeparation << ")" << std::endl;
+        //    return std::make_tuple(*this, *this, false,0.0f);
+        //}
 
         std::cout << "[Split Placement] centroid-based:"
                   << " c1=(" << new_position1.x << "," << new_position1.y << "," << new_position1.z << ")"
@@ -723,6 +726,9 @@ std::tuple<Spheroid, Spheroid, bool, float> Spheroid::getSplitCells(const std::v
         new_position2 = pcaCenter - split_axis * offset;
         std::cout << "[Split Placement] one-sided (" << count1 << "/" << count2
                   << "), using fixed offset=" << offset << std::endl;
+        //std::cout << "[Split Skip] " << _name
+        //          << " one-sided projection (" << count1 << "/" << count2 << ")" << std::endl;
+        //return std::make_tuple(*this, *this, false);
     }
 
 

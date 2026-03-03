@@ -19,8 +19,8 @@
 
 namespace fs = std::filesystem;
 
-Image processImage(const Image &image, const BaseConfig &config, double scaleFactor);
-std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &config);
+Image processImage(const Image &image, const BaseConfig &config, double scaleFactor, float sigmoidCenterOverride = -1.0f);
+std::vector<cv::Mat> loadFrame(const std::string &imageFile, const BaseConfig &config, float *frameBackgroundOut = nullptr);
 
 class Lineage
 {

@@ -4,7 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CPP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# INPUT_DIR="/Users/wangyiding/CellUniverse/C++/examples/input/original_data"
+
 INPUT_DIR="/Users/wangyiding/CellUniverse/C++/examples/input/C.elegans_developing embryo_Fluo-N3DH-CE_Training/01"
+
 CONFIG_FILE="$CPP_ROOT/examples/config.yaml"
 INITIAL_FILE="$SCRIPT_DIR/initial_embryo.csv"
 OUTPUT_BASE="/Users/wangyiding/CellUniverse/C++/output"
@@ -16,8 +19,12 @@ LOG_FILE="$OUT_DIR/runlog_$STAMP.txt"
 BUILD_DIR="$CPP_ROOT/build"
 FALLBACK_BUILD_DIR="$CPP_ROOT/cmake-build-debug"
 
-MIN_FRAME=1
-MAX_FRAME=10
+MIN_FRAME=0
+MAX_FRAME=20
+
+# MIN_FRAME=0
+# MAX_FRAME=30
+
 MODE="new"
 
 mkdir -p "$OUT_DIR"
@@ -64,22 +71,54 @@ BIN="$BUILD_DIR/celluniverse"
 [ -x "$BIN" ] || { echo "[FATAL] build succeeded but binary not found/executable: $BIN"; exit 1; }
 
 echo "[STEP] Sanity-checking input frames..."
-fmin="$INPUT_DIR/t$(printf '%03d' "$MIN_FRAME").tif"
-fmax="$INPUT_DIR/t$(printf '%03d' "$MAX_FRAME").tif"
-[ -f "$fmin" ] || { echo "[FATAL] missing first frame: $fmin"; exit 1; }
-[ -f "$fmax" ] || { echo "[FATAL] missing last frame:  $fmax"; exit 1; }
+# Be maximally permissive: accept either t%03d.tif or frame%03d.tif
+CAND_PREFIX_1="t"
+CAND_PREFIX_2="frame"
 
-FIRST_FRAME_FILE="$(basename "$fmin")"
+min3="$(printf '%03d' "$MIN_FRAME")"
+max3="$(printf '%03d' "$MAX_FRAME")"
+
+fmin1="$INPUT_DIR/${CAND_PREFIX_1}${min3}.tif"
+fmax1="$INPUT_DIR/${CAND_PREFIX_1}${max3}.tif"
+
+fmin2="$INPUT_DIR/${CAND_PREFIX_2}${min3}.tif"
+fmax2="$INPUT_DIR/${CAND_PREFIX_2}${max3}.tif"
+
+INPUT_PATTERN=""
+
+if [ -f "$fmin1" ] && [ -f "$fmax1" ]; then
+  INPUT_PATTERN="$INPUT_DIR/${CAND_PREFIX_1}%03d.tif"
+elif [ -f "$fmin2" ] && [ -f "$fmax2" ]; then
+  INPUT_PATTERN="$INPUT_DIR/${CAND_PREFIX_2}%03d.tif"
+else
+  echo "[FATAL] input frames not found for either pattern:"
+  echo "  - $fmin1"
+  echo "  - $fmax1"
+  echo "  - $fmin2"
+  echo "  - $fmax2"
+  exit 1
+fi
+
+echo "[INFO] Using input pattern: $INPUT_PATTERN"
+
+# Determine the actual first-frame file name for any downstream logic
+# (Keep behavior consistent with your existing env export.)
+if [[ "$INPUT_PATTERN" == *"/${CAND_PREFIX_1}%03d.tif" ]]; then
+  FIRST_FRAME_FILE="${CAND_PREFIX_1}${min3}.tif"
+else
+  FIRST_FRAME_FILE="${CAND_PREFIX_2}${min3}.tif"
+fi
+
 export CELLUNIVERSE_INITIAL_FRAME_FILE="$FIRST_FRAME_FILE"
 echo "[INFO] CELLUNIVERSE_INITIAL_FRAME_FILE=$CELLUNIVERSE_INITIAL_FRAME_FILE"
 
 echo "[STEP] Running tracker (NEW algorithm)..."
-echo "[CMD] $BIN $MIN_FRAME $MAX_FRAME \"$INPUT_DIR/t%03d.tif\" \"$OUT_DIR\" \"$CONFIG_FILE\" \"$INITIAL_FILE\" $MODE"
+echo "[CMD] $BIN $MIN_FRAME $MAX_FRAME \"$INPUT_PATTERN\" \"$OUT_DIR\" \"$CONFIG_FILE\" \"$INITIAL_FILE\" $MODE"
 
 "$BIN" \
   "$MIN_FRAME" \
   "$MAX_FRAME" \
-  "$INPUT_DIR/t%03d.tif" \
+  "$INPUT_PATTERN" \
   "$OUT_DIR" \
   "$CONFIG_FILE" \
   "$INITIAL_FILE" \

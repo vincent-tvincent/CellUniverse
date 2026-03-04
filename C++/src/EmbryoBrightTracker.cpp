@@ -491,12 +491,16 @@ EmbryoBrightTracker::CellState EmbryoBrightTracker::trackSingleCellByCCInBBox(
     float r = 0.5f * d;
     float matureV = (4.0f / 3.0f) * (float) M_PI * r * r * r;
 
-    // Use prev.voxelCount as the only reliable scale (model-based matureV is too large under anisotropic Z + high threshold).
-    int minVox = 120;
+    // Use prev.voxelCount as primary scale. Avoid hard floor that kills dim/fragmented daughters.
+    int minVox = 30;  // was 120
+
     if (prev.voxelCount > 0) {
-        minVox = (int)std::lround((double)prev.voxelCount * 0.05); // was 0.12 (too aggressive)
-        minVox = std::max(minVox, 120);
-        minVox = std::min(minVox, 20000); // safety cap
+        // 2% of previous size is enough to keep dim daughters alive
+        minVox = (int)std::lround((double)prev.voxelCount * 0.02);
+
+        // soft bounds
+        minVox = std::max(minVox, 30);
+        minVox = std::min(minVox, std::max(80, (int)std::lround((double)prev.voxelCount * 0.25)));
     }
 
     std::vector<Comp3DStat> kept;
@@ -512,16 +516,29 @@ EmbryoBrightTracker::CellState EmbryoBrightTracker::trackSingleCellByCCInBBox(
           << "\n";
 
     if (kept.empty()) {
-        CellState dead = prev;
-        dead.alive = false;
-        dead.lastSeenFrame = frameIdx;
-        dead.voxelCount = 0;
+        // Fallback: do not kill track immediately; pick the largest component.
+        int bestIdx = 0;
+        for (int i = 1; i < (int)comps.size(); ++i) {
+            if (comps[i].vox > comps[bestIdx].vox) bestIdx = i;
+        }
 
-        std::cout << "  [DBG][TrackFail] f=" << frameIdx << " id=" << prev.id
-          << " reason=kept_empty(minVox_too_high_or_fragmentation)"
-          << "\n";
+        const auto &cst = comps[bestIdx];
 
-        return dead;
+        CellState cur = prev;
+        cur.lastSeenFrame = frameIdx;
+        cur.alive = true;
+        cur.center = cst.center();
+        cur.meanIntensity = cst.meanI();
+        cur.voxelCount = cst.vox;
+        cur.diameter = cst.diamXY();
+
+        ok = true;
+
+        std::cout << "  [WARN][TrackFallback] f=" << frameIdx << " id=" << prev.id
+                  << " kept_empty -> use_max_comp vox=" << cst.vox
+                  << "\n";
+
+        return cur;
     }
 
     // Pick best component: nearest to prev.center, tie-break by larger vox
@@ -1141,10 +1158,19 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
 
     for (int f = 1; f < (int) imagePaths.size(); ++f) {
         std::vector<cv::Mat> vol = loadVolume(imagePaths[f]);
-        float thresh = percentileThreshold(vol, 99.3f);
+
+        float pct = (f <= 7) ? 99.3f : 98.8f;
+        float thresh = percentileThreshold(vol, pct);
+
+        // Light denoise per-slice to reduce fragmentation inside bboxes
+        std::vector<cv::Mat> volBlur = vol;
+        for (auto &sl : volBlur) {
+            cv::GaussianBlur(sl, sl, cv::Size(0, 0), 1.0);
+        }
 
         thresh = clampf(thresh, 0.2f, 0.95f);
         float threshLowFrame      = clampf(thresh * 0.50f, 0.06f, 0.95f);
+
         float threshSplitLowFrame = clampf(thresh * 0.60f, 0.08f, 0.95f);
 
         std::cout << "[DBG][FrameThresh] f=" << f
@@ -1367,65 +1393,64 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
 
             if (!split) {
                 // ---------- Pending split confirm (2-frame rule) ----------
-            // If we see a split once, do NOT commit immediately.
-            // Commit only if the split condition is stable in the next frame
-            // and the two centers are consistent (allow swap).
-            auto centersConsistent = [&](const cv::Point3f& a1, const cv::Point3f& a2,
-                                         const cv::Point3f& b1, const cv::Point3f& b2,
-                                         float tol) -> bool {
-                float tol2 = tol * tol;
-                float d11 = dist2_3d(a1, b1) + dist2_3d(a2, b2);
-                float d12 = dist2_3d(a1, b2) + dist2_3d(a2, b1);
-                return (std::min(d11, d12) <= 2.0f * tol2);
-            };
+                // If we see a split once, do NOT commit immediately.
+                // Commit only if the split condition is stable in the next frame
+                // and the two centers are consistent (allow swap).
+                auto centersConsistent = [&](const cv::Point3f &a1, const cv::Point3f &a2,
+                                             const cv::Point3f &b1, const cv::Point3f &b2,
+                                             float tol) -> bool {
+                    float tol2 = tol * tol;
+                    float d11 = dist2_3d(a1, b1) + dist2_3d(a2, b2);
+                    float d12 = dist2_3d(a1, b2) + dist2_3d(a2, b1);
+                    return (std::min(d11, d12) <= 2.0f * tol2);
+                };
 
-            auto &ps = pendingSplits[prev.id];
+                auto &ps = pendingSplits[prev.id];
 
-            if (split) {
-                float boxDiam = clampf(prev.diameter, 30.0f, 90.0f);
-                float tol = 0.35f * boxDiam; // center stability tolerance
+                if (split) {
+                    float boxDiam = clampf(prev.diameter, 30.0f, 90.0f);
+                    float tol = 0.35f * boxDiam; // center stability tolerance
 
-                if (!ps.active) {
-                    // first time seeing a split -> mark pending, do NOT commit
-                    ps.active = true;
-                    ps.firstFrame = f;
-                    ps.c1 = c1.center; // current candidate
-                    ps.c2 = c2.center;
-
-                    std::cout << "  [DBG][SplitPending] f=" << f << " id=" << prev.id
-                              << " store_centers=(" << ps.c1.x << "," << ps.c1.y << "," << ps.c1.z << ")-("
-                              << ps.c2.x << "," << ps.c2.y << "," << ps.c2.z << ")\n";
-
-                    split = false; // force fallthrough to normal tracking this frame
-                } else {
-                    // already pending, only confirm on next frame
-                    if (f == ps.firstFrame + 1 &&
-                        centersConsistent(ps.c1, ps.c2, c1.center, c2.center, tol)) {
-
-                        std::cout << "  [DBG][SplitConfirm] f=" << f << " id=" << prev.id
-                                  << " confirmed_from_f=" << ps.firstFrame << "\n";
-
-                        ps.active = false; // commit now (keep split=true)
-                    } else {
-                        // not confirmed: refresh pending to current frame, do NOT commit
-                        std::cout << "  [DBG][SplitPendingRefresh] f=" << f << " id=" << prev.id
-                                  << " prev_pending_f=" << ps.firstFrame << "\n";
-
+                    if (!ps.active) {
+                        // first time seeing a split -> mark pending, do NOT commit
                         ps.active = true;
                         ps.firstFrame = f;
-                        ps.c1 = c1.center;
+                        ps.c1 = c1.center; // current candidate
                         ps.c2 = c2.center;
-                        split = false;
+
+                        std::cout << "  [DBG][SplitPending] f=" << f << " id=" << prev.id
+                                << " store_centers=(" << ps.c1.x << "," << ps.c1.y << "," << ps.c1.z << ")-("
+                                << ps.c2.x << "," << ps.c2.y << "," << ps.c2.z << ")\n";
+
+                        split = false; // force fallthrough to normal tracking this frame
+                    } else {
+                        // already pending, only confirm on next frame
+                        if (f == ps.firstFrame + 1 &&
+                            centersConsistent(ps.c1, ps.c2, c1.center, c2.center, tol)) {
+                            std::cout << "  [DBG][SplitConfirm] f=" << f << " id=" << prev.id
+                                    << " confirmed_from_f=" << ps.firstFrame << "\n";
+
+                            ps.active = false; // commit now (keep split=true)
+                        } else {
+                            // not confirmed: refresh pending to current frame, do NOT commit
+                            std::cout << "  [DBG][SplitPendingRefresh] f=" << f << " id=" << prev.id
+                                    << " prev_pending_f=" << ps.firstFrame << "\n";
+
+                            ps.active = true;
+                            ps.firstFrame = f;
+                            ps.c1 = c1.center;
+                            ps.c2 = c2.center;
+                            split = false;
+                        }
+                    }
+                } else {
+                    // if no split this frame, clear pending
+                    if (ps.active) {
+                        ps.active = false;
+                        ps.firstFrame = -1;
                     }
                 }
-            } else {
-                // if no split this frame, clear pending
-                if (ps.active) {
-                    ps.active = false;
-                    ps.firstFrame = -1;
-                }
-            }
-            // ---------- end pending split confirm ----------
+                // ---------- end pending split confirm ----------
 
             if (!split) {
 

@@ -651,7 +651,14 @@ void Lineage::optimize(int frameIndex)
 
         const double relGain = (baselineCost > 1e-9) ? (-costDiff / baselineCost) : 0.0;
         const bool passAbsGate = costDiff < -config.prob.split_cost;
-        const bool passRelGate = relGain >= minRelativeSplitGain;
+        const double strongAbsCutoff = -config.prob.split_cost * config.prob.strong_split_cost_multiplier;
+        const auto parentParams = frame.cells[idx].getCellParams();
+        const double parentMajor = (preOptMajorR > 0.0f) ? preOptMajorR : static_cast<double>(parentParams.majorRadius);
+        const double parentMinor = (preOptMinorR > 0.0f) ? preOptMinorR : static_cast<double>(parentParams.minorRadius);
+        const double parentAspectRatio = (parentMinor > 1e-6) ? (parentMajor / parentMinor) : 0.0;
+        const bool passStrongAbsOverride =
+            (costDiff < strongAbsCutoff) && (parentAspectRatio >= config.prob.strong_split_min_aspect_ratio);
+        const bool passRelGate = (relGain >= minRelativeSplitGain) || passStrongAbsOverride;
 
         if (passAbsGate && passRelGate) {
             Spheroid child1 = frame.cells[frame.cells.size() - 2];
@@ -664,8 +671,12 @@ void Lineage::optimize(int frameIndex)
             std::cout << "[Split Skip] " << name
                       << " absGate=" << (passAbsGate ? "pass" : "fail")
                       << " relGate=" << (passRelGate ? "pass" : "fail")
+                      << " strongAbsOverride=" << (passStrongAbsOverride ? "pass" : "fail")
                       << " diff=" << costDiff
                       << " split_cost=" << config.prob.split_cost
+                      << " strong_abs_cutoff=" << strongAbsCutoff
+                      << " aspect=" << parentAspectRatio
+                      << " strong_min_aspect=" << config.prob.strong_split_min_aspect_ratio
                       << " rel_gain=" << relGain
                       << " min_rel_gain=" << minRelativeSplitGain
                       << std::endl;
@@ -698,6 +709,11 @@ void Lineage::optimize(int frameIndex)
                                   candidate.child1.getCellParams().name,
                                   candidate.child2.getCellParams().name,
                                   candidate.expectedDaughterVolume});
+        const auto refIt = referenceVolumes.find(candidate.parentName);
+        const double parentRefVolume =
+            (refIt != referenceVolumes.end()) ? refIt->second : (candidate.expectedDaughterVolume * 2.0);
+        referenceVolumes[candidate.child1.getCellParams().name] = std::max(1.0, parentRefVolume * 0.5);
+        referenceVolumes[candidate.child2.getCellParams().name] = std::max(1.0, parentRefVolume * 0.5);
 
         std::cout << "[Split Accepted] " << candidate.parentName << " split in frame "
                   << displayFrame << " (diff=" << candidate.costDiff
@@ -832,6 +848,36 @@ void Lineage::optimize(int frameIndex)
         }
     }
 
+    const double maxGrowthFactor = std::max(1.0, static_cast<double>(config.prob.max_volume_growth_from_initial));
+    for (size_t i = 0; i < frame.cells.size(); ++i) {
+        const auto params = frame.cells[i].getCellParams();
+        auto refIt = referenceVolumes.find(params.name);
+        if (refIt == referenceVolumes.end() || refIt->second <= 0.0) {
+            continue;
+        }
+        const double allowedVolume = refIt->second * maxGrowthFactor;
+        const double currentVolume = spheroidVolume(frame.cells[i]);
+        if (currentVolume <= allowedVolume + 1e-6) {
+            continue;
+        }
+
+        const double scale = std::cbrt(allowedVolume / currentVolume);
+        const double targetMajor = static_cast<double>(params.majorRadius) * scale;
+        const double targetMinor = static_cast<double>(params.minorRadius) * scale;
+
+        std::unordered_map<std::string, float> capParams;
+        capParams["majorRadius"] = static_cast<float>(targetMajor - static_cast<double>(params.majorRadius));
+        capParams["minorRadius"] = static_cast<float>(targetMinor - static_cast<double>(params.minorRadius));
+        frame.cells[i] = frame.cells[i].getParameterizedCell(capParams);
+
+        std::cout << "[Volume Cap] frame " << displayFrame
+                  << " cell=" << params.name
+                  << " current_volume=" << currentVolume
+                  << " allowed_volume=" << allowedVolume
+                  << " scale=" << scale << std::endl;
+    }
+
+    frame.regenerateSynthFrame();
     updateFrameCellBrightness(frameIndex);
 }
 
@@ -842,6 +888,14 @@ void Lineage::initializeBrightnessFromGroundTruth() {
     if (frames[0].cells.empty()) {
         std::cout << "[Brightness Init] frame 1 has no initial cells; skipped" << std::endl;
         return;
+    }
+    referenceVolumes.clear();
+    constexpr double kPi = 3.14159265358979323846;
+    for (const auto &cell : frames[0].cells) {
+        const auto p = cell.getCellParams();
+        const double vol = (4.0 / 3.0) * kPi * static_cast<double>(p.majorRadius) *
+                           static_cast<double>(p.majorRadius) * static_cast<double>(p.minorRadius);
+        referenceVolumes[p.name] = std::max(1.0, vol);
     }
     updateFrameCellBrightness(0);
     std::cout << "[Brightness Init] initialized " << frames[0].cells.size()
@@ -854,15 +908,20 @@ void Lineage::updateFrameCellBrightness(int frameIndex) {
     }
     Frame &frame = frames[frameIndex];
     const auto &realFrame = frame.getRealFrame();
+    const float emaAlpha = std::clamp(config.prob.brightness_update_ema_alpha, 0.0f, 1.0f);
     for (auto &cell : frame.cells) {
         const auto params = cell.getCellParams();
         const float oldBrightness = cell.getBrightness();
         const float measuredBrightness = cell.estimateBrightnessFromFrame(realFrame);
-        cell.setBrightness(measuredBrightness, true);
+        const float blendedBrightness =
+            cell.hasBrightnessHistory() ? ((1.0f - emaAlpha) * oldBrightness + emaAlpha * measuredBrightness)
+                                        : measuredBrightness;
+        cell.setBrightness(blendedBrightness, true);
         std::cout << "[Brightness Update] frame " << (firstFrame + frameIndex)
                   << " cell=" << params.name
                   << " old=" << oldBrightness
-                  << " new=" << cell.getBrightness()
+                  << " measured=" << measuredBrightness
+                  << " blended=" << cell.getBrightness()
                   << " min=" << cell.getBrightnessMin()
                   << " max=" << cell.getBrightnessMax()
                   << std::endl;

@@ -100,6 +100,10 @@ public:
     float nonsplit_recover_target_ratio;
     float split_shrink_trigger_ratio;
     float split_recover_target_ratio;
+    float strong_split_cost_multiplier;
+    float strong_split_min_aspect_ratio;
+    float brightness_update_ema_alpha;
+    float max_volume_growth_from_initial;
     float brightness_retry_step;
     int brightness_retry_max_attempts;
     int brightness_retry_iters_per_attempt;
@@ -117,6 +121,10 @@ public:
           nonsplit_recover_target_ratio(0.90f),
           split_shrink_trigger_ratio(0.55f),
           split_recover_target_ratio(0.80f),
+          strong_split_cost_multiplier(30.0f),
+          strong_split_min_aspect_ratio(1.4f),
+          brightness_update_ema_alpha(0.35f),
+          max_volume_growth_from_initial(1.45f),
           brightness_retry_step(0.02f),
           brightness_retry_max_attempts(10),
           brightness_retry_iters_per_attempt(120),
@@ -158,6 +166,18 @@ public:
         if (node["split_recover_target_ratio"]) {
             split_recover_target_ratio = node["split_recover_target_ratio"].as<float>();
         }
+        if (node["strong_split_cost_multiplier"]) {
+            strong_split_cost_multiplier = node["strong_split_cost_multiplier"].as<float>();
+        }
+        if (node["strong_split_min_aspect_ratio"]) {
+            strong_split_min_aspect_ratio = node["strong_split_min_aspect_ratio"].as<float>();
+        }
+        if (node["brightness_update_ema_alpha"]) {
+            brightness_update_ema_alpha = node["brightness_update_ema_alpha"].as<float>();
+        }
+        if (node["max_volume_growth_from_initial"]) {
+            max_volume_growth_from_initial = node["max_volume_growth_from_initial"].as<float>();
+        }
         if (node["brightness_retry_step"]) {
             brightness_retry_step = node["brightness_retry_step"].as<float>();
         }
@@ -187,6 +207,10 @@ public:
         std::cout << "nonsplit_recover_target_ratio: " << nonsplit_recover_target_ratio << std::endl;
         std::cout << "split_shrink_trigger_ratio: " << split_shrink_trigger_ratio << std::endl;
         std::cout << "split_recover_target_ratio: " << split_recover_target_ratio << std::endl;
+        std::cout << "strong_split_cost_multiplier: " << strong_split_cost_multiplier << std::endl;
+        std::cout << "strong_split_min_aspect_ratio: " << strong_split_min_aspect_ratio << std::endl;
+        std::cout << "brightness_update_ema_alpha: " << brightness_update_ema_alpha << std::endl;
+        std::cout << "max_volume_growth_from_initial: " << max_volume_growth_from_initial << std::endl;
         std::cout << "brightness_retry_step: " << brightness_retry_step << std::endl;
         std::cout << "brightness_retry_max_attempts: " << brightness_retry_max_attempts << std::endl;
         std::cout << "brightness_retry_iters_per_attempt: " << brightness_retry_iters_per_attempt << std::endl;

@@ -45,17 +45,14 @@ cell:
 # Simulation settings
 simulation:
   iterations_per_cell: 350
-  background_color: 0.2
-  #iterations_per_cell: 500
-  #background_color: 0.47
-  #cell_color: 0.053
-  cell_color: 0.6
+  background_color: 0.2 #auto-coliberation, tune won't work directly
+  cell_color: 0.6 #auto-coliberation, tune won't work directly
   padding: 0
   z_scaling: 7
   # pre-processing parameters
   blur_sigma: 10.0
   sigmoid_k: 75.0
-  sigmoid_center: 0.445
+  sigmoid_center: 0.445 #auto-coliberation, tune won't work directly
   sigmoid_center_offset: 0.047
   # background calibration zone (must contain no cells)
   # (calibration_x, calibration_y, calibration_z) is the upper-left-front corner
@@ -74,6 +71,10 @@ prob:
   min_relative_split_gain_base: 0.01
   min_relative_split_gain_strict: 0.02
   phase1_accept_rate_threshold: 0.02
+  strong_split_cost_multiplier: 30.0
+  strong_split_min_aspect_ratio: 1.4
+  brightness_update_ema_alpha: 0.35
+  max_volume_growth_from_initial: 2.0
   enable_brightness_recovery: true
   nonsplit_shrink_trigger_ratio: 0.78
   nonsplit_recover_target_ratio: 0.90

@@ -45,6 +45,7 @@ public:
 private:
    void initializeBrightnessFromGroundTruth();
    void updateFrameCellBrightness(int frameIndex);
+   std::map<std::string, double> referenceVolumes;
    BaseConfig config;
    std::vector<Frame> frames;
    std::string outputPath;

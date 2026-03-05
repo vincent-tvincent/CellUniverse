@@ -59,6 +59,7 @@ EmbryoBrightTracker::EmbryoBrightTracker(const BaseConfig &cfg, const std::strin
 std::vector<cv::Mat> EmbryoBrightTracker::loadVolume(const fs::path& imageFile)
 {
     std::vector<cv::Mat> pages;
+    // ************************* read directly by openCV
     if (!cv::imreadmulti(imageFile.string(), pages, cv::IMREAD_ANYDEPTH | cv::IMREAD_GRAYSCALE)) {
         throw std::runtime_error("imreadmulti failed: " + imageFile.string());
     }
@@ -227,6 +228,7 @@ static inline float dist2_3d(const cv::Point3f &a, const cv::Point3f &b) {
     return dx * dx + dy * dy + dz * dz;
 }
 
+// redudant
 static bool isLocalMax3x3x3(const std::vector<cv::Mat> &vol, int z, int y, int x, float v) {
     int Z = (int) vol.size();
     int Y = vol[0].rows;
@@ -700,6 +702,7 @@ EmbryoBrightTracker::CellState EmbryoBrightTracker::trackSingleCellInBBox(
     return cur;
 }
 
+// redudant
 static void kmeans2_weighted(
     const std::vector<cv::Point3f> &pts,
     const std::vector<float> &w,
@@ -1230,7 +1233,7 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
                       << "\n";
 
             // --- Split cooldown: avoid chain false splits ---
-            const int SPLIT_COOLDOWN = 8; // your choice
+            const int SPLIT_COOLDOWN = 8;
             if (f - prev.lastSplitFrame < SPLIT_COOLDOWN) {
                 float boxDiam = clampf(prev.diameter, 30.0f, 70.0f);
                 tracked.bbox = makeBBox(tracked.center, boxDiam,
@@ -1263,7 +1266,8 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
                 continue;
             }
 
-            // Decide split by CC count inside bbox (structure change 1 -> 2)
+            // *******************************************************************************************
+            // Decide split by CC count inside bbox (structure change 1 to 2)
             std::vector<Comp3DStat> bigComps;
             bigComps.reserve(compsInBox.size());
 
@@ -1319,8 +1323,8 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
             bool split = false;
             CellState c1, c2;
 
+            // ************************** split event check  **************************
             if ((int) bigComps.size() >= 2) {
-
                 cv::Point3f p1 = bigComps[0].center();
                 cv::Point3f p2 = bigComps[1].center();
 
@@ -1364,6 +1368,28 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
                           << " farOther2=" << (farFromOthers2?1:0)
                           << "\n";
 
+                // ******************************* make the split decision **********************
+                // 【SPLIT DECISION RULE】:
+                // We declare a real cell division only when ALL of following geometric conditions are satisfied:
+                //
+                // 1。near1 && near2
+                //    Both candidate daughter centers (p1 and p2) must lie close to the previous parent center.
+                //    The distance must be within one mature cell diameter. This ensures the split happens locally
+                //    around the parent and not somewhere else inside the bounding box.
+                //
+                // 2.  separated
+                //    The 2 candidate daughter centers must be sufficiently separated from each other.
+                //    If the distance between them is too small, the structure is likely still one single cell
+                //    (for example a dim or elongated "pancake" shape before full division).
+                //
+                // 3. farFromOthers1 && farFromOthers2
+                //    Each candidate daughter must also be sufficiently far from every OTHER cell center
+                //    in the current frame. This prevents false splits caused by neighboring cells whose
+                //    bright regions accidentally fall inside the parent's bounding box.
+                //
+                // Only when ALL these constraints hold simultaneously do we consider the structure to be
+                // a true biological cell division and create two new child cells from the parent.
+                if (near1 && near2 && separated && farFromOthers1 && farFromOthers2) {
                 if (near1 && near2 && separated && farFromOthers1 && farFromOthers2) {
                     split = true;
 

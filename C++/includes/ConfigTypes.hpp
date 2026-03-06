@@ -15,6 +15,7 @@ public:
     int padding;
     float z_scaling;
     float blur_sigma;
+    float blur_sweep_step;
     float sigmoid_k;
     float sigmoid_center;
     float sigmoid_center_offset;
@@ -28,7 +29,7 @@ public:
 
     // Constructor with default values
     SimulationConfig() : iterations_per_cell(0), background_color(0.0f), cell_color(0.0f),
-                         padding(0), z_scaling(1.0f), blur_sigma(0.0f),
+                         padding(0), z_scaling(1.0f), blur_sigma(0.0f), blur_sweep_step(1.0f),
                          sigmoid_k(30.0f), sigmoid_center(-1.0f), sigmoid_center_offset(0.045f),
                          calibration_x(-1), calibration_y(-1), calibration_z(-1),
                          calibration_width(0), calibration_height(0), z_slices(-1) {
@@ -41,6 +42,9 @@ public:
         z_scaling = node["z_scaling"].as<float>();
         if (node["blur_sigma"]) {
             blur_sigma = node["blur_sigma"].as<float>();
+        }
+        if (node["blur_sweep_step"]) {
+            blur_sweep_step = node["blur_sweep_step"].as<float>();
         }
         if (node["sigmoid_k"]) {
             sigmoid_k = node["sigmoid_k"].as<float>();
@@ -75,6 +79,7 @@ public:
         std::cout << "padding: " << padding << std::endl;
         std::cout << "z_scaling: " << z_scaling << std::endl;
         std::cout << "blur_sigma: " << blur_sigma << std::endl;
+        std::cout << "blur_sweep_step: " << blur_sweep_step << std::endl;
         std::cout << "sigmoid_k: " << sigmoid_k << std::endl;
         std::cout << "sigmoid_center: " << sigmoid_center << std::endl;
         std::cout << "sigmoid_center_offset: " << sigmoid_center_offset << std::endl;
@@ -93,6 +98,7 @@ public:
     float split;
     float split_cost;
     float split_elongation_threshold;
+    float split_gate_tolerance;
     float min_relative_split_gain_base;
     float min_relative_split_gain_strict;
     float phase1_accept_rate_threshold;
@@ -102,18 +108,21 @@ public:
     float split_recover_target_ratio;
     float strong_split_cost_multiplier;
     float strong_split_min_aspect_ratio;
+    float max_total_daughter_volume_ratio;
     float brightness_update_ema_alpha;
     float max_volume_growth_from_initial;
     float brightness_retry_step;
     int brightness_retry_max_attempts;
     int brightness_retry_iters_per_attempt;
     float brightness_retry_background_margin;
+    float brightness_retry_min_brightness_ratio;
     bool enable_brightness_recovery;
     ProbabilityConfig()
         : perturbation(0.0f),
           split(0.0f),
           split_cost(0.0f),
           split_elongation_threshold(1.3f),
+          split_gate_tolerance(0.001f),
           min_relative_split_gain_base(0.01f),
           min_relative_split_gain_strict(0.02f),
           phase1_accept_rate_threshold(0.02f),
@@ -123,12 +132,14 @@ public:
           split_recover_target_ratio(0.80f),
           strong_split_cost_multiplier(30.0f),
           strong_split_min_aspect_ratio(1.4f),
+          max_total_daughter_volume_ratio(1.5f),
           brightness_update_ema_alpha(0.35f),
           max_volume_growth_from_initial(1.45f),
           brightness_retry_step(0.02f),
           brightness_retry_max_attempts(10),
           brightness_retry_iters_per_attempt(120),
           brightness_retry_background_margin(0.01f),
+          brightness_retry_min_brightness_ratio(0.90f),
           enable_brightness_recovery(true) {
     }
 
@@ -144,6 +155,9 @@ public:
         }
         if (node["split_elongation_threshold"]) {
             split_elongation_threshold = node["split_elongation_threshold"].as<float>();
+        }
+        if (node["split_gate_tolerance"]) {
+            split_gate_tolerance = node["split_gate_tolerance"].as<float>();
         }
         if (node["min_relative_split_gain_base"]) {
             min_relative_split_gain_base = node["min_relative_split_gain_base"].as<float>();
@@ -172,6 +186,9 @@ public:
         if (node["strong_split_min_aspect_ratio"]) {
             strong_split_min_aspect_ratio = node["strong_split_min_aspect_ratio"].as<float>();
         }
+        if (node["max_total_daughter_volume_ratio"]) {
+            max_total_daughter_volume_ratio = node["max_total_daughter_volume_ratio"].as<float>();
+        }
         if (node["brightness_update_ema_alpha"]) {
             brightness_update_ema_alpha = node["brightness_update_ema_alpha"].as<float>();
         }
@@ -190,6 +207,9 @@ public:
         if (node["brightness_retry_background_margin"]) {
             brightness_retry_background_margin = node["brightness_retry_background_margin"].as<float>();
         }
+        if (node["brightness_retry_min_brightness_ratio"]) {
+            brightness_retry_min_brightness_ratio = node["brightness_retry_min_brightness_ratio"].as<float>();
+        }
         if (node["enable_brightness_recovery"]) {
             enable_brightness_recovery = node["enable_brightness_recovery"].as<bool>();
         }
@@ -200,6 +220,7 @@ public:
         std::cout << "split: " << split << std::endl;
         std::cout << "split_cost: " << split_cost << std::endl;
         std::cout << "split_elongation_threshold: " << split_elongation_threshold << std::endl;
+        std::cout << "split_gate_tolerance: " << split_gate_tolerance << std::endl;
         std::cout << "min_relative_split_gain_base: " << min_relative_split_gain_base << std::endl;
         std::cout << "min_relative_split_gain_strict: " << min_relative_split_gain_strict << std::endl;
         std::cout << "phase1_accept_rate_threshold: " << phase1_accept_rate_threshold << std::endl;
@@ -209,12 +230,14 @@ public:
         std::cout << "split_recover_target_ratio: " << split_recover_target_ratio << std::endl;
         std::cout << "strong_split_cost_multiplier: " << strong_split_cost_multiplier << std::endl;
         std::cout << "strong_split_min_aspect_ratio: " << strong_split_min_aspect_ratio << std::endl;
+        std::cout << "max_total_daughter_volume_ratio: " << max_total_daughter_volume_ratio << std::endl;
         std::cout << "brightness_update_ema_alpha: " << brightness_update_ema_alpha << std::endl;
         std::cout << "max_volume_growth_from_initial: " << max_volume_growth_from_initial << std::endl;
         std::cout << "brightness_retry_step: " << brightness_retry_step << std::endl;
         std::cout << "brightness_retry_max_attempts: " << brightness_retry_max_attempts << std::endl;
         std::cout << "brightness_retry_iters_per_attempt: " << brightness_retry_iters_per_attempt << std::endl;
         std::cout << "brightness_retry_background_margin: " << brightness_retry_background_margin << std::endl;
+        std::cout << "brightness_retry_min_brightness_ratio: " << brightness_retry_min_brightness_ratio << std::endl;
         std::cout << "enable_brightness_recovery: " << (enable_brightness_recovery ? "true" : "false") << std::endl;
     }
 };

@@ -227,6 +227,7 @@ CostCallbackPair Frame::perturb()
 {
     std::random_device rd;
     std::mt19937 gen(rd());
+    //TODO each cell have 1/n + 2
     std::uniform_int_distribution<> distrib(0, cells.size() - 1);
 
     // Randomly pick an index for a cell
@@ -284,7 +285,8 @@ CostCallbackPair Frame::split()
 
 CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float preOptMinorR,
                                      float preOptX, float preOptY, float preOptZ,
-                                     float splitElongationThreshold)
+                                     float splitElongationThreshold,
+                                     float splitGateTolerance)
 {
     if (index >= cells.size()) {
         return {0.0, [](bool accept) {}};
@@ -315,10 +317,12 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
         return {0.0, [](bool accept) {}};
     }
 
-    if (splitElongationThreshold > 0.0f && elongationRatio < splitElongationThreshold) {
+    const float gateTol = std::max(0.0f, splitGateTolerance);
+    if (splitElongationThreshold > 0.0f && elongationRatio + gateTol < splitElongationThreshold) {
         std::cout << "[Split Skip] " << oldCell.getCellParams().name
                   << " elongation_ratio=" << elongationRatio
-                  << " < threshold=" << splitElongationThreshold << std::endl;
+                  << " < threshold=" << splitElongationThreshold
+                  << " (tol=" << gateTol << ")" << std::endl;
         return {0.0, [](bool accept) {}};
     }
 

@@ -1,5 +1,11 @@
 #include "../includes/Lineage.hpp"
 #include <set>
+#include <cmath>
+
+namespace utils
+{
+    void applySigmoid(cv::Mat& img, float k, float c);
+}
 
 namespace {
 double maxInCurrentDynamicRange(int depth)
@@ -185,11 +191,588 @@ void rescaleStack(std::vector<cv::Mat> &slices, double invScale)
     }
 }
 
+std::vector<float> buildBlurFactors(float maxBlurFactor, float step)
+{
+    const float startFactor = 1.0f; // 1.0 means no extra blur.
+    const float endFactor = std::max(startFactor, maxBlurFactor);
+    if (endFactor <= startFactor + 1e-6f) {
+        return {startFactor};
+    }
+
+    const float safeStep = (step > 1e-6f) ? step : (endFactor - startFactor);
+    std::vector<float> factors;
+    for (float f = startFactor; f < endFactor - 1e-6f; f += safeStep) {
+        factors.push_back(f);
+    }
+    if (factors.empty() || std::abs(factors.back() - endFactor) > 1e-6f) {
+        factors.push_back(endFactor);
+    }
+    if (std::abs(factors.front() - startFactor) > 1e-6f) {
+        factors.insert(factors.begin(), startFactor);
+    }
+    return factors;
+}
+
+void applyBlurFactor(Image &image, float blurFactor)
+{
+    // Blur factor 1.0 is intentionally treated as "no blur".
+    const float sigma = std::max(0.0f, blurFactor - 1.0f);
+    if (sigma <= 1e-6f) {
+        return;
+    }
+    cv::GaussianBlur(image, image, cv::Size(0, 0), sigma);
+}
+
+void applySigmoidToStack(std::vector<cv::Mat> &slices, float sigmoidK, float sigmoidCenterUsed)
+{
+    for (auto &slice : slices) {
+        utils::applySigmoid(slice, sigmoidK, sigmoidCenterUsed);
+    }
+}
+
+std::vector<cv::Mat> fuseBlurSweepSigmoidStack(const std::vector<cv::Mat> &linearSlices,
+                                               const BaseConfig &config,
+                                               float frameSigmoidCenter)
+{
+    if (linearSlices.empty()) {
+        return {};
+    }
+
+    const float sigmoidK = (config.simulation.sigmoid_k > 0.0f) ? config.simulation.sigmoid_k : 30.0f;
+    const float sigmoidCenterUsed = frameSigmoidCenter + config.simulation.sigmoid_center_offset;
+    const std::vector<float> blurFactors =
+        buildBlurFactors(config.simulation.blur_sigma, config.simulation.blur_sweep_step);
+
+    std::vector<cv::Mat> fusedSlices;
+    fusedSlices.reserve(linearSlices.size());
+    for (const auto &slice : linearSlices) {
+        fusedSlices.push_back(cv::Mat::zeros(slice.size(), CV_32F));
+    }
+
+    std::vector<cv::Mat> workingSlices;
+    workingSlices.reserve(linearSlices.size());
+    for (float blurFactor : blurFactors) {
+        workingSlices.clear();
+        for (const auto &slice : linearSlices) {
+            workingSlices.push_back(slice.clone());
+        }
+
+        for (auto &slice : workingSlices) {
+            applyBlurFactor(slice, blurFactor);
+        }
+        applySigmoidToStack(workingSlices, sigmoidK, sigmoidCenterUsed);
+
+        for (size_t i = 0; i < workingSlices.size(); ++i) {
+            fusedSlices[i] += workingSlices[i];
+        }
+    }
+
+    const float invCount = 1.0f / static_cast<float>(blurFactors.size());
+    for (auto &slice : fusedSlices) {
+        slice *= invCount;
+        cv::min(slice, 1.0f, slice);
+        cv::max(slice, 0.0f, slice);
+    }
+
+    std::cout << "[Blur Sweep] factors=" << blurFactors.size()
+              << " range=[1," << std::max(1.0f, config.simulation.blur_sigma) << "]"
+              << " step=" << config.simulation.blur_sweep_step << std::endl;
+    return fusedSlices;
+}
+
 struct LoadedFrameData {
     std::vector<cv::Mat> linearZSlices;
     float sigmoidCenter = 0.0f;
     std::vector<int> calibrationZIndices;
 };
+
+constexpr double kPi = 3.14159265358979323846;
+
+struct PreOptShape {
+    float majorR;
+    float minorR;
+    float x;
+    float y;
+    float z;
+};
+
+struct Phase1Result {
+    size_t totalIterations = 0;
+    size_t acceptedCount = 0;
+    std::map<std::string, PreOptShape> preOptShapes;
+};
+
+struct SplitCandidate {
+    std::string parentName;
+    Spheroid child1;
+    Spheroid child2;
+    double costDiff;
+    double relGain;
+    double expectedDaughterVolume;
+};
+
+struct AcceptedSplit {
+    std::string parentName;
+    std::string child1Name;
+    std::string child2Name;
+    double expectedDaughterVolume;
+};
+
+double spheroidVolume(const Spheroid &cell)
+{
+    const auto p = cell.getCellParams();
+    return (4.0 / 3.0) * kPi * static_cast<double>(p.majorRadius) *
+           static_cast<double>(p.majorRadius) * static_cast<double>(p.minorRadius);
+}
+
+double shapeVolume(float majorR, float minorR)
+{
+    return (4.0 / 3.0) * kPi * static_cast<double>(majorR) *
+           static_cast<double>(majorR) * static_cast<double>(minorR);
+}
+
+size_t findCellIndexByName(const Frame &frame, const std::string &name)
+{
+    for (size_t i = 0; i < frame.cells.size(); ++i) {
+        if (frame.cells[i].getCellParams().name == name) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+std::map<std::string, double> collectPreviousVolumes(const std::vector<Frame> &frames, int frameIndex)
+{
+    std::map<std::string, double> previousVolumes;
+    if (frameIndex <= 0) {
+        return previousVolumes;
+    }
+
+    for (const auto &prevCell : frames[frameIndex - 1].cells) {
+        previousVolumes[prevCell.getCellParams().name] = spheroidVolume(prevCell);
+    }
+    return previousVolumes;
+}
+
+std::map<std::string, PreOptShape> snapshotPreOptShapes(const Frame &frame)
+{
+    std::map<std::string, PreOptShape> preOptShapes;
+    for (const auto &cell : frame.cells) {
+        const auto params = cell.getCellParams();
+        preOptShapes[params.name] = {
+            static_cast<float>(params.majorRadius),
+            static_cast<float>(params.minorRadius),
+            params.x,
+            params.y,
+            params.z
+        };
+    }
+    return preOptShapes;
+}
+
+Phase1Result runPhase1Perturbation(Frame &frame, const BaseConfig &config, int displayFrame)
+{
+    Phase1Result result;
+    result.totalIterations = frame.length() * config.simulation.iterations_per_cell;
+    result.preOptShapes = snapshotPreOptShapes(frame);
+
+    std::cout << "Total iterations: " << result.totalIterations << std::endl;
+    std::cout << "[Phase 1] Perturbation optimization for frame " << displayFrame
+              << " (" << frame.cells.size() << " cells, " << result.totalIterations
+              << " iterations)" << std::endl;
+
+    Cost costDiff = 0;
+    double residSum = 0;
+    double residCount = 0;
+    for (size_t i = 0; i < result.totalIterations; ++i) {
+        if (costDiff < 0) {
+            residSum += costDiff;
+            residCount++;
+        }
+        if (i % 100 == 0) {
+            if (residCount > 0) {
+                const double avgResidual = residSum / residCount;
+                std::cout << "Frame " << displayFrame << ", iteration " << i
+                          << " Difference of Residuals " << avgResidual << std::endl;
+            } else {
+                std::cout << "Frame " << displayFrame << ", iteration " << i
+                          << " -- No synthezised images selected" << std::endl;
+            }
+            residSum = 0;
+            residCount = 0;
+        }
+
+        auto perturbResult = frame.perturb();
+        costDiff = perturbResult.first;
+        const bool accepted = (costDiff < 0);
+        perturbResult.second(accepted);
+        if (accepted) {
+            result.acceptedCount++;
+        }
+    }
+
+    return result;
+}
+
+std::vector<SplitCandidate> collectSplitCandidates(Frame &frame,
+                                                   const BaseConfig &config,
+                                                   const std::map<std::string, PreOptShape> &preOptShapes,
+                                                   const Phase1Result &phase1,
+                                                   int displayFrame)
+{
+    const size_t initialCellCount = frame.cells.size();
+    std::cout << "[Phase 2] Split detection for frame " << displayFrame
+              << " (" << initialCellCount << " cells)" << std::endl;
+
+    const double acceptedFrac =
+        (phase1.totalIterations > 0)
+            ? (static_cast<double>(phase1.acceptedCount) / static_cast<double>(phase1.totalIterations))
+            : 0.0;
+    const double minRelativeSplitGain =
+        (acceptedFrac < config.prob.phase1_accept_rate_threshold)
+            ? config.prob.min_relative_split_gain_strict
+            : config.prob.min_relative_split_gain_base;
+    std::cout << "[Phase 2 Gate] frame " << displayFrame
+              << " phase1_accept_rate=" << acceptedFrac
+              << " min_rel_gain=" << minRelativeSplitGain
+              << " gate_tol=" << std::max(0.0f, config.prob.split_gate_tolerance) << std::endl;
+
+    std::vector<SplitCandidate> candidates;
+    candidates.reserve(initialCellCount);
+    const double baselineCost = frame.calculateCost(frame.getSynthFrame());
+
+    std::vector<std::string> cellNames;
+    cellNames.reserve(frame.cells.size());
+    for (const auto &cell : frame.cells) {
+        cellNames.push_back(cell.getCellParams().name);
+    }
+
+    for (const auto &name : cellNames) {
+        const size_t idx = findCellIndexByName(frame, name);
+        if (idx == SIZE_MAX) {
+            continue;
+        }
+
+        float preOptMajorR = 0.0f, preOptMinorR = 0.0f;
+        float preOptX = 0.0f, preOptY = 0.0f, preOptZ = 0.0f;
+        auto preIt = preOptShapes.find(name);
+        if (preIt != preOptShapes.end()) {
+            preOptMajorR = preIt->second.majorR;
+            preOptMinorR = preIt->second.minorR;
+            preOptX = preIt->second.x;
+            preOptY = preIt->second.y;
+            preOptZ = preIt->second.z;
+        }
+
+        auto splitResult = frame.trySplitCell(
+            idx,
+            preOptMajorR, preOptMinorR,
+            preOptX, preOptY, preOptZ,
+            config.prob.split_elongation_threshold,
+            config.prob.split_gate_tolerance);
+        const double costDiff = splitResult.first;
+        std::function<void(bool)> callback = splitResult.second;
+
+        const double gateTol = std::max(0.0, static_cast<double>(config.prob.split_gate_tolerance));
+        const double relGain = (baselineCost > 1e-9) ? (-costDiff / baselineCost) : 0.0;
+        const bool passAbsGate = costDiff <= (-config.prob.split_cost + gateTol);
+        const double strongAbsCutoff = -config.prob.split_cost * config.prob.strong_split_cost_multiplier;
+        const auto parentParams = frame.cells[idx].getCellParams();
+        const double parentMajor =
+            (preOptMajorR > 0.0f) ? preOptMajorR : static_cast<double>(parentParams.majorRadius);
+        const double parentMinor =
+            (preOptMinorR > 0.0f) ? preOptMinorR : static_cast<double>(parentParams.minorRadius);
+        const double parentAspectRatio = (parentMinor > 1e-6) ? (parentMajor / parentMinor) : 0.0;
+        const bool passStrongAbsOverride =
+            (costDiff <= (strongAbsCutoff + gateTol)) &&
+            (parentAspectRatio + gateTol >= config.prob.strong_split_min_aspect_ratio);
+        const bool passRelGate = (relGain + gateTol >= minRelativeSplitGain) || passStrongAbsOverride;
+
+        if (passAbsGate && passRelGate) {
+            Spheroid child1 = frame.cells[frame.cells.size() - 2];
+            Spheroid child2 = frame.cells[frame.cells.size() - 1];
+            const double parentVol = (preOptMajorR > 0.0f && preOptMinorR > 0.0f)
+                                         ? shapeVolume(preOptMajorR, preOptMinorR)
+                                         : spheroidVolume(frame.cells[idx]);
+            const double child1Vol = spheroidVolume(child1);
+            const double child2Vol = spheroidVolume(child2);
+            const double daughterVol = child1Vol + child2Vol;
+            const double maxDaughterVol = parentVol * config.prob.max_total_daughter_volume_ratio;
+            if (parentVol > 1e-6 && daughterVol > maxDaughterVol) {
+                std::cout << "[Split Skip] " << name
+                          << " daughter_volume_gate=fail"
+                          << " parent_vol=" << parentVol
+                          << " daughter_total_vol=" << daughterVol
+                          << " max_daughter_total_vol=" << maxDaughterVol
+                          << " ratio=" << (daughterVol / parentVol)
+                          << std::endl;
+            } else {
+                candidates.push_back({name, child1, child2, costDiff, relGain, parentVol * 0.5});
+            }
+        } else {
+            std::cout << "[Split Skip] " << name
+                      << " absGate=" << (passAbsGate ? "pass" : "fail")
+                      << " relGate=" << (passRelGate ? "pass" : "fail")
+                      << " strongAbsOverride=" << (passStrongAbsOverride ? "pass" : "fail")
+                      << " diff=" << costDiff
+                      << " split_cost=" << config.prob.split_cost
+                      << " strong_abs_cutoff=" << strongAbsCutoff
+                      << " aspect=" << parentAspectRatio
+                      << " strong_min_aspect=" << config.prob.strong_split_min_aspect_ratio
+                      << " rel_gain=" << relGain
+                      << " min_rel_gain=" << minRelativeSplitGain
+                      << " gate_tol=" << gateTol
+                      << std::endl;
+        }
+
+        callback(false);
+    }
+
+    return candidates;
+}
+
+std::vector<AcceptedSplit> applySplitCandidates(Frame &frame,
+                                                const std::vector<SplitCandidate> &candidates,
+                                                std::map<std::string, double> &referenceVolumes,
+                                                int displayFrame)
+{
+    std::vector<AcceptedSplit> acceptedSplits;
+    acceptedSplits.reserve(candidates.size());
+    for (const auto &candidate : candidates) {
+        const size_t idx = findCellIndexByName(frame, candidate.parentName);
+        if (idx == SIZE_MAX) {
+            continue;
+        }
+
+        frame.cells.erase(frame.cells.begin() + idx);
+        frame.cells.push_back(candidate.child1);
+        frame.cells.push_back(candidate.child2);
+
+        acceptedSplits.push_back({
+            candidate.parentName,
+            candidate.child1.getCellParams().name,
+            candidate.child2.getCellParams().name,
+            candidate.expectedDaughterVolume
+        });
+
+        const auto refIt = referenceVolumes.find(candidate.parentName);
+        const double parentRefVolume =
+            (refIt != referenceVolumes.end()) ? refIt->second : (candidate.expectedDaughterVolume * 2.0);
+        referenceVolumes[candidate.child1.getCellParams().name] = std::max(1.0, parentRefVolume * 0.5);
+        referenceVolumes[candidate.child2.getCellParams().name] = std::max(1.0, parentRefVolume * 0.5);
+
+        std::cout << "[Split Accepted] " << candidate.parentName << " split in frame "
+                  << displayFrame << " (diff=" << candidate.costDiff
+                  << ", rel_gain=" << candidate.relGain << ")" << std::endl;
+    }
+    return acceptedSplits;
+}
+
+void runPostSplitPerturbation(Frame &frame, const BaseConfig &config, size_t splitsApplied)
+{
+    if (splitsApplied == 0) {
+        return;
+    }
+
+    frame.regenerateSynthFrame();
+    const size_t postSplitIters = 2 * config.simulation.iterations_per_cell * splitsApplied;
+    for (size_t j = 0; j < postSplitIters; ++j) {
+        auto presult = frame.perturb();
+        presult.second(presult.first < 0);
+    }
+}
+
+void runBrightnessRecovery(Frame &frame,
+                           const BaseConfig &config,
+                           int displayFrame,
+                           const std::map<std::string, double> &previousVolumes,
+                           const std::vector<AcceptedSplit> &acceptedSplits)
+{
+    if (frame.cells.empty()) {
+        return;
+    }
+
+    const float brightnessFloor = std::clamp(
+        frame.getBackgroundColor() + config.prob.brightness_retry_background_margin, 0.0f, 1.0f);
+    const int maxAttempts = std::max(0, config.prob.brightness_retry_max_attempts);
+    const int itersPerAttempt = std::max(0, config.prob.brightness_retry_iters_per_attempt);
+    const float step = std::max(0.001f, config.prob.brightness_retry_step);
+    const float minBrightnessRatio = std::clamp(
+        config.prob.brightness_retry_min_brightness_ratio, 0.0f, 1.0f);
+    if (maxAttempts <= 0) {
+        return;
+    }
+
+    std::set<std::string> splitChildren;
+    for (const auto &s : acceptedSplits) {
+        splitChildren.insert(s.child1Name);
+        splitChildren.insert(s.child2Name);
+    }
+
+    auto runCellRecovery = [&](const std::string &name, double targetVolume, const std::string &reason) {
+        if (targetVolume <= 0.0) {
+            return;
+        }
+
+        size_t idx = findCellIndexByName(frame, name);
+        if (idx == SIZE_MAX) {
+            return;
+        }
+        const float initialRecoveryBrightness = frame.cells[idx].getBrightness();
+
+        for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+            idx = findCellIndexByName(frame, name);
+            if (idx == SIZE_MAX) {
+                return;
+            }
+
+            const double currentVolume = spheroidVolume(frame.cells[idx]);
+            if (currentVolume >= targetVolume) {
+                std::cout << "[Brightness Recovery] frame " << displayFrame
+                          << " cell=" << name
+                          << " status=success"
+                          << " reason=" << reason
+                          << " attempts=" << (attempt - 1)
+                          << " volume=" << currentVolume
+                          << " target=" << targetVolume << std::endl;
+                return;
+            }
+
+            const float oldBrightness = frame.cells[idx].getBrightness();
+            if (oldBrightness <= brightnessFloor + 1e-6f) {
+                std::cout << "[Brightness Recovery] frame " << displayFrame
+                          << " cell=" << name
+                          << " status=stopped_floor"
+                          << " reason=" << reason
+                          << " attempts=" << (attempt - 1)
+                          << " brightness=" << oldBrightness
+                          << " floor=" << brightnessFloor
+                          << " volume=" << currentVolume
+                          << " target=" << targetVolume << std::endl;
+                return;
+            }
+
+            const float newBrightness = std::max(brightnessFloor, oldBrightness - step);
+            if (initialRecoveryBrightness > 1e-6f) {
+                const float brightnessRatio = newBrightness / initialRecoveryBrightness;
+                if (brightnessRatio + 1e-6f < minBrightnessRatio) {
+                    std::cout << "[Brightness Recovery] frame " << displayFrame
+                              << " cell=" << name
+                              << " status=stopped_ratio"
+                              << " reason=" << reason
+                              << " attempts=" << (attempt - 1)
+                              << " brightness=" << oldBrightness << "->" << newBrightness
+                              << " ratio=" << brightnessRatio
+                              << " min_ratio=" << minBrightnessRatio
+                              << " baseline_brightness=" << initialRecoveryBrightness
+                              << " volume=" << currentVolume
+                              << " target=" << targetVolume << std::endl;
+                    return;
+                }
+            }
+            frame.cells[idx].setBrightness(newBrightness, true);
+            frame.regenerateSynthFrame();
+            for (int k = 0; k < itersPerAttempt; ++k) {
+                auto recoveryPerturb = frame.perturb();
+                recoveryPerturb.second(recoveryPerturb.first < 0);
+            }
+
+            const double volumeAfter = spheroidVolume(frame.cells[idx]);
+            std::cout << "[Brightness Recovery] frame " << displayFrame
+                      << " cell=" << name
+                      << " reason=" << reason
+                      << " attempt=" << attempt
+                      << " brightness=" << oldBrightness << "->" << newBrightness
+                      << " volume=" << currentVolume << "->" << volumeAfter
+                      << " target=" << targetVolume << std::endl;
+        }
+
+        idx = findCellIndexByName(frame, name);
+        if (idx != SIZE_MAX) {
+            const double finalVolume = spheroidVolume(frame.cells[idx]);
+            std::cout << "[Brightness Recovery] frame " << displayFrame
+                      << " cell=" << name
+                      << " status=max_attempts"
+                      << " reason=" << reason
+                      << " attempts=" << maxAttempts
+                      << " final_volume=" << finalVolume
+                      << " target=" << targetVolume << std::endl;
+        }
+    };
+
+    for (const auto &cell : frame.cells) {
+        const auto name = cell.getCellParams().name;
+        if (splitChildren.find(name) != splitChildren.end()) {
+            continue;
+        }
+
+        auto prevIt = previousVolumes.find(name);
+        if (prevIt == previousVolumes.end()) {
+            continue;
+        }
+        const double prevVolume = prevIt->second;
+        if (prevVolume <= 0.0) {
+            continue;
+        }
+
+        const double curVolume = spheroidVolume(cell);
+        if (curVolume < prevVolume * config.prob.nonsplit_shrink_trigger_ratio) {
+            const double targetVolume = prevVolume * config.prob.nonsplit_recover_target_ratio;
+            runCellRecovery(name, targetVolume, "non_split_shrink");
+        }
+    }
+
+    for (const auto &splitInfo : acceptedSplits) {
+        const double triggerVolume = splitInfo.expectedDaughterVolume * config.prob.split_shrink_trigger_ratio;
+        const double targetVolume = splitInfo.expectedDaughterVolume * config.prob.split_recover_target_ratio;
+        for (const auto &childName : {splitInfo.child1Name, splitInfo.child2Name}) {
+            const size_t idx = findCellIndexByName(frame, childName);
+            if (idx == SIZE_MAX) {
+                continue;
+            }
+            const double childVolume = spheroidVolume(frame.cells[idx]);
+            if (childVolume < triggerVolume) {
+                runCellRecovery(childName, targetVolume, "split_shrink");
+            }
+        }
+    }
+}
+
+void enforceVolumeCap(Frame &frame,
+                      const BaseConfig &config,
+                      std::map<std::string, double> &referenceVolumes,
+                      int displayFrame)
+{
+    const double maxGrowthFactor = std::max(1.0, static_cast<double>(config.prob.max_volume_growth_from_initial));
+    for (size_t i = 0; i < frame.cells.size(); ++i) {
+        const auto params = frame.cells[i].getCellParams();
+        auto refIt = referenceVolumes.find(params.name);
+        if (refIt == referenceVolumes.end() || refIt->second <= 0.0) {
+            continue;
+        }
+
+        const double allowedVolume = refIt->second * maxGrowthFactor;
+        const double currentVolume = spheroidVolume(frame.cells[i]);
+        if (currentVolume <= allowedVolume + 1e-6) {
+            continue;
+        }
+
+        const double scale = std::cbrt(allowedVolume / currentVolume);
+        const double targetMajor = static_cast<double>(params.majorRadius) * scale;
+        const double targetMinor = static_cast<double>(params.minorRadius) * scale;
+
+        std::unordered_map<std::string, float> capParams;
+        capParams["majorRadius"] = static_cast<float>(targetMajor - static_cast<double>(params.majorRadius));
+        capParams["minorRadius"] = static_cast<float>(targetMinor - static_cast<double>(params.minorRadius));
+        frame.cells[i] = frame.cells[i].getParameterizedCell(capParams);
+
+        std::cout << "[Volume Cap] frame " << displayFrame
+                  << " cell=" << params.name
+                  << " current_volume=" << currentVolume
+                  << " allowed_volume=" << allowedVolume
+                  << " scale=" << scale << std::endl;
+    }
+}
 } // namespace
 
 namespace utils
@@ -252,6 +835,26 @@ Image preprocessLinear(const Image &image, const BaseConfig &config, double scal
     SimulationConfig simConfig = config.simulation;
     const double blurSigma = (simConfig.blur_sigma > 0.0f) ? simConfig.blur_sigma : 1.5;
     cv::GaussianBlur(processedImage, processedImage, cv::Size(0, 0), blurSigma);
+    return processedImage;
+}
+
+Image preprocessLinearNoBlur(const Image &image, double scaleFactor)
+{
+    Image processedImage;
+
+    if (image.channels() == 3)
+    {
+        cv::cvtColor(image, processedImage, cv::COLOR_RGB2GRAY);
+    }
+    else
+    {
+        processedImage = image.clone();
+    }
+
+    const double safeScale = (scaleFactor > 0.0) ? scaleFactor : 255.0;
+    processedImage.convertTo(processedImage, CV_32F, 1.0 / safeScale);
+    cv::min(processedImage, 1.0f, processedImage);
+    cv::max(processedImage, 0.0f, processedImage);
     return processedImage;
 }
 
@@ -355,7 +958,7 @@ LoadedFrameData loadFrameLinearData(const std::string &imageFile, const BaseConf
         // Apply preprocessing on the full interpolated stack.
         linearZSlices.reserve(interpolatedGrayZSlices.size());
         for (const auto &slice : interpolatedGrayZSlices) {
-            linearZSlices.push_back(preprocessLinear(slice, config, avgSliceMax));
+            linearZSlices.push_back(preprocessLinearNoBlur(slice, avgSliceMax));
         }
 
         std::vector<int> processedCalibZ;
@@ -410,7 +1013,7 @@ LoadedFrameData loadFrameLinearData(const std::string &imageFile, const BaseConf
                   << " (from_calibration_center=" << frameBackground
                   << ", config_center=" << config.simulation.sigmoid_center
                   << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
-        linearZSlices.push_back(preprocessLinear(img, config, avgSliceMax));
+        linearZSlices.push_back(preprocessLinearNoBlur(img, avgSliceMax));
         interpolatedZSlices = std::move(linearZSlices);
     }
 
@@ -454,15 +1057,12 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
         }
         prevFrameMean = computeStackMean(real_frame);
 
-        const float sigmoidK = (config.simulation.sigmoid_k > 0.0f) ? config.simulation.sigmoid_k : 30.0f;
         const float sigmoidCenterUsed = frameSigmoidCenter + config.simulation.sigmoid_center_offset;
         std::cout << "[Sigmoid] center_used=" << sigmoidCenterUsed
                   << " (from_calibration_center=" << frameSigmoidCenter
                   << ", config_center=" << config.simulation.sigmoid_center
                   << ", center_offset=" << config.simulation.sigmoid_center_offset << ")" << std::endl;
-        for (auto &slice : real_frame) {
-            utils::applySigmoid(slice, sigmoidK, sigmoidCenterUsed);
-        }
+        real_frame = fuseBlurSweepSigmoidStack(real_frame, config, frameSigmoidCenter);
 
         double processedCalibrationBg = -1.0;
         if (!loadedFrame.calibrationZIndices.empty()) {
@@ -472,8 +1072,11 @@ Lineage::Lineage(std::map<std::string, std::vector<Spheroid>> initialCells,
             processedCalibrationBg = computeCalibrationZoneMean(real_frame, config.simulation);
         }
         if (processedCalibrationBg >= 0.0) {
-            frameBackground = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
-            std::cout << "[Calibration] processed_background=" << frameBackground << std::endl;
+            const float processedBgClamped = static_cast<float>(std::clamp(processedCalibrationBg, 0.0, 1.0));
+            // Keep frame background anchored to pre-sigmoid calibration.
+            // Processed-background can drift too low after blur-sweep fusion.
+            std::cout << "[Calibration] processed_background=" << processedBgClamped
+                      << " (not applied; using pre_sigmoid_background=" << frameBackground << ")" << std::endl;
         } else {
             std::cout << "[Calibration] no valid processed calibration voxels; fallback background="
                       << frameBackground << std::endl;
@@ -509,32 +1112,8 @@ void Lineage::optimize(int frameIndex)
     }
 
     Frame &frame = frames[frameIndex];
-    constexpr double kPi = 3.14159265358979323846;
-
-    auto spheroidVolume = [kPi](const Spheroid &cell) -> double {
-        const auto p = cell.getCellParams();
-        return (4.0 / 3.0) * kPi * static_cast<double>(p.majorRadius) *
-               static_cast<double>(p.majorRadius) * static_cast<double>(p.minorRadius);
-    };
-    auto shapeVolume = [kPi](float majorR, float minorR) -> double {
-        return (4.0 / 3.0) * kPi * static_cast<double>(majorR) *
-               static_cast<double>(majorR) * static_cast<double>(minorR);
-    };
-    auto findCellIndexByName = [&frame](const std::string &name) -> size_t {
-        for (size_t i = 0; i < frame.cells.size(); ++i) {
-            if (frame.cells[i].getCellParams().name == name) {
-                return i;
-            }
-        }
-        return SIZE_MAX;
-    };
-
-    std::map<std::string, double> previousVolumes;
-    if (frameIndex > 0) {
-        for (const auto &prevCell : frames[frameIndex - 1].cells) {
-            previousVolumes[prevCell.getCellParams().name] = spheroidVolume(prevCell);
-        }
-    }
+    const int displayFrame = firstFrame + frameIndex;
+    const std::map<std::string, double> previousVolumes = collectPreviousVolumes(frames, frameIndex);
 
     // Regenerate _synthFrame so it reflects the current cells.
     // After copyCellsForward(), _synthFrame is stale (background-only from
@@ -543,339 +1122,16 @@ void Lineage::optimize(int frameIndex)
     // any perturbation direction to be accepted during the bootstrap phase.
     frame.regenerateSynthFrame();
 
-    size_t totalIterations = frame.length() * config.simulation.iterations_per_cell;
-    std::cout << "Total iterations: " << totalIterations << std::endl;
-
-    Cost costDiff = 0;
-    double residSum = 0;
-    double residCount = 0;
-    size_t phase1AcceptedCount = 0;
-    double ovrResidual = 0;
-
-    struct PreOptShape {
-        float majorR;
-        float minorR;
-        float x, y, z;
-    };
-    std::map<std::string, PreOptShape> preOptShapes;
-    for (const auto &cell : frame.cells) {
-        auto params = cell.getCellParams();
-        preOptShapes[params.name] = {(float)params.majorRadius, (float)params.minorRadius,
-                                     params.x, params.y, params.z};
-    }
-
-    int displayFrame = firstFrame + frameIndex;
-    std::cout << "[Phase 1] Perturbation optimization for frame " << displayFrame
-              << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)" << std::endl;
-
-    for (size_t i = 0; i < totalIterations; ++i) {
-        if (costDiff < 0) {
-            residSum += costDiff;
-            residCount++;
-        }
-        if (i % 100 == 0) {
-            ovrResidual = residSum / residCount;
-            if (residCount > 0) {
-                std::cout << "Frame " << displayFrame << ", iteration " << i
-                          << " Difference of Residuals " << ovrResidual << std::endl;
-            } else {
-                std::cout << "Frame " << displayFrame << ", iteration " << i
-                          << " -- No synthezised images selected" << std::endl;
-            }
-            residSum = 0;
-            residCount = 0;
-        }
-
-        auto result = frame.perturb();
-        costDiff = result.first;
-        std::function<void(bool)> accept = result.second;
-        const bool accepted = (costDiff < 0);
-        accept(accepted);
-        if (accepted) {
-            phase1AcceptedCount++;
-        }
-    }
-
-    const size_t initialCellCount = frame.cells.size();
-    std::cout << "[Phase 2] Split detection for frame " << displayFrame
-              << " (" << initialCellCount << " cells)" << std::endl;
-
-    const double acceptedFrac =
-        (totalIterations > 0) ? (static_cast<double>(phase1AcceptedCount) / static_cast<double>(totalIterations)) : 0.0;
-    const double minRelativeSplitGain =
-        (acceptedFrac < config.prob.phase1_accept_rate_threshold)
-            ? config.prob.min_relative_split_gain_strict
-            : config.prob.min_relative_split_gain_base;
-    std::cout << "[Phase 2 Gate] frame " << displayFrame
-              << " phase1_accept_rate=" << acceptedFrac
-              << " min_rel_gain=" << minRelativeSplitGain << std::endl;
-
-    struct SplitCandidate {
-        std::string parentName;
-        Spheroid child1;
-        Spheroid child2;
-        double costDiff;
-        double relGain;
-        double expectedDaughterVolume;
-    };
-    std::vector<SplitCandidate> candidates;
-    candidates.reserve(initialCellCount);
-    const double baselineCost = frame.calculateCost(frame.getSynthFrame());
-
-    std::vector<std::string> cellNames;
-    cellNames.reserve(frame.cells.size());
-    for (const auto &cell : frame.cells) {
-        cellNames.push_back(cell.getCellParams().name);
-    }
-
-    for (const auto &name : cellNames) {
-        const size_t idx = findCellIndexByName(name);
-        if (idx == SIZE_MAX) {
-            continue;
-        }
-
-        float preOptMajorR = 0.0f, preOptMinorR = 0.0f;
-        float preOptX = 0.0f, preOptY = 0.0f, preOptZ = 0.0f;
-        auto it = preOptShapes.find(name);
-        if (it != preOptShapes.end()) {
-            preOptMajorR = it->second.majorR;
-            preOptMinorR = it->second.minorR;
-            preOptX = it->second.x;
-            preOptY = it->second.y;
-            preOptZ = it->second.z;
-        }
-
-        auto result = frame.trySplitCell(idx, preOptMajorR, preOptMinorR, preOptX, preOptY, preOptZ, config.prob.split_elongation_threshold);
-        costDiff = result.first;
-        std::function<void(bool)> callback = result.second;
-
-        const double relGain = (baselineCost > 1e-9) ? (-costDiff / baselineCost) : 0.0;
-        const bool passAbsGate = costDiff < -config.prob.split_cost;
-        const double strongAbsCutoff = -config.prob.split_cost * config.prob.strong_split_cost_multiplier;
-        const auto parentParams = frame.cells[idx].getCellParams();
-        const double parentMajor = (preOptMajorR > 0.0f) ? preOptMajorR : static_cast<double>(parentParams.majorRadius);
-        const double parentMinor = (preOptMinorR > 0.0f) ? preOptMinorR : static_cast<double>(parentParams.minorRadius);
-        const double parentAspectRatio = (parentMinor > 1e-6) ? (parentMajor / parentMinor) : 0.0;
-        const bool passStrongAbsOverride =
-            (costDiff < strongAbsCutoff) && (parentAspectRatio >= config.prob.strong_split_min_aspect_ratio);
-        const bool passRelGate = (relGain >= minRelativeSplitGain) || passStrongAbsOverride;
-
-        if (passAbsGate && passRelGate) {
-            Spheroid child1 = frame.cells[frame.cells.size() - 2];
-            Spheroid child2 = frame.cells[frame.cells.size() - 1];
-            const double parentVol = (preOptMajorR > 0.0f && preOptMinorR > 0.0f)
-                                         ? shapeVolume(preOptMajorR, preOptMinorR)
-                                         : spheroidVolume(frame.cells[idx]);
-            candidates.push_back({name, child1, child2, costDiff, relGain, parentVol * 0.5});
-        } else {
-            std::cout << "[Split Skip] " << name
-                      << " absGate=" << (passAbsGate ? "pass" : "fail")
-                      << " relGate=" << (passRelGate ? "pass" : "fail")
-                      << " strongAbsOverride=" << (passStrongAbsOverride ? "pass" : "fail")
-                      << " diff=" << costDiff
-                      << " split_cost=" << config.prob.split_cost
-                      << " strong_abs_cutoff=" << strongAbsCutoff
-                      << " aspect=" << parentAspectRatio
-                      << " strong_min_aspect=" << config.prob.strong_split_min_aspect_ratio
-                      << " rel_gain=" << relGain
-                      << " min_rel_gain=" << minRelativeSplitGain
-                      << std::endl;
-        }
-
-        callback(false);
-    }
-
-    size_t splitsApplied = 0;
-    struct AcceptedSplit {
-        std::string parentName;
-        std::string child1Name;
-        std::string child2Name;
-        double expectedDaughterVolume;
-    };
-    std::vector<AcceptedSplit> acceptedSplits;
-    acceptedSplits.reserve(candidates.size());
-    for (const auto &candidate : candidates) {
-        size_t idx = findCellIndexByName(candidate.parentName);
-        if (idx == SIZE_MAX) {
-            continue;
-        }
-
-        frame.cells.erase(frame.cells.begin() + idx);
-        frame.cells.push_back(candidate.child1);
-        frame.cells.push_back(candidate.child2);
-        splitsApplied++;
-
-        acceptedSplits.push_back({candidate.parentName,
-                                  candidate.child1.getCellParams().name,
-                                  candidate.child2.getCellParams().name,
-                                  candidate.expectedDaughterVolume});
-        const auto refIt = referenceVolumes.find(candidate.parentName);
-        const double parentRefVolume =
-            (refIt != referenceVolumes.end()) ? refIt->second : (candidate.expectedDaughterVolume * 2.0);
-        referenceVolumes[candidate.child1.getCellParams().name] = std::max(1.0, parentRefVolume * 0.5);
-        referenceVolumes[candidate.child2.getCellParams().name] = std::max(1.0, parentRefVolume * 0.5);
-
-        std::cout << "[Split Accepted] " << candidate.parentName << " split in frame "
-                  << displayFrame << " (diff=" << candidate.costDiff
-                  << ", rel_gain=" << candidate.relGain << ")" << std::endl;
-    }
-
-    if (splitsApplied > 0) {
-        frame.regenerateSynthFrame();
-        size_t postSplitIters = 2 * config.simulation.iterations_per_cell * splitsApplied;
-        for (size_t j = 0; j < postSplitIters; ++j) {
-            auto presult = frame.perturb();
-            presult.second(presult.first < 0);
-        }
-    }
+    const Phase1Result phase1 = runPhase1Perturbation(frame, config, displayFrame);
+    const auto candidates = collectSplitCandidates(frame, config, phase1.preOptShapes, phase1, displayFrame);
+    const auto acceptedSplits = applySplitCandidates(frame, candidates, referenceVolumes, displayFrame);
+    runPostSplitPerturbation(frame, config, acceptedSplits.size());
 
     if (config.prob.enable_brightness_recovery && frameIndex > 0 && !frame.cells.empty()) {
-        const float brightnessFloor = std::clamp(frame.getBackgroundColor() + config.prob.brightness_retry_background_margin, 0.0f, 1.0f);
-        const int maxAttempts = std::max(0, config.prob.brightness_retry_max_attempts);
-        const int itersPerAttempt = std::max(0, config.prob.brightness_retry_iters_per_attempt);
-        const float step = std::max(0.001f, config.prob.brightness_retry_step);
-
-        std::set<std::string> splitChildren;
-        for (const auto &s : acceptedSplits) {
-            splitChildren.insert(s.child1Name);
-            splitChildren.insert(s.child2Name);
-        }
-
-        auto runBrightnessRecovery = [&](const std::string &name, double targetVolume, const std::string &reason) {
-            if (targetVolume <= 0.0 || maxAttempts <= 0) {
-                return;
-            }
-            size_t idx = findCellIndexByName(name);
-            if (idx == SIZE_MAX) {
-                return;
-            }
-
-            for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
-                idx = findCellIndexByName(name);
-                if (idx == SIZE_MAX) {
-                    return;
-                }
-                const double currentVolume = spheroidVolume(frame.cells[idx]);
-                if (currentVolume >= targetVolume) {
-                    std::cout << "[Brightness Recovery] frame " << displayFrame
-                              << " cell=" << name
-                              << " status=success"
-                              << " reason=" << reason
-                              << " attempts=" << (attempt - 1)
-                              << " volume=" << currentVolume
-                              << " target=" << targetVolume << std::endl;
-                    return;
-                }
-
-                const float oldBrightness = frame.cells[idx].getBrightness();
-                if (oldBrightness <= brightnessFloor + 1e-6f) {
-                    std::cout << "[Brightness Recovery] frame " << displayFrame
-                              << " cell=" << name
-                              << " status=stopped_floor"
-                              << " reason=" << reason
-                              << " attempts=" << (attempt - 1)
-                              << " brightness=" << oldBrightness
-                              << " floor=" << brightnessFloor
-                              << " volume=" << currentVolume
-                              << " target=" << targetVolume << std::endl;
-                    return;
-                }
-
-                const float newBrightness = std::max(brightnessFloor, oldBrightness - step);
-                frame.cells[idx].setBrightness(newBrightness, true);
-                frame.regenerateSynthFrame();
-                for (int k = 0; k < itersPerAttempt; ++k) {
-                    auto recoveryPerturb = frame.perturb();
-                    recoveryPerturb.second(recoveryPerturb.first < 0);
-                }
-
-                const double volumeAfter = spheroidVolume(frame.cells[idx]);
-                std::cout << "[Brightness Recovery] frame " << displayFrame
-                          << " cell=" << name
-                          << " reason=" << reason
-                          << " attempt=" << attempt
-                          << " brightness=" << oldBrightness << "->" << newBrightness
-                          << " volume=" << currentVolume << "->" << volumeAfter
-                          << " target=" << targetVolume << std::endl;
-            }
-
-            idx = findCellIndexByName(name);
-            if (idx != SIZE_MAX) {
-                const double finalVolume = spheroidVolume(frame.cells[idx]);
-                std::cout << "[Brightness Recovery] frame " << displayFrame
-                          << " cell=" << name
-                          << " status=max_attempts"
-                          << " reason=" << reason
-                          << " attempts=" << maxAttempts
-                          << " final_volume=" << finalVolume
-                          << " target=" << targetVolume << std::endl;
-            }
-        };
-
-        for (const auto &cell : frame.cells) {
-            const auto name = cell.getCellParams().name;
-            if (splitChildren.find(name) != splitChildren.end()) {
-                continue;
-            }
-            auto prevIt = previousVolumes.find(name);
-            if (prevIt == previousVolumes.end()) {
-                continue;
-            }
-            const double prevVolume = prevIt->second;
-            if (prevVolume <= 0.0) {
-                continue;
-            }
-            const double curVolume = spheroidVolume(cell);
-            if (curVolume < prevVolume * config.prob.nonsplit_shrink_trigger_ratio) {
-                const double targetVolume = prevVolume * config.prob.nonsplit_recover_target_ratio;
-                runBrightnessRecovery(name, targetVolume, "non_split_shrink");
-            }
-        }
-
-        for (const auto &splitInfo : acceptedSplits) {
-            const double triggerVolume = splitInfo.expectedDaughterVolume * config.prob.split_shrink_trigger_ratio;
-            const double targetVolume = splitInfo.expectedDaughterVolume * config.prob.split_recover_target_ratio;
-            for (const auto &childName : {splitInfo.child1Name, splitInfo.child2Name}) {
-                const size_t idx = findCellIndexByName(childName);
-                if (idx == SIZE_MAX) {
-                    continue;
-                }
-                const double childVolume = spheroidVolume(frame.cells[idx]);
-                if (childVolume < triggerVolume) {
-                    runBrightnessRecovery(childName, targetVolume, "split_shrink");
-                }
-            }
-        }
+        runBrightnessRecovery(frame, config, displayFrame, previousVolumes, acceptedSplits);
     }
 
-    const double maxGrowthFactor = std::max(1.0, static_cast<double>(config.prob.max_volume_growth_from_initial));
-    for (size_t i = 0; i < frame.cells.size(); ++i) {
-        const auto params = frame.cells[i].getCellParams();
-        auto refIt = referenceVolumes.find(params.name);
-        if (refIt == referenceVolumes.end() || refIt->second <= 0.0) {
-            continue;
-        }
-        const double allowedVolume = refIt->second * maxGrowthFactor;
-        const double currentVolume = spheroidVolume(frame.cells[i]);
-        if (currentVolume <= allowedVolume + 1e-6) {
-            continue;
-        }
-
-        const double scale = std::cbrt(allowedVolume / currentVolume);
-        const double targetMajor = static_cast<double>(params.majorRadius) * scale;
-        const double targetMinor = static_cast<double>(params.minorRadius) * scale;
-
-        std::unordered_map<std::string, float> capParams;
-        capParams["majorRadius"] = static_cast<float>(targetMajor - static_cast<double>(params.majorRadius));
-        capParams["minorRadius"] = static_cast<float>(targetMinor - static_cast<double>(params.minorRadius));
-        frame.cells[i] = frame.cells[i].getParameterizedCell(capParams);
-
-        std::cout << "[Volume Cap] frame " << displayFrame
-                  << " cell=" << params.name
-                  << " current_volume=" << currentVolume
-                  << " allowed_volume=" << allowedVolume
-                  << " scale=" << scale << std::endl;
-    }
+    enforceVolumeCap(frame, config, referenceVolumes, displayFrame);
 
     frame.regenerateSynthFrame();
     updateFrameCellBrightness(frameIndex);

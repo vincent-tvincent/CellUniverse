@@ -37,7 +37,8 @@ public:
     CostCallbackPair split();
     CostCallbackPair trySplitCell(size_t cellIndex, float preOptMajorR = 0.0f, float preOptMinorR = 0.0f,
                                   float preOptX = 0.0f, float preOptY = 0.0f, float preOptZ = 0.0f,
-                                  float splitElongationThreshold = 1.3f);
+                                  float splitElongationThreshold = 1.3f,
+                                  float splitGateTolerance = 0.0f);
     Cost gradientDescent();
     std::vector<cv::Mat> getSynthFrame();
     const std::vector<cv::Mat> &getRealFrame() const { return _realFrame; }

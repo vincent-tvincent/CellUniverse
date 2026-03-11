@@ -1390,7 +1390,6 @@ void EmbryoBrightTracker::run(const std::vector<fs::path> &imagePaths) {
                 // Only when ALL these constraints hold simultaneously do we consider the structure to be
                 // a true biological cell division and create two new child cells from the parent.
                 if (near1 && near2 && separated && farFromOthers1 && farFromOthers2) {
-                if (near1 && near2 && separated && farFromOthers1 && farFromOthers2) {
                     split = true;
 
                     c1 = prev;

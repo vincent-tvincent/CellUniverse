@@ -8,4 +8,5 @@ examples/output/
 examples/output_*/
 output/
 build/
-cmake-build-*/
+cmake-build-*/*runLog*.txt
+*_runLog_*.txt

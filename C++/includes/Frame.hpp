@@ -18,6 +18,17 @@ void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, std::vector
 class Frame
 {
 public:
+
+    struct BBox3D
+    {
+        int minX = 0;
+        int maxX = -1;
+        int minY = 0;
+        int maxY = -1;
+        int minZ = 0;
+        int maxZ = -1;
+    };
+
     // FIXME: Get rid of ImageStack entirely, use mat3D instead.
     // Also, the word "image" should never be used to represent the stack of 2D images in a TIF file; instead these should
     // be called "frames". Please try to find and change all such variable names to use "frame" rather than "image". An
@@ -29,6 +40,15 @@ public:
     std::vector<cv::Mat> generateSynthFrame();
     std::vector<cv::Mat> generateSynthFrameFast(Spheroid &oldCell, Spheroid &newCell);
     Cost calculateCost(const std::vector<cv::Mat> &synthFrame);
+
+    Cost calculateCostInBBox(const std::vector<cv::Mat> &synthFrame, const BBox3D &box);
+
+    BBox3D getCellBBox3D(const Spheroid &cell, int padXY = 2, int padZ = 1) const;
+    BBox3D getUnionBBox3D(const Spheroid &a, const Spheroid &b, int padXY = 2, int padZ = 1) const;
+    BBox3D getUnionBBox3D(const Spheroid &a, const Spheroid &b, const Spheroid &c, int padXY = 2, int padZ = 1) const;
+
+    void drawBoundingBoxesOnStack(std::vector<cv::Mat> &stack) const;
+
     std::vector<cv::Mat> generateOutputFrame();
     std::vector<cv::Mat> generateOutputSynthFrame();
     // DataFrame getCellsAsParams();

@@ -1,5 +1,109 @@
 #include "../includes/Frame.hpp"
 
+namespace
+{
+    static Frame::BBox3D clampBBox3D(
+        const Frame::BBox3D &box,
+        int width,
+        int height,
+        int depth)
+    {
+        Frame::BBox3D out = box;
+        out.minX = std::max(0, out.minX);
+        out.maxX = std::min(width - 1, out.maxX);
+        out.minY = std::max(0, out.minY);
+        out.maxY = std::min(height - 1, out.maxY);
+        out.minZ = std::max(0, out.minZ);
+        out.maxZ = std::min(depth - 1, out.maxZ);
+        return out;
+    }
+
+    static bool bboxValid(const Frame::BBox3D &box)
+    {
+        return box.minX <= box.maxX &&
+               box.minY <= box.maxY &&
+               box.minZ <= box.maxZ;
+    }
+
+    static Frame::BBox3D mergeBBox3D(const Frame::BBox3D &a, const Frame::BBox3D &b)
+    {
+        if (!bboxValid(a)) return b;
+        if (!bboxValid(b)) return a;
+
+        Frame::BBox3D out;
+
+        out.minX = std::min(a.minX, b.minX);
+        out.maxX = std::max(a.maxX, b.maxX);
+        out.minY = std::min(a.minY, b.minY);
+        out.maxY = std::max(a.maxY, b.maxY);
+        out.minZ = std::min(a.minZ, b.minZ);
+        out.maxZ = std::max(a.maxZ, b.maxZ);
+        return out;
+    }
+
+    static cv::Rect bboxToRectXY(const Frame::BBox3D &box)
+    {
+        return cv::Rect(
+            box.minX,
+            box.minY,
+            box.maxX - box.minX + 1,
+            box.maxY - box.minY + 1);
+    }
+
+    static void drawDashedLine(
+        cv::Mat &img,
+        cv::Point p0,
+        cv::Point p1,
+        const cv::Scalar &color,
+        int thickness,
+        int dashLen = 8,
+        int gapLen = 6)
+    {
+        cv::LineIterator it(img, p0, p1, 8);
+        bool draw = true;
+        int cnt = 0;
+
+        for (int i = 0; i < it.count; ++i, ++it)
+        {
+            if (draw)
+            {
+                cv::circle(img, it.pos(), std::max(1, thickness / 2), color, -1);
+            }
+
+            cnt++;
+            if (draw && cnt >= dashLen)
+            {
+                draw = false;
+                cnt = 0;
+            }
+            else if (!draw && cnt >= gapLen)
+            {
+                draw = true;
+                cnt = 0;
+            }
+        }
+    }
+
+    static void drawDashedRect(
+        cv::Mat &img,
+        const cv::Rect &rc,
+        const cv::Scalar &color,
+        int thickness,
+        int dashLen = 8,
+        int gapLen = 6)
+    {
+        cv::Point p1(rc.x, rc.y);
+        cv::Point p2(rc.x + rc.width, rc.y);
+        cv::Point p3(rc.x + rc.width, rc.y + rc.height);
+        cv::Point p4(rc.x, rc.y + rc.height);
+
+        drawDashedLine(img, p1, p2, color, thickness, dashLen, gapLen);
+        drawDashedLine(img, p2, p3, color, thickness, dashLen, gapLen);
+        drawDashedLine(img, p3, p4, color, thickness, dashLen, gapLen);
+        drawDashedLine(img, p4, p1, color, thickness, dashLen, gapLen);
+    }
+}
+
 // Function to interpolate between two slices
 void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, 
                        std::vector<cv::Mat>& processedSlices, int numInterpolations) {
@@ -103,6 +207,94 @@ cv::Size Frame::getImageShape()
     return _realFrame[0].size(); // Returns the size of the first image in the stack
 }
 
+Frame::BBox3D Frame::getCellBBox3D(const Spheroid &cell, int padXY, int padZ) const
+{
+    auto corners = cell.calculateCorners();
+    const std::vector<float> &minCorner = corners.first;
+    const std::vector<float> &maxCorner = corners.second;
+
+    Frame::BBox3D box;
+
+    box.minX = (int)std::floor(minCorner[0]) - padXY;
+    box.maxX = (int)std::ceil (maxCorner[0]) + padXY;
+    box.minY = (int)std::floor(minCorner[1]) - padXY;
+    box.maxY = (int)std::ceil (maxCorner[1]) + padXY;
+    box.minZ = (int)std::floor(minCorner[2]) - padZ;
+    box.maxZ = (int)std::ceil (maxCorner[2]) + padZ;
+
+    return clampBBox3D(box, _realFrame[0].cols, _realFrame[0].rows, (int)_realFrame.size());
+}
+
+Frame::BBox3D Frame::getUnionBBox3D(const Spheroid &a, const Spheroid &b, int padXY, int padZ) const
+{
+    Frame::BBox3D boxA = getCellBBox3D(a, padXY, padZ);
+    Frame::BBox3D boxB = getCellBBox3D(b, padXY, padZ);
+    return mergeBBox3D(boxA, boxB);
+}
+
+Frame::BBox3D Frame::getUnionBBox3D(
+    const Spheroid &a,
+    const Spheroid &b,
+    const Spheroid &c,
+    int padXY,
+    int padZ) const
+{
+    Frame::BBox3D ab = mergeBBox3D(getCellBBox3D(a, padXY, padZ), getCellBBox3D(b, padXY, padZ));
+    Frame::BBox3D abc = mergeBBox3D(ab, getCellBBox3D(c, padXY, padZ));
+    return abc;
+}
+
+Cost Frame::calculateCostInBBox(const std::vector<cv::Mat> &synthFrame, const Frame::BBox3D &box)
+{
+    if (!bboxValid(box))
+    {
+        return 0.0;
+    }
+
+    double totalCost = 0.0;
+    for (int z = box.minZ; z <= box.maxZ; ++z)
+    {
+        cv::Rect roi = bboxToRectXY(box);
+        totalCost += cv::norm(_realFrame[z](roi), synthFrame[z](roi), cv::NORM_L2);
+    }
+    return totalCost;
+}
+
+void Frame::drawBoundingBoxesOnStack(std::vector<cv::Mat> &stack) const
+{
+    for (size_t z = 0; z < stack.size(); ++z)
+    {
+        cv::Mat &img = stack[z];
+
+        if (img.channels() == 1)
+        {
+            cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
+        }
+
+        if (img.depth() != CV_8U)
+        {
+            img.convertTo(img, CV_8U, 255.0);
+        }
+
+        for (const auto &cell : cells)
+        {
+            Frame::BBox3D box = getCellBBox3D(cell, 2, 1);
+
+            if ((int)z < box.minZ || (int)z > box.maxZ)
+            {
+                continue;
+            }
+
+            drawDashedRect(
+                img,
+                bboxToRectXY(box),
+                cv::Scalar(255, 0, 255),
+                2);
+        }
+    }
+}
+
+
 Cost Frame::calculateCost(const std::vector<cv::Mat> &synthFrame)
 {
     if (_realFrame.size() != synthFrame.size())
@@ -187,6 +379,7 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
         realFrameWithOutlines.push_back(outputFrame);
     }
 
+    drawBoundingBoxesOnStack(realFrameWithOutlines);
     return realFrameWithOutlines;
 }
 
@@ -199,7 +392,6 @@ std::vector<cv::Mat> Frame::generateOutputSynthFrame()
         cv::Mat outputImage;
         if (synthImage.depth() != CV_8U)
         {
-            // Convert to 8-bit image if necessary, scaling pixel values by 255
             synthImage.convertTo(outputImage, CV_8U, 255.0);
         }
         else
@@ -210,6 +402,7 @@ std::vector<cv::Mat> Frame::generateOutputSynthFrame()
         outputSynthFrame.push_back(outputImage);
     }
 
+    drawBoundingBoxesOnStack(outputSynthFrame);
     return outputSynthFrame;
 }
 
@@ -247,11 +440,11 @@ CostCallbackPair Frame::perturb()
     // Synthesize new synthetic image
     auto newSynthFrame = generateSynthFrameFast(oldCell, cells[index]);
 
-    // Get the cost of the new synthetic image
-    double newCost = calculateCost(newSynthFrame);
+    // Compute residual only inside the union bbox of old/new cell
+    Frame::BBox3D localBox = getUnionBBox3D(oldCell, cells[index], 3, 1);
 
-    // If the difference is greater than the threshold, revert to the old cell
-    double oldCost = calculateCost(_synthFrame);
+    double newCost = calculateCostInBBox(newSynthFrame, localBox);
+    double oldCost = calculateCostInBBox(_synthFrame, localBox);
 
     CallBackFunc callback = [this, newSynthFrame, oldCell, index](bool accept)
     {
@@ -365,8 +558,11 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
 
     // --- Post-split burn-in: optimize daughters before cost comparison ---
     auto bestSynthFrame = generateSynthFrame();
-    double bestCost = calculateCost(bestSynthFrame);
-    double oldCost = calculateCost(_synthFrame);
+
+    Frame::BBox3D splitLocalBox = getUnionBBox3D(oldCell, child1, child2, 4, 2);
+
+    double bestCost = calculateCostInBBox(bestSynthFrame, splitLocalBox);
+    double oldCost = calculateCostInBBox(_synthFrame, splitLocalBox);
 
     auto savedSynthFrame = _synthFrame;
     _synthFrame = bestSynthFrame;
@@ -409,7 +605,10 @@ CostCallbackPair Frame::trySplitCell(size_t index, float preOptMajorR, float pre
         }
 
         auto trialFrame = generateSynthFrameFast(saved, cells[dIdx]);
-        double trialCost = calculateCost(trialFrame);
+
+        Frame::BBox3D trialBox = getUnionBBox3D(saved, cells[dIdx], 3, 1);
+
+        double trialCost = calculateCostInBBox(trialFrame, trialBox);
 
         if (trialCost < bestCost) {
             bestSynthFrame = trialFrame;

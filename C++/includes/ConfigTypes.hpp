@@ -80,26 +80,10 @@ public:
     float split_cost;
     float split_elongation_threshold;
     float overlap_penalty_weight;
-    float size_reduction_penalty_weight;
-    float split_fake_overlap_volume_fraction_threshold;
-    float split_fake_volume_ratio_threshold;
-    float split_minor_axis_alignment_tolerance_degrees;
-    float split_minor_axis_alignment_flatness_ratio_threshold;
-    float split_minor_axis_alignment_min_radius_disable_threshold;
-    float split_search_radius_multiplier;
-    float split_fake_bridge_brightness_similarity_threshold;
     int split_burn_in_iterations = 500;
     float max_split_probability = 0.5f;
     ProbabilityConfig() : split(0.0f), split_cost(0.0f),
-                          split_elongation_threshold(1.3f), overlap_penalty_weight(1000.0f),
-                          size_reduction_penalty_weight(0.0f),
-                          split_fake_overlap_volume_fraction_threshold(0.30f),
-                          split_fake_volume_ratio_threshold(2.0f),
-                          split_minor_axis_alignment_tolerance_degrees(20.0f),
-                          split_minor_axis_alignment_flatness_ratio_threshold(0.5f),
-                          split_minor_axis_alignment_min_radius_disable_threshold(0.0f),
-                          split_search_radius_multiplier(3.0f),
-                          split_fake_bridge_brightness_similarity_threshold(0.9f) {
+                          split_elongation_threshold(1.3f), overlap_penalty_weight(1000.0f) {
     }
 
     void explodeConfig(const YAML::Node& node) {
@@ -115,39 +99,6 @@ public:
         if (node["overlap_penalty_weight"]) {
             overlap_penalty_weight = node["overlap_penalty_weight"].as<float>();
         }
-        if (node["size_reduction_penalty_weight"]) {
-            size_reduction_penalty_weight = node["size_reduction_penalty_weight"].as<float>();
-        }
-        if (node["split_fake_overlap_volume_fraction_threshold"]) {
-            split_fake_overlap_volume_fraction_threshold =
-                node["split_fake_overlap_volume_fraction_threshold"].as<float>();
-        }
-        if (node["split_fake_volume_ratio_threshold"]) {
-            split_fake_volume_ratio_threshold =
-                node["split_fake_volume_ratio_threshold"].as<float>();
-        } else if (node["split_fake_radius_ratio_threshold"]) {
-            split_fake_volume_ratio_threshold =
-                node["split_fake_radius_ratio_threshold"].as<float>();
-        }
-        if (node["split_minor_axis_alignment_tolerance_degrees"]) {
-            split_minor_axis_alignment_tolerance_degrees =
-                node["split_minor_axis_alignment_tolerance_degrees"].as<float>();
-        }
-        if (node["split_minor_axis_alignment_flatness_ratio_threshold"]) {
-            split_minor_axis_alignment_flatness_ratio_threshold =
-                node["split_minor_axis_alignment_flatness_ratio_threshold"].as<float>();
-        }
-        if (node["split_minor_axis_alignment_min_radius_disable_threshold"]) {
-            split_minor_axis_alignment_min_radius_disable_threshold =
-                node["split_minor_axis_alignment_min_radius_disable_threshold"].as<float>();
-        }
-        if (node["split_search_radius_multiplier"]) {
-            split_search_radius_multiplier = node["split_search_radius_multiplier"].as<float>();
-        }
-        if (node["split_fake_bridge_brightness_similarity_threshold"]) {
-            split_fake_bridge_brightness_similarity_threshold =
-                node["split_fake_bridge_brightness_similarity_threshold"].as<float>();
-        }
         if (node["split_burn_in_iterations"]) {
             split_burn_in_iterations = node["split_burn_in_iterations"].as<int>();
         }
@@ -160,22 +111,7 @@ public:
         std::cout << "split: " << split << '\n';
         std::cout << "split_cost: " << split_cost << '\n';
         std::cout << "split_elongation_threshold: " << split_elongation_threshold << '\n';
-        std::cout << "overlap_penalty_weight: " << overlap_penalty_weight << '\n';
-        std::cout << "size_reduction_penalty_weight: " << size_reduction_penalty_weight << '\n';
-        std::cout << "split_fake_overlap_volume_fraction_threshold: "
-                  << split_fake_overlap_volume_fraction_threshold << '\n';
-        std::cout << "split_fake_volume_ratio_threshold: "
-                  << split_fake_volume_ratio_threshold << '\n';
-        std::cout << "split_minor_axis_alignment_tolerance_degrees: "
-                  << split_minor_axis_alignment_tolerance_degrees << '\n';
-        std::cout << "split_minor_axis_alignment_flatness_ratio_threshold: "
-                  << split_minor_axis_alignment_flatness_ratio_threshold << '\n';
-        std::cout << "split_minor_axis_alignment_min_radius_disable_threshold: "
-                  << split_minor_axis_alignment_min_radius_disable_threshold << '\n';
-        std::cout << "split_search_radius_multiplier: "
-                  << split_search_radius_multiplier << '\n';
-        std::cout << "split_fake_bridge_brightness_similarity_threshold: "
-                  << split_fake_bridge_brightness_similarity_threshold << std::endl;
+        std::cout << "overlap_penalty_weight: " << overlap_penalty_weight << std::endl;
     }
 };
 
@@ -249,7 +185,6 @@ public:
     double maxMinorRadius{};
     double minBrightness{0.1};
     double maxBrightness{1.0};
-    float splitBrightestFraction{0.10f};
     float brightnessUpdateBlend{0.2f};
     float brightnessMeanAmplification{1.0f};
     float volumeRecoveryLossFractionThreshold{0.4f};
@@ -278,7 +213,6 @@ public:
         maxMinorRadius = node["maxMinorRadius"].as<double>();
         if (node["minBrightness"]) minBrightness = node["minBrightness"].as<double>();
         if (node["maxBrightness"]) maxBrightness = node["maxBrightness"].as<double>();
-        if (node["splitBrightestFraction"]) splitBrightestFraction = node["splitBrightestFraction"].as<float>();
         if (node["brightnessUpdateBlend"]) brightnessUpdateBlend = node["brightnessUpdateBlend"].as<float>();
         if (node["brightnessMeanAmplification"]) brightnessMeanAmplification = node["brightnessMeanAmplification"].as<float>();
         if (node["volumeRecoveryLossFractionThreshold"]) {

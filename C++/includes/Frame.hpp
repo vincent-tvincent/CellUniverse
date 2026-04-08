@@ -30,8 +30,7 @@ public:
     std::vector<cv::Mat> generateOutputSynthFrame();
     // DataFrame getCellsAsParams();
     size_t length() const;
-    CostCallbackPair perturbCell(size_t index, float overlapWeight = 1000.0f,
-                                 float sizeReductionWeight = 0.0f);
+    CostCallbackPair perturbCell(size_t index, float overlapWeight = 1000.0f);
     double computeOverlapPenalty(float weight) const;
     double computeOverlapForCell(size_t cellIdx, float weight) const;
 
@@ -40,14 +39,7 @@ public:
     CostCallbackPair trySplitCell(size_t cellIndex, float preOptMajorR = 0.0f, float preOptMinorR = 0.0f,
                                   float preOptX = 0.0f, float preOptY = 0.0f, float preOptZ = 0.0f,
                                   float splitElongationThreshold = 1.3f,
-                                  float overlapWeight = 1000.0f,
-                                  float fakeSplitOverlapVolumeFractionThreshold = 0.30f,
-                                  float fakeSplitVolumeRatioThreshold = 2.0f,
-                                  float splitSearchRadiusMultiplier = 3.0f,
-                                  float splitMinorAxisAlignmentToleranceDegrees = 20.0f,
-                                  float splitMinorAxisAlignmentFlatnessRatioThreshold = 0.5f,
-                                  float splitMinorAxisAlignmentMinRadiusDisableThreshold = 0.0f,
-                                  float splitFakeBridgeBrightnessSimilarityThreshold = 0.9f);
+                                  float overlapWeight = 1000.0f);
     std::vector<cv::Mat> getSynthFrame();
     const std::vector<cv::Mat>& getRealFrame() const { return _realFrame; }
     void setBackgroundColor(float backgroundColor) { simulationConfig.background_color = backgroundColor; }

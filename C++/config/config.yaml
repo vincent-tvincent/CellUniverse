@@ -64,11 +64,6 @@ cell:
   flatCellRotationRefineAngleStep: 0.15
   flatCellRotationRefineMaxOffsetDegrees: 15.0
   flatCellRotationRefinePasses: 2
-
-
-
-  splitBrightestFraction: 0.065
-
 # Simulation settings
 simulation:
   iterations_per_cell: 350
@@ -95,15 +90,7 @@ simulation:
 prob:
   split: 0.03
   split_cost: 20
-  split_elongation_threshold: 1.1
-  overlap_penalty_weight: 500.0
-  size_reduction_penalty_weight: 0.0
-  split_fake_overlap_volume_fraction_threshold: 0.15
-  split_fake_volume_ratio_threshold: 6.0
-  split_search_radius_multiplier: 3.0
-  split_minor_axis_alignment_tolerance_degrees: 150.0
-  split_minor_axis_alignment_flatness_ratio_threshold: 0.5
-  split_minor_axis_alignment_min_radius_disable_threshold: 5.0
-  split_fake_bridge_brightness_similarity_threshold: 0.99
-  split_burn_in_iterations: 1000
-  max_split_probability: 0.2
+  split_elongation_threshold: 1.5
+  overlap_penalty_weight: 1000.0
+  split_burn_in_iterations: 500
+  max_split_probability: 0.5

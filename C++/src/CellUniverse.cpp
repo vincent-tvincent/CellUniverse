@@ -597,7 +597,6 @@ void CellUniverse::optimize(int frameIndex)
     std::uniform_real_distribution<float> uniform01(0.0f, 1.0f);
 
     const float overlapWeight = config.prob.overlap_penalty_weight;
-    const float sizeReductionWeight = config.prob.size_reduction_penalty_weight;
     const float baseSplitProb = config.prob.split; // base probability (e.g., 0.03)
 
     // No splits on the first frame — cells can't divide before any time has passed
@@ -708,14 +707,7 @@ void CellUniverse::optimize(int frameIndex)
             auto result = frame.trySplitCell(cellIdx, preOptMajorR, preOptMinorR,
                                              preOptX, preOptY, preOptZ,
                                              config.prob.split_elongation_threshold,
-                                             overlapWeight,
-                                             config.prob.split_fake_overlap_volume_fraction_threshold,
-                                             config.prob.split_fake_volume_ratio_threshold,
-                                             config.prob.split_search_radius_multiplier,
-                                             config.prob.split_minor_axis_alignment_tolerance_degrees,
-                                             config.prob.split_minor_axis_alignment_flatness_ratio_threshold,
-                                             config.prob.split_minor_axis_alignment_min_radius_disable_threshold,
-                                             config.prob.split_fake_bridge_brightness_similarity_threshold);
+                                             overlapWeight);
             double costDiff = result.first;
             auto callback = result.second;
 
@@ -746,7 +738,7 @@ void CellUniverse::optimize(int frameIndex)
             }
         } else {
             // --- Try perturbation ---
-            auto result = frame.perturbCell(cellIdx, overlapWeight, sizeReductionWeight);
+            auto result = frame.perturbCell(cellIdx, overlapWeight);
             double costDiff = result.first;
             auto callback = result.second;
 

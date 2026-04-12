@@ -28,23 +28,23 @@ cell:
   # Ellipsoid a-axis radius perturbation. This is the local x-axis radius
   # in the cell's own frame, not necessarily the longest radius after rotation.
   aRadius:
-    increase_prob: 0.5
+    increase_prob: 0.9
     decrease_prob: 0.7
     mu: 0
-    sigma: 10
+    sigma: 20
   # Ellipsoid b-axis radius perturbation. Independent from aRadius.
   bRadius:
-    increase_prob: 0.5
+    increase_prob: 0.9
     decrease_prob: 0.7
     mu: 0
-    sigma: 10
+    sigma: 20
   # Ellipsoid c-axis radius perturbation. Often tuned lower / tighter for
   # flatter cells because it is commonly the shortest axis.
   cRadius:
-    increase_prob: 0.5
-    decrease_prob: 0.85
+    increase_prob: 0.75
+    decrease_prob: 0.9
     mu: 0
-    sigma: 10
+    sigma: 20
   # Rotation perturbation — tuned DOWN from (prob 0.9, sigma 0.1) on
   # 2026-04-11 because the old values were fine under oblate (a==b makes
   # rotation around z a structural no-op, so the random walk was invisible)
@@ -111,16 +111,23 @@ cell:
   brightnessProbabilityTrust: 0.3
 
   # Same adaptive-probability controls for the a-axis radius perturbation.
-  aRadiusProbabilityStep: 0.01
+  aRadiusProbabilityStep: 0.05
   aRadiusProbabilityTrust: 0.1
 
   # Same adaptive-probability controls for the c-axis radius perturbation.
-  cRadiusProbabilityStep: 0.01
+  cRadiusProbabilityStep: 0.05
   cRadiusProbabilityTrust: 0.1
 
   # Same adaptive-probability controls for the b-axis radius perturbation.
-  bRadiusProbabilityStep: 0.02
+  bRadiusProbabilityStep: 0.05
   bRadiusProbabilityTrust: 0.1
+
+  # After frame 1, before each new frame starts, reduce the increase
+  # probability of the CURRENT shortest radius by this amount so the
+  # shortest axis is a bit less likely to expand than the other two.
+  # Guarded: if the current increase probability is already at or below
+  # this value, the reduction is skipped instead of pushing it near 0.
+  shortestRadiusExpansionPenalty: 0.1
 
   # Exponential moving average blend for brightness re-estimation from image
   # evidence. Higher means keep more of the previous value, lower means react
@@ -128,11 +135,11 @@ cell:
   brightnessUpdateBlend: 0.9
   # Multiplier applied after measuring image brightness before blending back
   # into the cell state. Values >1 push fitted cell brightness brighter.
-  brightnessMeanAmplification: 1.2
+  brightnessMeanAmplification: 1.1
   # When updating a cell's brightness from image content, only the brightest
   # top fraction of voxels inside the cell are averaged. 0.8 means use the
   # top 80% brightest in-cell voxels; 1.0 means use the full cell.
-  brightnessMeasurementTopPercentile: 0.8
+  brightnessMeasurementTopPercentile: 0.5
 
 # Image preprocessing pipeline — iterative contrast enhancer ported from
 # scripts/image_processor_clean.py. No sigmoid — the old sigmoid fields
@@ -246,7 +253,7 @@ prob:
 
   # Minimum cost improvement required for a split to be accepted. More
   # negative candidate-vs-parent cost is better; making this larger is stricter.
-  split_cost: 15
+  split_cost: 30
   # Weight on daughter overlap in the split candidate cost.
   overlap_penalty_weight: 500.0
   # Penalty for shrinking daughters too much relative to the source parent.

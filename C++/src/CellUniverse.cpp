@@ -1030,12 +1030,88 @@ void CellUniverse::copyCellsForward(size_t to)
     // assumes cells have deepcopy copy constructors
     frames[to].cells = frames[to - 1].cells;
     if (config.cell) {
+        const float shortestRadiusExpansionPenalty =
+            std::max(0.0f, config.cell->shortestRadiusExpansionPenalty);
         for (auto &cell : frames[to].cells) {
             cell.blendAdaptivePerturbProbabilitiesWithConfig(
                 config.cell->brightnessProbabilityTrust,
                 config.cell->aRadiusProbabilityTrust,
                 config.cell->cRadiusProbabilityTrust,
                 config.cell->bRadiusProbabilityTrust);
+
+            if (shortestRadiusExpansionPenalty <= 0.0f) {
+                continue;
+            }
+
+            const float aRadius = cell.getARadius();
+            const float bRadius = cell.getBRadius();
+            const float cRadius = cell.getCRadius();
+            const float shortestRadius = std::min({aRadius, bRadius, cRadius});
+            const bool aIsShortest = aRadius <= shortestRadius + 1e-6f;
+            const bool bIsShortest = bRadius <= shortestRadius + 1e-6f;
+            const bool cIsShortest = cRadius <= shortestRadius + 1e-6f;
+
+            // After frame 1, make the CURRENT shortest axis a bit less likely
+            // to expand, and redistribute that same amount evenly to the
+            // other axes so they become more likely to expand. If subtracting
+            // the configured penalty would push a shortest axis close to zero,
+            // skip the reduction for that axis.
+            float appliedPenalty = 0.0f;
+            if (aIsShortest) {
+                const float currentIncrease = cell.getARadiusIncreaseProbability();
+                if (currentIncrease > shortestRadiusExpansionPenalty) {
+                    const float delta = std::min(shortestRadiusExpansionPenalty, currentIncrease);
+                    cell.setARadiusPerturbProbabilities(
+                        currentIncrease - delta,
+                        cell.getARadiusDecreaseProbability());
+                    appliedPenalty += delta;
+                }
+            }
+            if (bIsShortest) {
+                const float currentIncrease = cell.getBRadiusIncreaseProbability();
+                if (currentIncrease > shortestRadiusExpansionPenalty) {
+                    const float delta = std::min(shortestRadiusExpansionPenalty, currentIncrease);
+                    cell.setBRadiusPerturbProbabilities(
+                        currentIncrease - delta,
+                        cell.getBRadiusDecreaseProbability());
+                    appliedPenalty += delta;
+                }
+            }
+            if (cIsShortest) {
+                const float currentIncrease = cell.getCRadiusIncreaseProbability();
+                if (currentIncrease > shortestRadiusExpansionPenalty) {
+                    const float delta = std::min(shortestRadiusExpansionPenalty, currentIncrease);
+                    cell.setCRadiusPerturbProbabilities(
+                        currentIncrease - delta,
+                        cell.getCRadiusDecreaseProbability());
+                    appliedPenalty += delta;
+                }
+            }
+
+            const int nonShortestCount =
+                static_cast<int>(!aIsShortest) +
+                static_cast<int>(!bIsShortest) +
+                static_cast<int>(!cIsShortest);
+            if (appliedPenalty <= 0.0f || nonShortestCount <= 0) {
+                continue;
+            }
+
+            const float rewardPerOtherAxis = appliedPenalty / static_cast<float>(nonShortestCount);
+            if (!aIsShortest) {
+                cell.setARadiusPerturbProbabilities(
+                    cell.getARadiusIncreaseProbability() + rewardPerOtherAxis,
+                    cell.getARadiusDecreaseProbability());
+            }
+            if (!bIsShortest) {
+                cell.setBRadiusPerturbProbabilities(
+                    cell.getBRadiusIncreaseProbability() + rewardPerOtherAxis,
+                    cell.getBRadiusDecreaseProbability());
+            }
+            if (!cIsShortest) {
+                cell.setCRadiusPerturbProbabilities(
+                    cell.getCRadiusIncreaseProbability() + rewardPerOtherAxis,
+                    cell.getCRadiusDecreaseProbability());
+            }
         }
     }
 }

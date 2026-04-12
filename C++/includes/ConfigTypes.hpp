@@ -406,6 +406,7 @@ public:
     float bRadiusProbabilityTrust{1.0f};
     float cRadiusProbabilityStep{0.02f};
     float cRadiusProbabilityTrust{1.0f};
+    float shortestRadiusExpansionPenalty{0.1f};
     float brightnessUpdateBlend{0.2f};
     float brightnessMeanAmplification{1.0f};
     float brightnessMeasurementTopPercentile{0.3f};
@@ -454,6 +455,7 @@ public:
         if (node["bRadiusProbabilityTrust"]) bRadiusProbabilityTrust = node["bRadiusProbabilityTrust"].as<float>();
         if (node["cRadiusProbabilityStep"]) cRadiusProbabilityStep = node["cRadiusProbabilityStep"].as<float>();
         if (node["cRadiusProbabilityTrust"]) cRadiusProbabilityTrust = node["cRadiusProbabilityTrust"].as<float>();
+        if (node["shortestRadiusExpansionPenalty"]) shortestRadiusExpansionPenalty = node["shortestRadiusExpansionPenalty"].as<float>();
         if (node["brightnessUpdateBlend"]) brightnessUpdateBlend = node["brightnessUpdateBlend"].as<float>();
         if (node["brightnessMeanAmplification"]) brightnessMeanAmplification = node["brightnessMeanAmplification"].as<float>();
         if (node["brightnessMeasurementTopPercentile"]) brightnessMeasurementTopPercentile = node["brightnessMeasurementTopPercentile"].as<float>();

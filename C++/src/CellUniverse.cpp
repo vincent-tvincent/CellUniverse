@@ -132,10 +132,10 @@ static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
 
     for (const auto &cell : frame.cells) {
         auto params = cell.getCellParams();
-        params.majorRadius *= expandFactor;
+        params.aRadius *= expandFactor;
         params.bRadius     *= expandFactor;
-        params.minorRadius *= expandFactor;
-        Spheroid expandedCell(params);
+        params.cRadius *= expandFactor;
+        Ellipsoid expandedCell(params);
         for (size_t z = 0; z < exclusionMask.size(); ++z) {
             expandedCell.draw(exclusionMask[z], simulationConfig, static_cast<float>(z));
         }
@@ -165,7 +165,7 @@ static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
 
 // Preprocessing moved to ImageHandler. Single preprocessed stack via
 // ImageHandler::loadFrame.
-CellUniverse::CellUniverse(std::map<std::string, std::vector<Spheroid>> initialCells,
+CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initialCells,
                            PathVec imagePaths,
                            BaseConfig &config,
                            std::string outputPath,
@@ -217,22 +217,22 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Spheroid>> initialC
 
         // loadFrame interpolates frames; update config to the new slice count.
         config.simulation.z_slices = real_frame.size();
-        // Propagate the interpolated-z upper bound into Spheroid::cellConfig so
-        // the Spheroid constructor's z clamp uses the actual stack height.
+        // Propagate the interpolated-z upper bound into Ellipsoid::cellConfig so
+        // the Ellipsoid constructor's z clamp uses the actual stack height.
         // Without this, cells could drift off the top/bottom of the z-stack.
-        Spheroid::cellConfig.maxZ = static_cast<float>(real_frame.size()) - 1.0f;
+        Ellipsoid::cellConfig.maxZ = static_cast<float>(real_frame.size()) - 1.0f;
 
         fs::path path(imagePaths[i]);
         std::string file_name = path.filename();
 
         if ((continueFrom == -1 || i < continueFrom) && initialCells.find(file_name) != initialCells.end())
         {
-            const std::vector<Spheroid> &cells = initialCells.at(file_name);
+            const std::vector<Ellipsoid> &cells = initialCells.at(file_name);
             frames.emplace_back(real_frame, config.simulation, cells, outputPath, file_name);
         }
         else
         {
-            frames.emplace_back(real_frame, config.simulation, std::vector<Spheroid>(), outputPath, file_name);
+            frames.emplace_back(real_frame, config.simulation, std::vector<Ellipsoid>(), outputPath, file_name);
         }
 
         if (config.cell) {
@@ -282,7 +282,7 @@ void CellUniverse::optimize(int frameIndex)
             auto p = cell.getCellParams();
             std::cout << "  " << p.name
                       << " pos=(" << p.x << "," << p.y << "," << p.z << ")"
-                      << " R=(" << p.majorRadius << "," << p.minorRadius << ")"
+                      << " R=(" << p.aRadius << "," << p.cRadius << ")"
                       << " theta=(" << p.theta_x << "," << p.theta_y << "," << p.theta_z << ")"
                       << " brightness=" << p.brightness
                       << std::endl;
@@ -429,7 +429,7 @@ void CellUniverse::optimize(int frameIndex)
     for (int round = 0; round < prePassRounds; ++round) {
         for (const auto &name : preClassifiedNames) {
             auto it = std::find_if(frame.cells.begin(), frame.cells.end(),
-                [&](const Spheroid &c) { return c.getName() == name; });
+                [&](const Ellipsoid &c) { return c.getName() == name; });
             if (it == frame.cells.end()) continue;
             size_t ci = static_cast<size_t>(std::distance(frame.cells.begin(), it));
 
@@ -523,19 +523,19 @@ void CellUniverse::optimize(int frameIndex)
     if (calibrationIters > 0 && !frame.cells.empty()) {
         const float posScale = std::max(0.0f, config.prob.split_burn_in_pos_sigma_scale);
 
-        PerturbParams savedCalX = Spheroid::cellConfig.x;
-        PerturbParams savedCalY = Spheroid::cellConfig.y;
-        PerturbParams savedCalZ = Spheroid::cellConfig.z;
-        PerturbParams savedCalMajor = Spheroid::cellConfig.majorRadius;
-        PerturbParams savedCalB = Spheroid::cellConfig.bRadius;
-        PerturbParams savedCalMinor = Spheroid::cellConfig.minorRadius;
+        PerturbParams savedCalX = Ellipsoid::cellConfig.x;
+        PerturbParams savedCalY = Ellipsoid::cellConfig.y;
+        PerturbParams savedCalZ = Ellipsoid::cellConfig.z;
+        PerturbParams savedCalMajor = Ellipsoid::cellConfig.aRadius;
+        PerturbParams savedCalB = Ellipsoid::cellConfig.bRadius;
+        PerturbParams savedCalMinor = Ellipsoid::cellConfig.cRadius;
 
-        Spheroid::cellConfig.x.sigma = savedCalX.sigma * posScale;
-        Spheroid::cellConfig.y.sigma = savedCalY.sigma * posScale;
-        Spheroid::cellConfig.z.sigma = savedCalZ.sigma * posScale;
-        Spheroid::cellConfig.majorRadius.sigma = 0.0f;
-        Spheroid::cellConfig.bRadius.sigma     = 0.0f;
-        Spheroid::cellConfig.minorRadius.sigma = 0.0f;
+        Ellipsoid::cellConfig.x.sigma = savedCalX.sigma * posScale;
+        Ellipsoid::cellConfig.y.sigma = savedCalY.sigma * posScale;
+        Ellipsoid::cellConfig.z.sigma = savedCalZ.sigma * posScale;
+        Ellipsoid::cellConfig.aRadius.sigma = 0.0f;
+        Ellipsoid::cellConfig.bRadius.sigma     = 0.0f;
+        Ellipsoid::cellConfig.cRadius.sigma = 0.0f;
 
         std::cout << "[Calibration] frame " << displayFrame
                   << " cells=" << frame.cells.size()
@@ -624,12 +624,12 @@ void CellUniverse::optimize(int frameIndex)
                       << std::endl;
         }
 
-        Spheroid::cellConfig.x = savedCalX;
-        Spheroid::cellConfig.y = savedCalY;
-        Spheroid::cellConfig.z = savedCalZ;
-        Spheroid::cellConfig.majorRadius = savedCalMajor;
-        Spheroid::cellConfig.bRadius     = savedCalB;
-        Spheroid::cellConfig.minorRadius = savedCalMinor;
+        Ellipsoid::cellConfig.x = savedCalX;
+        Ellipsoid::cellConfig.y = savedCalY;
+        Ellipsoid::cellConfig.z = savedCalZ;
+        Ellipsoid::cellConfig.aRadius = savedCalMajor;
+        Ellipsoid::cellConfig.bRadius     = savedCalB;
+        Ellipsoid::cellConfig.cRadius = savedCalMinor;
     }
 
     // ---- Helper: build claim-set for other cells during a split attempt ----
@@ -799,7 +799,7 @@ void CellUniverse::optimize(int frameIndex)
                     // because the cells vector is untouched by revert but
                     // cellIdx is only cheap-safe immediately after the revert.
                     auto parentIt = std::find_if(frame.cells.begin(), frame.cells.end(),
-                        [&](const Spheroid &c) { return c.getName() == cellName; });
+                        [&](const Ellipsoid &c) { return c.getName() == cellName; });
                     if (parentIt != frame.cells.end()) {
                         const size_t parentIdx = static_cast<size_t>(
                             std::distance(frame.cells.begin(), parentIt));
@@ -893,9 +893,9 @@ void CellUniverse::optimize(int frameIndex)
         snap.longAxisLength = fitLongAxisLength;
 
         snap.position = cv::Point3f(p.x, p.y, p.z);
-        snap.majorRadius = p.majorRadius;
+        snap.aRadius = p.aRadius;
         snap.bRadius     = p.bRadius;
-        snap.minorRadius = p.minorRadius;
+        snap.cRadius = p.cRadius;
         snap.thetaX = p.theta_x;
         snap.thetaY = p.theta_y;
         snap.thetaZ = p.theta_z;
@@ -916,8 +916,11 @@ void CellUniverse::optimize(int frameIndex)
     if (brightnessBlend > 0.0f && config.cell) {
         const auto &realFrame = frame.getRealFrame();
         const float brightnessAmplification = std::max(0.0f, config.cell->brightnessMeanAmplification);
+        const float brightnessMeasurementTopPercentile =
+            std::clamp(config.cell->brightnessMeasurementTopPercentile, 0.0f, 1.0f);
         for (auto &cell : frame.cells) {
-            const float observedBrightness = cell.measureMeanBrightness(realFrame);
+            const float observedBrightness =
+                cell.measureMeanBrightness(realFrame, brightnessMeasurementTopPercentile);
             const float amplifiedObservedBrightness = observedBrightness * brightnessAmplification;
             const float updatedBrightness =
                 cell.getBrightness() * (1.0f - brightnessBlend) + amplifiedObservedBrightness * brightnessBlend;
@@ -991,23 +994,23 @@ void CellUniverse::saveCells(int frameIndex)
             file.close();
             file.open(cellsPath, std::ios::trunc);
         }
-        file << "file,name,x,y,z,majorRadius,bRadius,minorRadius,theta_x,theta_y,theta_z" << '\n';
+        file << "file,name,x,y,z,aRadius,bRadius,cRadius,theta_x,theta_y,theta_z" << '\n';
     }
 
     Frame &frame = frames[frameIndex];
     std::string imageName = frame.getImageName();
 
     for (const auto &cell : frame.cells) {
-        SpheroidParams params = cell.getCellParams();
+        EllipsoidParams params = cell.getCellParams();
         cell.printCellInfo();
         file << imageName << ","
              << params.name << ","
              << params.x << ","
              << params.y << ","
              << params.z << ","
-             << params.majorRadius << ","
+             << params.aRadius << ","
              << params.bRadius << ","
-             << params.minorRadius << ","
+             << params.cRadius << ","
              << params.theta_x << ","
              << params.theta_y << ","
              << params.theta_z
@@ -1030,9 +1033,9 @@ void CellUniverse::copyCellsForward(size_t to)
         for (auto &cell : frames[to].cells) {
             cell.blendAdaptivePerturbProbabilitiesWithConfig(
                 config.cell->brightnessProbabilityTrust,
-                config.cell->majorRadiusProbabilityTrust,
-                config.cell->minorRadiusProbabilityTrust,
-                config.cell->abRatioProbabilityTrust);
+                config.cell->aRadiusProbabilityTrust,
+                config.cell->cRadiusProbabilityTrust,
+                config.cell->bRadiusProbabilityTrust);
         }
     }
 }
@@ -1042,7 +1045,7 @@ unsigned int CellUniverse::length()
     return frames.size();
 }
 
-const std::vector<Spheroid> &CellUniverse::getCells(int frameIndex) const
+const std::vector<Ellipsoid> &CellUniverse::getCells(int frameIndex) const
 {
     if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
     {

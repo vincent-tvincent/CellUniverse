@@ -1,4 +1,4 @@
-cellType: spheroid
+cellType: ellipsoid
 
 # Perturbation parameters for each dimension.
 # increase_prob/decrease_prob: probability of applying a random offset per iteration.
@@ -19,26 +19,21 @@ cell:
     decrease_prob: 0.35
     mu: 0
     sigma: 8
-  majorRadius:
+  aRadius:
     increase_prob: 0.5
     decrease_prob: 0.7
     mu: 0
-    sigma: 2
+    sigma: 5
   bRadius:
-    increase_prob: 0.2
-    decrease_prob: 0.2
-    mu: 0
-    sigma: 2
-  abRatio:
     increase_prob: 0.5
-    decrease_prob: 0.5
+    decrease_prob: 0.7
     mu: 0
-    sigma: 0.08
-  minorRadius:
+    sigma: 5
+  cRadius:
     increase_prob: 0.5
     decrease_prob: 0.85
     mu: 0
-    sigma: 2
+    sigma: 5
   # Rotation perturbation — tuned DOWN from (prob 0.9, sigma 0.1) on
   # 2026-04-11 because the old values were fine under oblate (a==b makes
   # rotation around z a structural no-op, so the random walk was invisible)
@@ -65,17 +60,17 @@ cell:
     increase_prob: 0.7
     decrease_prob: 0.8
     mu: 0
-    sigma: 0.0
+    sigma: 0.1
 
-  minMajorRadius: 10
-  maxMajorRadius: 50
+  minARadius: 10
+  maxARadius: 50
   # Triaxial b-axis bounds. Keeping them wide (matching major) means the b
   # axis can shrink or grow into the full equatorial range. Tighten these
   # to constrain the aspect ratio (e.g. minBRadius: 8, maxBRadius: 45).
   minBRadius: 10
   maxBRadius: 50
-  minMinorRadius: 5
-  maxMinorRadius: 45
+  minCRadius: 5
+  maxCRadius: 45
 
   initialRadiusScale: 1.0
   initialBrightness: 0.22
@@ -87,17 +82,18 @@ cell:
   brightnessProbabilityStep: 0.02
   brightnessProbabilityTrust: 0.3
 
-  majorRadiusProbabilityStep: 0.01
-  majorRadiusProbabilityTrust: 0.1
+  aRadiusProbabilityStep: 0.01
+  aRadiusProbabilityTrust: 0.1
 
-  minorRadiusProbabilityStep: 0.01
-  minorRadiusProbabilityTrust: 0.1
+  cRadiusProbabilityStep: 0.01
+  cRadiusProbabilityTrust: 0.1
 
-  abRatioProbabilityStep: 0.02
-  abRatioProbabilityTrust: 0.1
+  bRadiusProbabilityStep: 0.02
+  bRadiusProbabilityTrust: 0.1
 
-  brightnessUpdateBlend: 0.9
+  brightnessUpdateBlend: 0.95
   brightnessMeanAmplification: 1.1
+  brightnessMeasurementTopPercentile: 0.3
 
 # Image preprocessing pipeline — iterative contrast enhancer ported from
 # scripts/image_processor_clean.py. No sigmoid — the old sigmoid fields

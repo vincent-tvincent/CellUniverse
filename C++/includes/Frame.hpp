@@ -9,7 +9,7 @@
 #include "ConfigTypes.hpp"
 #include <random>
 #include <functional>
-#include "Spheroid.hpp"
+#include "Ellipsoid.hpp"
 #include <opencv2/core/mat.hpp>
 
 void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, std::vector<cv::Mat>& processedSlices, int numInterpolations);
@@ -20,11 +20,11 @@ public:
     // Single-pipeline constructor — the analysis-frame / dual-pipeline
     // variant was removed on 2026-04-11 when the new ImageHandler preprocessing
     // replaced the sigmoid-first / raw-analysis split.
-    Frame(const std::vector<cv::Mat> &realFrame, const SimulationConfig &simulationConfig, const std::vector<Spheroid> &cells, const Path &outputPath, const std::string &imageName);
+    Frame(const std::vector<cv::Mat> &realFrame, const SimulationConfig &simulationConfig, const std::vector<Ellipsoid> &cells, const Path &outputPath, const std::string &imageName);
 
     // Rendering
     std::vector<cv::Mat> generateSynthFrame();
-    std::vector<cv::Mat> generateSynthFrameFast(Spheroid &oldCell, Spheroid &newCell,
+    std::vector<cv::Mat> generateSynthFrameFast(Ellipsoid &oldCell, Ellipsoid &newCell,
                                                 int *outAffectedZMin = nullptr,
                                                 int *outAffectedZMax = nullptr);
     std::vector<cv::Mat> generateOutputFrame();
@@ -96,7 +96,7 @@ public:
     float getBackgroundValue() const { return _backgroundValue; }
     void regenerateSynthFrame() { _synthFrame = generateSynthFrame(); refreshFullCostCache(); }
     std::string getImageName() const { return imageName; }
-    std::vector<Spheroid> cells;
+    std::vector<Ellipsoid> cells;
 
 private:
     std::vector<double> z_slices;

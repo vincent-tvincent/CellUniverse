@@ -4,36 +4,47 @@ cellType: ellipsoid
 # increase_prob/decrease_prob: probability of applying a random offset per iteration.
 # mu/sigma: Gaussian offset mean and standard deviation.
 cell:
+  # Center-position perturbation in x. Sigma is in image-space length units
+  # (the same coordinate units used for cell centers / radii).
   x:
     increase_prob: 0.45
     decrease_prob: 0.45
     mu: 0
-    sigma: 5
+    sigma: 20
+  # Center-position perturbation in y.
   y:
     increase_prob: 0.45
     decrease_prob: 0.45
     mu: 0
-    sigma: 5
+    sigma: 20
+  # Center-position perturbation in z. This works in the same cell/world
+  # coordinate space as x/y; actual image anisotropy is handled elsewhere
+  # through `simulation.z_scaling`.
   z:
     increase_prob: 0.35
     decrease_prob: 0.35
     mu: 0
-    sigma: 8
+    sigma: 20
+  # Ellipsoid a-axis radius perturbation. This is the local x-axis radius
+  # in the cell's own frame, not necessarily the longest radius after rotation.
   aRadius:
     increase_prob: 0.5
     decrease_prob: 0.7
     mu: 0
-    sigma: 5
+    sigma: 10
+  # Ellipsoid b-axis radius perturbation. Independent from aRadius.
   bRadius:
     increase_prob: 0.5
     decrease_prob: 0.7
     mu: 0
-    sigma: 5
+    sigma: 10
+  # Ellipsoid c-axis radius perturbation. Often tuned lower / tighter for
+  # flatter cells because it is commonly the shortest axis.
   cRadius:
     increase_prob: 0.5
     decrease_prob: 0.85
     mu: 0
-    sigma: 5
+    sigma: 10
   # Rotation perturbation — tuned DOWN from (prob 0.9, sigma 0.1) on
   # 2026-04-11 because the old values were fine under oblate (a==b makes
   # rotation around z a structural no-op, so the random walk was invisible)
@@ -45,23 +56,27 @@ cell:
     increase_prob: 0.7
     decrease_prob: 0.7
     mu: 0
-    sigma: 0.05
+    sigma: 0.125
   thetaY:
     increase_prob: 0.7
     decrease_prob: 0.7
     mu: 0
-    sigma: 0.05
+    sigma: 0.125
   thetaZ:
     increase_prob: 0.7
     decrease_prob: 0.7
     mu: 0
-    sigma: 0.05
+    sigma: 0.125
+  # Brightness perturbation. Sigma is additive intensity in normalized
+  # 0-1 image space, so 0.1 means a one-step proposal can move brightness
+  # by roughly 10% of the full intensity range.
   brightness:
-    increase_prob: 0.7
+    increase_prob: 0.8
     decrease_prob: 0.8
     mu: 0
     sigma: 0.1
 
+  # Hard lower/upper bounds on the a-axis radius during perturbation.
   minARadius: 10
   maxARadius: 50
   # Triaxial b-axis bounds. Keeping them wide (matching major) means the b
@@ -69,78 +84,150 @@ cell:
   # to constrain the aspect ratio (e.g. minBRadius: 8, maxBRadius: 45).
   minBRadius: 10
   maxBRadius: 50
+  # Hard lower/upper bounds on the c-axis radius.
   minCRadius: 5
   maxCRadius: 45
 
+  # Multiplier applied once to the radii loaded from `initial.csv` for the
+  # very first frame only. After frame 1, the tracker carries forward the
+  # fitted radii from the previous frame instead.
   initialRadiusScale: 1.0
-  initialBrightness: 0.22
+  # Initial per-cell brightness used when seeding the first frame before
+  # image-driven brightness updates take over.
+  initialBrightness: 0.25
+  # Background intensity used for rendering / scoring in normalized 0-1 space.
   backgroundColor: 0.05
 
+  # Hard brightness clamp during perturbation and updates.
   minBrightness: 0.1
   maxBrightness: 0.98
 
+  # Adaptive brightness-probability update size. After a brightness move is
+  # evaluated, its increase/decrease probability shifts by this step.
   brightnessProbabilityStep: 0.02
+  # For frames after the first: blend previous frame's learned brightness
+  # perturbation probabilities with the YAML defaults using
+  # `yaml * (1 - trust) + previous * trust`.
   brightnessProbabilityTrust: 0.3
 
+  # Same adaptive-probability controls for the a-axis radius perturbation.
   aRadiusProbabilityStep: 0.01
   aRadiusProbabilityTrust: 0.1
 
+  # Same adaptive-probability controls for the c-axis radius perturbation.
   cRadiusProbabilityStep: 0.01
   cRadiusProbabilityTrust: 0.1
 
+  # Same adaptive-probability controls for the b-axis radius perturbation.
   bRadiusProbabilityStep: 0.02
   bRadiusProbabilityTrust: 0.1
 
-  brightnessUpdateBlend: 0.95
-  brightnessMeanAmplification: 1.1
-  brightnessMeasurementTopPercentile: 0.3
+  # Exponential moving average blend for brightness re-estimation from image
+  # evidence. Higher means keep more of the previous value, lower means react
+  # faster to the current frame.
+  brightnessUpdateBlend: 0.9
+  # Multiplier applied after measuring image brightness before blending back
+  # into the cell state. Values >1 push fitted cell brightness brighter.
+  brightnessMeanAmplification: 1.2
+  # When updating a cell's brightness from image content, only the brightest
+  # top fraction of voxels inside the cell are averaged. 0.8 means use the
+  # top 80% brightest in-cell voxels; 1.0 means use the full cell.
+  brightnessMeasurementTopPercentile: 0.8
 
 # Image preprocessing pipeline — iterative contrast enhancer ported from
 # scripts/image_processor_clean.py. No sigmoid — the old sigmoid fields
 # were removed when the dual pipeline was torn out.
 simulation:
+  # Main optimization iterations per cell in the tracking loop.
   iterations_per_cell: 500
+  # Relative z-spacing factor used when converting between image slices and
+  # geometric distances. Larger values make z-distance count more heavily.
   z_scaling: 7
+  # Optional Gaussian blur applied to the raw normalized image before the
+  # iterative preprocessing pipeline. 0 disables it.
   blur_sigma: 0.0
 
+  # Starting penalty in the iterative preprocessing enhancer. Higher values
+  # discourage aggressive bright-region expansion early in the loop.
   iterative_penalty: 0.1
+  # Lower clamp for the preprocessing penalty after repeated decay.
   iterative_min_penalty: 0.005
+  # Multiplicative backoff applied to the penalty when preprocessing stalls
+  # or collapses and needs to relax constraints.
   iterative_collapse_backoff: 0.99
+  # Scales how much of the penalty range can be explored during adaptive
+  # preprocessing updates.
   iterative_penalty_range: 0.9
+  # Initial score threshold for allowing preprocessing reward steps.
   iterative_reward_gate: 1.0
+  # How much the reward gate drops per iteration while searching for a
+  # workable enhancement level.
   iterative_reward_gate_decrement: 0.008
+  # Lower bound on the reward gate.
   iterative_reward_gate_min: 0.025
+  # Positive reward added when a preprocessing step improves the score.
   iterative_reward: 0.1
+  # Upper clamp for the iterative preprocessing score.
   iterative_score_max: 0.5
+  # Maximum number of preprocessing iterations per frame.
   iterative_max_count: 300
+  # Early-stop patience: stop after this many iterations without meaningful
+  # score improvement.
   iterative_no_improvement_patience: 10
+  # Minimum score improvement counted as "real" for the patience logic.
   iterative_improvement_tolerance: 0.01
+  # If score drops by more than this amount, treat it as a collapse / bad move.
   iterative_score_drop_stop_threshold: 0.1
+  # Initial percentile used by the preprocessing score when sampling bright
+  # structures from the image.
   iterative_score_percentile: 0.05
+  # Upper bound for the score percentile search.
   iterative_score_percentile_max: 0.90
+  # Step size for increasing the score percentile during iterative search.
   iterative_score_percentile_increment: 0.025
 
+  # Minimum local contrast required for a region to count as structure during
+  # preprocessing score computation.
   contrast_structure_threshold: 0.02
+  # Numerical epsilon for contrast denominators to avoid divide-by-zero.
   contrast_eps: 0.000001
 
+  # Final smoothing sigma after iterative enhancement.
   post_process_blur_sigma: 2.5
+  # Final gain applied before black/white percentile normalization.
   post_process_amplification: 2.5
+  # Output black point percentile for the final preprocessing stretch.
   post_process_black_percentile: 0.1
+  # Output white point percentile for the final preprocessing stretch.
   post_process_white_percentile: 0.5
 
+  # Percentiles used in the Michelson-contrast component of the preprocessing
+  # score.
   michelson_low_percentile: 0.10
   michelson_high_percentile: 0.90
   michelson_eps: 0.000001
 
+  # Percentiles used in the Weber-contrast component of the preprocessing
+  # score.
   weber_background_percentile: 0.10
   weber_signal_percentile: 0.90
+  # Minimum background denominator for Weber contrast. The default is 1/255,
+  # matching one 8-bit intensity step in normalized 0-1 space.
   weber_background_floor: 0.0039215686
   weber_eps: 0.000001
 
+  # When true, save the preprocessed stack for each frame into a dedicated
+  # subfolder under the run's output directory.
   export_preprocessed_images: false
+  # Debug-only switch: if true, stop the program immediately after preprocessing
+  # and exporting the preprocessed images, before tracking/simulation continues.
   quit_after_preprocessing: false
 
+  # Background estimator support region expansion used by the adaptive
+  # preprocessing score.
   adaptive_background_expand_factor: 1.1
+  # Fraction of brightest candidate background samples retained when computing
+  # the adaptive background estimate.
   adaptive_background_top_fraction: 0.4
 
 # Triaxial split detection pipeline (2026-04-11 redesign).
@@ -149,21 +236,34 @@ simulation:
 # Split attempts generate K candidate placements around the snapshot/PCA
 # direction, burn each in briefly, pick the best, then bio check + cost gate.
 prob:
+  # Base split-attempt probability for a cell before elongation-based scaling.
   P_split_base: 0.03
+  # Upper clamp on split-attempt probability after all scaling.
   P_split_max: 0.5
+  # Cells above this snapshot elongation are pre-classified into the split-
+  # focused Phase B path.
   shape_elongation_classify_threshold: 1.20
 
+  # Minimum cost improvement required for a split to be accepted. More
+  # negative candidate-vs-parent cost is better; making this larger is stricter.
   split_cost: 15
+  # Weight on daughter overlap in the split candidate cost.
   overlap_penalty_weight: 500.0
+  # Penalty for shrinking daughters too much relative to the source parent.
   size_reduction_penalty_weight: 30
 
+  # If PCA/snapshot split directions agree within this angle, treat them as
+  # the same primary direction instead of exploring both separately.
   split_direction_agreement_degrees: 20
+  # Short pre-pass perturb iterations applied to expected daughters before the
+  # main candidate burn-in.
   expected_daughter_pre_pass_iterations: 1
 
   # 2 midpoints (PCA + snapshot) x 5 variants each = 10 candidates per
   # primary direction. With split_direction_agreement giving 1 primary in
   # most cases, total is 10.
   split_candidates_per_attempt: 10
+  # Short burn-in iterations per split candidate before scoring.
   split_candidate_burn_in_iterations: 20
   # Extra refine iterations on the winning candidate's daughters before
   # the bio/cost gates fire. Uses the same tight burn-in sigmas.
@@ -173,11 +273,18 @@ prob:
   # frozen at 0 sigma so the parent position refines without radius
   # collapse. Catches the "Phase A parks parent on one daughter" pathology.
   split_calibration_iterations_per_cell: 50
+  # Rotation delta used when generating rotated split candidates around the
+  # primary split direction.
   split_candidate_rotation_delta_degrees: 8
+  # Translation delta, as a fraction of parent size, used when generating
+  # shifted split midpoint candidates.
   split_candidate_translation_delta_fraction: 0.2
 
+  # Reject when one daughter is too large relative to the other in radius.
   bio_daughter_size_ratio_max: 1.5
+  # Reject when combined daughter volume is too small relative to parent volume.
   bio_combined_volume_min_fraction: 0.6
+  # Reject when combined daughter volume is too large relative to parent volume.
   bio_combined_volume_max_fraction: 1.3
   # Drift-from-seed bio gate (2026-04-11). Rejects a split when the best
   # candidate's post-burn-in daughter center has wandered more than
@@ -185,7 +292,7 @@ prob:
   # seed position. Catches daughters escaping the parent footprint during
   # burn-in (f4/f5 false-split pathology).
   bio_max_drift_parent_fraction: 0.4
-  bio_max_drift_daughter_fraction: 0.8
+  bio_max_drift_daughter_fraction: 0.65
   # Midpoint-near-snapshot-parent gate (2026-04-11). Rejects a split
   # when the daughter midpoint is more than 0.95 * parent_maxR from the
   # snapshot (last-frame) parent center. Catches parent drift and
@@ -207,11 +314,11 @@ prob:
   # cell at parent center.
   bio_bridge_max_gap_density: 0.18
   bio_bridge_max_valley_ratio: 0.85
-  # Multiplier on Spheroid x/y/z perturbation sigmas during candidate burn-in.
+  # Multiplier on Ellipsoid x/y/z perturbation sigmas during candidate burn-in.
   # Main-loop sigmas (5, 5, 8) let daughters wander 15-25 voxels across
   # 20 iters; 0.4 tightens to (2, 2, 3.2) so burn-in only refines.
   split_burn_in_pos_sigma_scale: 0.4
-  # Multiplier on Spheroid majorR/bR/minorR perturbation sigmas during
+  # Multiplier on Ellipsoid aRadius/bRadius/cRadius perturbation sigmas during
   # burn-in. 0.1 preserves the snapshot-based daughter sizing (0.794 *
   # src) through burn-in + refine, preventing the "collapsed sliver"
   # false-split pattern where one daughter shrinks to the radius floor.

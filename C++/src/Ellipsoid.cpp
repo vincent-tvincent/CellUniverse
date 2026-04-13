@@ -107,23 +107,26 @@ void Ellipsoid::inverseRotatePoint(double dx, double dy, double dz,
 
 void Ellipsoid::worldLongAxis(cv::Point3f &dir, float &length) const
 {
-    // Pick whichever of (a, b, c) is largest and rotate the corresponding
-    // local unit vector out to world space using the forward rotation
+    // Split seeding now follows the SHORTEST fitted axis rather than the
+    // longest. For compatibility, the historical helper name is retained,
+    // but the returned direction/length correspond to min(a, b, c).
+    //
+    // Rotate the corresponding local unit vector out to world space using the forward rotation
     // R = Rz * Ry * Rx. Since R_T in generateInverseRotationMatrix is R^T
     // stored row-major, column-i of R (which maps local axis i to world) is
     // read out of R_T as (R_T[i], R_T[3 + i], R_T[6 + i]).
     std::array<double, 9> R_T{};
     generateInverseRotationMatrix(R_T);
 
-    int longestAxis = 0; // 0 = a (local x), 1 = b (local y), 2 = c (local z)
-    double longestValue = a;
-    if (b > longestValue) { longestAxis = 1; longestValue = b; }
-    if (c > longestValue) { longestAxis = 2; longestValue = c; }
+    int selectedAxis = 0; // 0 = a (local x), 1 = b (local y), 2 = c (local z)
+    double selectedValue = a;
+    if (b < selectedValue) { selectedAxis = 1; selectedValue = b; }
+    if (c < selectedValue) { selectedAxis = 2; selectedValue = c; }
 
-    // Column `longestAxis` of R = (R_T[longestAxis], R_T[3 + longestAxis], R_T[6 + longestAxis]).
-    const double dx = R_T[longestAxis];
-    const double dy = R_T[3 + longestAxis];
-    const double dz = R_T[6 + longestAxis];
+    // Column `selectedAxis` of R = (R_T[selectedAxis], R_T[3 + selectedAxis], R_T[6 + selectedAxis]).
+    const double dx = R_T[selectedAxis];
+    const double dy = R_T[3 + selectedAxis];
+    const double dz = R_T[6 + selectedAxis];
 
     // The column should already be a unit vector because R is orthonormal,
     // but normalize defensively against floating-point drift.
@@ -136,7 +139,7 @@ void Ellipsoid::worldLongAxis(cv::Point3f &dir, float &length) const
     } else {
         dir = cv::Point3f(1.0f, 0.0f, 0.0f);
     }
-    length = static_cast<float>(longestValue);
+    length = static_cast<float>(selectedValue);
 }
 
 void Ellipsoid::generateInverseRotationMatrix(std::array<double, 9> &R_T) const {

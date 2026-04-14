@@ -107,7 +107,11 @@ void Spheroid::inverseRotatePoint(double dx, double dy, double dz,
 
 void Spheroid::worldLongAxis(cv::Point3f &dir, float &length) const
 {
-    // Pick whichever of (a, b, c) is largest and rotate the corresponding
+    // Active split pipeline uses the SHORTEST fitted axis as the split seed
+    // direction. We keep the historical function name to avoid a larger
+    // signature refactor through the pipeline.
+    //
+    // Pick whichever of (a, b, c) is smallest and rotate the corresponding
     // local unit vector out to world space using the forward rotation
     // R = Rz * Ry * Rx. Since R_T in generateInverseRotationMatrix is R^T
     // stored row-major, column-i of R (which maps local axis i to world) is
@@ -115,15 +119,15 @@ void Spheroid::worldLongAxis(cv::Point3f &dir, float &length) const
     std::array<double, 9> R_T{};
     generateInverseRotationMatrix(R_T);
 
-    int longestAxis = 0; // 0 = a (local x), 1 = b (local y), 2 = c (local z)
-    double longestValue = a;
-    if (b > longestValue) { longestAxis = 1; longestValue = b; }
-    if (c > longestValue) { longestAxis = 2; longestValue = c; }
+    int splitAxis = 0; // 0 = a (local x), 1 = b (local y), 2 = c (local z)
+    double splitAxisLength = a;
+    if (b < splitAxisLength) { splitAxis = 1; splitAxisLength = b; }
+    if (c < splitAxisLength) { splitAxis = 2; splitAxisLength = c; }
 
-    // Column `longestAxis` of R = (R_T[longestAxis], R_T[3 + longestAxis], R_T[6 + longestAxis]).
-    const double dx = R_T[longestAxis];
-    const double dy = R_T[3 + longestAxis];
-    const double dz = R_T[6 + longestAxis];
+    // Column `splitAxis` of R = (R_T[splitAxis], R_T[3 + splitAxis], R_T[6 + splitAxis]).
+    const double dx = R_T[splitAxis];
+    const double dy = R_T[3 + splitAxis];
+    const double dz = R_T[6 + splitAxis];
 
     // The column should already be a unit vector because R is orthonormal,
     // but normalize defensively against floating-point drift.
@@ -136,7 +140,7 @@ void Spheroid::worldLongAxis(cv::Point3f &dir, float &length) const
     } else {
         dir = cv::Point3f(1.0f, 0.0f, 0.0f);
     }
-    length = static_cast<float>(longestValue);
+    length = static_cast<float>(splitAxisLength);
 }
 
 void Spheroid::generateInverseRotationMatrix(std::array<double, 9> &R_T) const {
@@ -182,27 +186,27 @@ bool Spheroid::computeSliceBounds(const cv::Mat &image, float z,
 // No voxel matrix construction needed — drawing is done analytically.
 Spheroid::Spheroid(const SpheroidParams &init_props)
 : _name(init_props.name), _position{init_props.x, init_props.y, init_props.z},
-          _major_radius(init_props.majorRadius),
-          _b_radius(init_props.bRadius > 0.0f ? init_props.bRadius : init_props.majorRadius),
-          _minor_radius(init_props.minorRadius),
+          _a_radius(init_props.aRadius),
+          _b_radius(init_props.bRadius > 0.0f ? init_props.bRadius : init_props.aRadius),
+          _c_radius(init_props.cRadius),
           _theta_x(init_props.theta_x), _theta_y(init_props.theta_y), _theta_z(init_props.theta_z),
           _brightness(init_props.brightness),
-          _majorRadiusPerturbParams(cellConfig.majorRadius),
-          _minorRadiusPerturbParams(cellConfig.minorRadius),
-          _abRatioPerturbParams(cellConfig.bRadius),
+          _aRadiusPerturbParams(cellConfig.aRadius),
+          _cRadiusPerturbParams(cellConfig.cRadius),
+          _bRadiusPerturbParams(cellConfig.bRadius),
           _brightnessPerturbParams(cellConfig.brightness)
 {
-    _major_radius = std::fmax(_major_radius, cellConfig.minMajorRadius);
-    _major_radius = std::fmin(_major_radius, cellConfig.maxMajorRadius);
-    _minor_radius = std::fmax(_minor_radius, cellConfig.minMinorRadius);
-    _minor_radius = std::fmin(_minor_radius, cellConfig.maxMinorRadius);
+    _a_radius = std::fmax(_a_radius, cellConfig.minARadius);
+    _a_radius = std::fmin(_a_radius, cellConfig.maxARadius);
+    _c_radius = std::fmax(_c_radius, cellConfig.minCRadius);
+    _c_radius = std::fmin(_c_radius, cellConfig.maxCRadius);
     // Triaxial b-axis is clamped to [minBRadius, maxBRadius] when those bounds
     // are configured. If they are not set (still zero), fall back to the same
     // bounds as the a-axis so an unconfigured run still behaves near-oblate.
     const double minBR = (cellConfig.maxBRadius > 0.0)
-        ? cellConfig.minBRadius : cellConfig.minMajorRadius;
+        ? cellConfig.minBRadius : cellConfig.minARadius;
     const double maxBR = (cellConfig.maxBRadius > 0.0)
-        ? cellConfig.maxBRadius : cellConfig.maxMajorRadius;
+        ? cellConfig.maxBRadius : cellConfig.maxARadius;
     _b_radius = std::fmax(_b_radius, minBR);
     _b_radius = std::fmin(_b_radius, maxBR);
 
@@ -213,15 +217,15 @@ Spheroid::Spheroid(const SpheroidParams &init_props)
     _position.z = std::fmax(_position.z, 0.0f);
     _position.z = std::fmin(_position.z, cellConfig.maxZ);
 
-    if (_minor_radius > _major_radius) {
-        _minor_radius = _major_radius;
+    if (_c_radius > _a_radius) {
+        _c_radius = _a_radius;
     }
     _brightness = std::fmax(_brightness, static_cast<float>(cellConfig.minBrightness));
     _brightness = std::fmin(_brightness, static_cast<float>(cellConfig.maxBrightness));
 
-    this->a = this->_major_radius;
+    this->a = this->_a_radius;
     this->b = this->_b_radius;
-    this->c = this->_minor_radius;
+    this->c = this->_c_radius;
 
     if (a <= 0 || b <= 0 || c <= 0) {
         throw std::invalid_argument("Spheroid radii must be positive");
@@ -249,27 +253,27 @@ void Spheroid::setBrightness(float brightness)
                              static_cast<float>(cellConfig.maxBrightness));
 }
 
-void Spheroid::setMajorRadiusPerturbProbabilities(float increaseProbability, float decreaseProbability)
+void Spheroid::setARadiusPerturbProbabilities(float increaseProbability, float decreaseProbability)
 {
     const float clampedIncrease = std::clamp(increaseProbability, 0.0f, 1.0f);
-    _majorRadiusPerturbParams.increase_prob = clampedIncrease;
-    _majorRadiusPerturbParams.decrease_prob =
+    _aRadiusPerturbParams.increase_prob = clampedIncrease;
+    _aRadiusPerturbParams.decrease_prob =
         std::clamp(decreaseProbability, 0.0f, std::max(0.0f, 1.0f - clampedIncrease));
 }
 
-void Spheroid::setMinorRadiusPerturbProbabilities(float increaseProbability, float decreaseProbability)
+void Spheroid::setCRadiusPerturbProbabilities(float increaseProbability, float decreaseProbability)
 {
     const float clampedIncrease = std::clamp(increaseProbability, 0.0f, 1.0f);
-    _minorRadiusPerturbParams.increase_prob = clampedIncrease;
-    _minorRadiusPerturbParams.decrease_prob =
+    _cRadiusPerturbParams.increase_prob = clampedIncrease;
+    _cRadiusPerturbParams.decrease_prob =
         std::clamp(decreaseProbability, 0.0f, std::max(0.0f, 1.0f - clampedIncrease));
 }
 
-void Spheroid::setABRatioPerturbProbabilities(float increaseProbability, float decreaseProbability)
+void Spheroid::setBRadiusPerturbProbabilities(float increaseProbability, float decreaseProbability)
 {
     const float clampedIncrease = std::clamp(increaseProbability, 0.0f, 1.0f);
-    _abRatioPerturbParams.increase_prob = clampedIncrease;
-    _abRatioPerturbParams.decrease_prob =
+    _bRadiusPerturbParams.increase_prob = clampedIncrease;
+    _bRadiusPerturbParams.decrease_prob =
         std::clamp(decreaseProbability, 0.0f, std::max(0.0f, 1.0f - clampedIncrease));
 }
 
@@ -300,60 +304,60 @@ void Spheroid::blendBrightnessPerturbProbabilitiesWithConfig(float trust)
 }
 
 void Spheroid::blendAdaptivePerturbProbabilitiesWithConfig(float brightnessTrust,
-                                                           float majorRadiusTrust,
-                                                           float minorRadiusTrust,
-                                                           float abRatioTrust)
+                                                           float aRadiusTrust,
+                                                           float cRadiusTrust,
+                                                           float bRadiusTrust)
 {
-    const float clampedMajorTrust = std::clamp(majorRadiusTrust, 0.0f, 1.0f);
-    const float clampedMinorTrust = std::clamp(minorRadiusTrust, 0.0f, 1.0f);
-    const float clampedABTrust = std::clamp(abRatioTrust, 0.0f, 1.0f);
+    const float clampedATrust = std::clamp(aRadiusTrust, 0.0f, 1.0f);
+    const float clampedCTrust = std::clamp(cRadiusTrust, 0.0f, 1.0f);
+    const float clampedBTrust = std::clamp(bRadiusTrust, 0.0f, 1.0f);
 
-    const float baseMajorIncrease =
-        std::clamp(cellConfig.majorRadius.increase_prob >= 0.0f ? cellConfig.majorRadius.increase_prob : 0.0f,
+    const float baseAIncrease =
+        std::clamp(cellConfig.aRadius.increase_prob >= 0.0f ? cellConfig.aRadius.increase_prob : 0.0f,
                    0.0f, 1.0f);
-    const float baseMajorDecrease =
-        std::clamp(cellConfig.majorRadius.decrease_prob >= 0.0f ? cellConfig.majorRadius.decrease_prob : 0.0f,
+    const float baseADecrease =
+        std::clamp(cellConfig.aRadius.decrease_prob >= 0.0f ? cellConfig.aRadius.decrease_prob : 0.0f,
                    0.0f, 1.0f);
-    setMajorRadiusPerturbProbabilities(
-        baseMajorIncrease * (1.0f - clampedMajorTrust) + getMajorRadiusIncreaseProbability() * clampedMajorTrust,
-        baseMajorDecrease * (1.0f - clampedMajorTrust) + getMajorRadiusDecreaseProbability() * clampedMajorTrust);
+    setARadiusPerturbProbabilities(
+        baseAIncrease * (1.0f - clampedATrust) + getARadiusIncreaseProbability() * clampedATrust,
+        baseADecrease * (1.0f - clampedATrust) + getARadiusDecreaseProbability() * clampedATrust);
 
-    const float baseMinorIncrease =
-        std::clamp(cellConfig.minorRadius.increase_prob >= 0.0f ? cellConfig.minorRadius.increase_prob : 0.0f,
+    const float baseCIncrease =
+        std::clamp(cellConfig.cRadius.increase_prob >= 0.0f ? cellConfig.cRadius.increase_prob : 0.0f,
                    0.0f, 1.0f);
-    const float baseMinorDecrease =
-        std::clamp(cellConfig.minorRadius.decrease_prob >= 0.0f ? cellConfig.minorRadius.decrease_prob : 0.0f,
+    const float baseCDecrease =
+        std::clamp(cellConfig.cRadius.decrease_prob >= 0.0f ? cellConfig.cRadius.decrease_prob : 0.0f,
                    0.0f, 1.0f);
-    setMinorRadiusPerturbProbabilities(
-        baseMinorIncrease * (1.0f - clampedMinorTrust) + getMinorRadiusIncreaseProbability() * clampedMinorTrust,
-        baseMinorDecrease * (1.0f - clampedMinorTrust) + getMinorRadiusDecreaseProbability() * clampedMinorTrust);
+    setCRadiusPerturbProbabilities(
+        baseCIncrease * (1.0f - clampedCTrust) + getCRadiusIncreaseProbability() * clampedCTrust,
+        baseCDecrease * (1.0f - clampedCTrust) + getCRadiusDecreaseProbability() * clampedCTrust);
 
-    const float baseABIncrease =
-        std::clamp(cellConfig.abRatio.increase_prob >= 0.0f ? cellConfig.abRatio.increase_prob : 0.0f,
+    const float baseBIncrease =
+        std::clamp(cellConfig.bRadius.increase_prob >= 0.0f ? cellConfig.bRadius.increase_prob : 0.0f,
                    0.0f, 1.0f);
-    const float baseABDecrease =
-        std::clamp(cellConfig.abRatio.decrease_prob >= 0.0f ? cellConfig.abRatio.decrease_prob : 0.0f,
+    const float baseBDecrease =
+        std::clamp(cellConfig.bRadius.decrease_prob >= 0.0f ? cellConfig.bRadius.decrease_prob : 0.0f,
                    0.0f, 1.0f);
-    setABRatioPerturbProbabilities(
-        baseABIncrease * (1.0f - clampedABTrust) + getABRatioIncreaseProbability() * clampedABTrust,
-        baseABDecrease * (1.0f - clampedABTrust) + getABRatioDecreaseProbability() * clampedABTrust);
+    setBRadiusPerturbProbabilities(
+        baseBIncrease * (1.0f - clampedBTrust) + getBRadiusIncreaseProbability() * clampedBTrust,
+        baseBDecrease * (1.0f - clampedBTrust) + getBRadiusDecreaseProbability() * clampedBTrust);
 
     blendBrightnessPerturbProbabilitiesWithConfig(brightnessTrust);
 }
 
-void Spheroid::adjustMajorRadiusPerturbProbability(int direction, float delta)
+void Spheroid::adjustARadiusPerturbProbability(int direction, float delta)
 {
-    _majorRadiusPerturbParams.adjustSignedProbability(direction, delta);
+    _aRadiusPerturbParams.adjustSignedProbability(direction, delta);
 }
 
-void Spheroid::adjustMinorRadiusPerturbProbability(int direction, float delta)
+void Spheroid::adjustCRadiusPerturbProbability(int direction, float delta)
 {
-    _minorRadiusPerturbParams.adjustSignedProbability(direction, delta);
+    _cRadiusPerturbParams.adjustSignedProbability(direction, delta);
 }
 
-void Spheroid::adjustABRatioPerturbProbability(int direction, float delta)
+void Spheroid::adjustBRadiusPerturbProbability(int direction, float delta)
 {
-    _abRatioPerturbParams.adjustSignedProbability(direction, delta);
+    _bRadiusPerturbParams.adjustSignedProbability(direction, delta);
 }
 
 void Spheroid::adjustBrightnessPerturbProbability(int direction, float delta)
@@ -476,35 +480,34 @@ void Spheroid::drawOutline(cv::Mat &image, float color, float z) const {
 }
 
 [[nodiscard]] Spheroid Spheroid::getPerturbedCell(PerturbDirections *directions) const {
-    const PerturbParams::Sample majorRadiusSample = _majorRadiusPerturbParams.samplePerturb();
-    const PerturbParams::Sample minorRadiusSample = _minorRadiusPerturbParams.samplePerturb();
-    const PerturbParams::Sample abRatioSample = _abRatioPerturbParams.samplePerturb();
+    const PerturbParams::Sample aRadiusSample = _aRadiusPerturbParams.samplePerturb();
+    const PerturbParams::Sample cRadiusSample = _cRadiusPerturbParams.samplePerturb();
+    const PerturbParams::Sample bRadiusSample = _bRadiusPerturbParams.samplePerturb();
     const PerturbParams::Sample brightnessSample = _brightnessPerturbParams.samplePerturb();
     if (directions != nullptr) {
         directions->brightness = brightnessSample.direction;
-        directions->majorRadius = majorRadiusSample.direction;
-        directions->minorRadius = minorRadiusSample.direction;
-        directions->abRatio = abRatioSample.direction;
+        directions->aRadius = aRadiusSample.direction;
+        directions->bRadius = bRadiusSample.direction;
+        directions->cRadius = cRadiusSample.direction;
     }
     SpheroidParams spheroidParams(
         _name,
         _position.x + cellConfig.x.getPerturbOffset(),
         _position.y + cellConfig.y.getPerturbOffset(),
         _position.z + cellConfig.z.getPerturbOffset(),
-        _major_radius + majorRadiusSample.offset,
-        _minor_radius + minorRadiusSample.offset,
+        _a_radius + aRadiusSample.offset,
+        _c_radius + cRadiusSample.offset,
         static_cast<float>(_theta_x) + cellConfig.thetaX.getPerturbOffset(),
         static_cast<float>(_theta_y) + cellConfig.thetaY.getPerturbOffset(),
         static_cast<float>(_theta_z) + cellConfig.thetaZ.getPerturbOffset(),
         _brightness + brightnessSample.offset);
-    // Triaxial b-axis perturbation via the adaptive abRatio PerturbParams
-    // (which tracks bRadius in our triaxial model). Applied as a separate
-    // field assignment because SpheroidParams constructors don't include bRadius.
-    spheroidParams.bRadius = static_cast<float>(_b_radius) + abRatioSample.offset;
+    // bRadius is assigned separately because the convenience constructors
+    // keep the common oblate-compatible `(aRadius, cRadius)` signature.
+    spheroidParams.bRadius = static_cast<float>(_b_radius) + bRadiusSample.offset;
     Spheroid perturbedCell(spheroidParams);
-    perturbedCell._majorRadiusPerturbParams = _majorRadiusPerturbParams;
-    perturbedCell._minorRadiusPerturbParams = _minorRadiusPerturbParams;
-    perturbedCell._abRatioPerturbParams = _abRatioPerturbParams;
+    perturbedCell._aRadiusPerturbParams = _aRadiusPerturbParams;
+    perturbedCell._cRadiusPerturbParams = _cRadiusPerturbParams;
+    perturbedCell._bRadiusPerturbParams = _bRadiusPerturbParams;
     perturbedCell._brightnessPerturbParams = _brightnessPerturbParams;
     return perturbedCell;
 }
@@ -537,10 +540,10 @@ bool Spheroid::isPointInsideEllipsoid(const cv::Point3f &worldPoint,
 
 
 bool Spheroid::checkConstraints() const {
-    const bool majorOk = (cellConfig.minMajorRadius <= _major_radius) &&
-                         (_major_radius <= cellConfig.maxMajorRadius);
-    const bool minorOk = (cellConfig.minMinorRadius <= _minor_radius) &&
-                         (_minor_radius <= cellConfig.maxMinorRadius);
+    const bool majorOk = (cellConfig.minARadius <= _a_radius) &&
+                         (_a_radius <= cellConfig.maxARadius);
+    const bool minorOk = (cellConfig.minCRadius <= _c_radius) &&
+                         (_c_radius <= cellConfig.maxCRadius);
     const bool bConfigured = (cellConfig.maxBRadius > 0.0);
     const bool bOk = !bConfigured ||
         ((cellConfig.minBRadius <= _b_radius) && (_b_radius <= cellConfig.maxBRadius));
@@ -549,7 +552,7 @@ bool Spheroid::checkConstraints() const {
 
 SpheroidParams Spheroid::getCellParams() const {
     SpheroidParams params(_name, _position.x, _position.y, _position.z,
-                          static_cast<float>(_major_radius), static_cast<float>(_minor_radius),
+                          static_cast<float>(_a_radius), static_cast<float>(_c_radius),
                           static_cast<float>(_theta_x), static_cast<float>(_theta_y), static_cast<float>(_theta_z),
                           _brightness);
     params.bRadius = static_cast<float>(_b_radius);

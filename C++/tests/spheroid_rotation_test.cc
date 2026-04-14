@@ -6,10 +6,10 @@
 
 namespace {
 void ConfigureSpheroidBounds() {
-    Spheroid::cellConfig.minMajorRadius = 1.0;
-    Spheroid::cellConfig.maxMajorRadius = 20.0;
-    Spheroid::cellConfig.minMinorRadius = 0.5;
-    Spheroid::cellConfig.maxMinorRadius = 20.0;
+    Spheroid::cellConfig.minARadius = 1.0;
+    Spheroid::cellConfig.maxARadius = 20.0;
+    Spheroid::cellConfig.minCRadius = 0.5;
+    Spheroid::cellConfig.maxCRadius = 20.0;
 }
 
 constexpr float kTestBrightness = 1.0f;

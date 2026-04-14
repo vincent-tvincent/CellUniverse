@@ -1,0 +1,151 @@
+classDiagram
+direction LR
+
+class CellFactory {
+  +CellFactory(config)
+  +createCells(init_params_path, z_offset, z_scaling)
+}
+
+class Frame {
+  +vector~Spheroid~ cells
+  -SimulationConfig simulationConfig
+  +generateSynthFrame()
+  +perturb()
+  +trySplitCell(cellIndex, ...)
+}
+
+class Lineage {
+  -BaseConfig config
+  -vector~Frame~ frames
+  +optimize(frameIndex)
+  +copyCellsForward(to)
+  +saveImages(frameIndex)
+  +saveCells(frameIndex)
+}
+
+class LineageViewer {
+  +update(frameIndex, cells)
+  +close()
+}
+
+class Cell {
+  <<abstract>>
+  +draw(...)*
+  +drawOutline(...)*
+  +getPerturbedCell()*
+}
+
+class Bacilli
+
+class Sphere {
+  +SphereParams init_props
+  +getPerturbedCell()
+  +getSplitCells(realTiffSlices)
+}
+
+class Spheroid {
+  +SpheroidParams init_props
+  +getPerturbedCell()
+  +getSplitCells(image, z_scaling, neighborCenters, ...)
+  +checkIfCellsOverlap(spheroids)$
+}
+
+class CellParams {
+  +string name
+}
+
+class SphereParams {
+  +float x
+  +float y
+  +float z
+  +float radius
+}
+
+class SpheroidParams {
+  +float x
+  +float y
+  +float z
+  +float majorRadius
+  +float minorRadius
+  +float theta_x
+  +float theta_y
+  +float theta_z
+}
+
+class CellConfig {
+  <<abstract>>
+  +explodeConfig(node)*
+}
+
+class SphereConfig {
+  +PerturbParams x
+  +PerturbParams y
+  +PerturbParams z
+  +PerturbParams radius
+}
+
+class SpheroidConfig {
+  +PerturbParams x
+  +PerturbParams y
+  +PerturbParams z
+  +PerturbParams majorRadius
+  +PerturbParams minorRadius
+  +PerturbParams thetaX
+  +PerturbParams thetaY
+  +PerturbParams thetaZ
+}
+
+class PerturbParams {
+  +float prob
+  +float mu
+  +float sigma
+  +getPerturbOffset()
+}
+
+class SimulationConfig {
+  +int iterations_per_cell
+  +float z_scaling
+  +float blur_sigma
+  +int z_slices
+}
+
+class ProbabilityConfig {
+  +float perturbation
+  +float split
+  +float split_cost
+  +float split_elongation_threshold
+}
+
+class BaseConfig {
+  +string cellType
+  +SpheroidConfig* cell
+  +SimulationConfig simulation
+  +ProbabilityConfig prob
+  +explodeConfig(node)
+}
+
+Cell <|-- Bacilli
+CellParams <|-- SphereParams
+CellParams <|-- SpheroidParams
+CellConfig <|-- SphereConfig
+CellConfig <|-- SpheroidConfig
+
+Sphere --> SphereParams : constructed from
+Spheroid --> SpheroidParams : constructed from / exports
+Sphere ..> SphereConfig : static config
+Spheroid ..> SpheroidConfig : static config
+SphereConfig *-- PerturbParams
+SpheroidConfig *-- PerturbParams
+
+BaseConfig *-- SimulationConfig
+BaseConfig *-- ProbabilityConfig
+BaseConfig *-- SpheroidConfig : cell*
+
+CellFactory ..> BaseConfig : reads config
+CellFactory ..> Spheroid : creates initial cells
+Frame *-- Spheroid : owns cells
+Frame ..> SimulationConfig : renders with
+Lineage *-- Frame : owns frames
+Lineage *-- BaseConfig : stores copy
+Lineage ..> Spheroid : seeds / forwards cells
+LineageViewer ..> Lineage : visualizes lineage output

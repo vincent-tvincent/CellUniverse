@@ -19,7 +19,7 @@ cell:
     decrease_prob: 0.35
     mu: 0
     sigma: 8
-  majorRadius:
+  aRadius:
     increase_prob: 0.5
     decrease_prob: 0.7
     mu: 0
@@ -29,12 +29,7 @@ cell:
     decrease_prob: 0.2
     mu: 0
     sigma: 2
-  abRatio:
-    increase_prob: 0.5
-    decrease_prob: 0.5
-    mu: 0
-    sigma: 0.08
-  minorRadius:
+  cRadius:
     increase_prob: 0.5
     decrease_prob: 0.85
     mu: 0
@@ -67,15 +62,15 @@ cell:
     mu: 0
     sigma: 0.0
 
-  minMajorRadius: 10
-  maxMajorRadius: 50
+  minARadius: 10
+  maxARadius: 50
   # Triaxial b-axis bounds. Keeping them wide (matching major) means the b
   # axis can shrink or grow into the full equatorial range. Tighten these
   # to constrain the aspect ratio (e.g. minBRadius: 8, maxBRadius: 45).
   minBRadius: 10
   maxBRadius: 50
-  minMinorRadius: 5
-  maxMinorRadius: 45
+  minCRadius: 5
+  maxCRadius: 45
 
   initialRadiusScale: 1.0
   initialBrightness: 0.22
@@ -87,14 +82,14 @@ cell:
   brightnessProbabilityStep: 0.02
   brightnessProbabilityTrust: 0.3
 
-  majorRadiusProbabilityStep: 0.01
-  majorRadiusProbabilityTrust: 0.1
+  aRadiusProbabilityStep: 0.01
+  aRadiusProbabilityTrust: 0.1
 
-  minorRadiusProbabilityStep: 0.01
-  minorRadiusProbabilityTrust: 0.1
+  cRadiusProbabilityStep: 0.01
+  cRadiusProbabilityTrust: 0.1
 
-  abRatioProbabilityStep: 0.02
-  abRatioProbabilityTrust: 0.1
+  bRadiusProbabilityStep: 0.02
+  bRadiusProbabilityTrust: 0.1
 
   brightnessUpdateBlend: 0.9
   brightnessMeanAmplification: 1.1
@@ -153,6 +148,10 @@ simulation:
 # Split attempts generate K candidate placements around the snapshot/PCA
 # direction, burn each in briefly, pick the best, then bio check + cost gate.
 prob:
+  # Hard on/off switch for all split detection and split attempts.
+  # When false, the optimizer still perturbs cells normally but never
+  # computes P(split), classifies split candidates, or runs split gates.
+  enable_split_checks: true
   P_split_base: 0.03
   P_split_max: 0.5
   shape_elongation_classify_threshold: 1.20

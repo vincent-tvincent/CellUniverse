@@ -17,9 +17,9 @@ double computeSizeReductionPenalty(const Spheroid &oldCell, const Spheroid &newC
         return static_cast<double>(weight) * reductionRatio * reductionRatio;
     };
 
-    return accumulateReductionPenalty(oldCell.getMajorRadius(), newCell.getMajorRadius())
+    return accumulateReductionPenalty(oldCell.getARadius(), newCell.getARadius())
          + accumulateReductionPenalty(oldCell.getBRadius(),     newCell.getBRadius())
-         + accumulateReductionPenalty(oldCell.getMinorRadius(), newCell.getMinorRadius());
+         + accumulateReductionPenalty(oldCell.getCRadius(), newCell.getCRadius());
 }
 // Vincent's old split helpers (computeEquivalentSphereRadius,
 } // namespace
@@ -283,7 +283,7 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight, float siz
 
     // Min-radius hard clamp (2026-04-09): prevent cells from ratcheting down to
     // minimum radius bounds via unconstrained perturbation. The Spheroid ctor
-    // silently clamps majorRadius/minorRadius to minMajorRadius/minMinorRadius,
+    // silently clamps aRadius/cRadius to minARadius/minCRadius,
     // so a decrease-biased perturbation sequence parks cells at the floor where
     // the L2 cost rewards the tiny footprint (see 12345...3400 at (10,5) in
     // run 074740 f22 — the degenerate crumpled ellipse visible in the f8
@@ -293,18 +293,25 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight, float siz
     // (those cells are already parked there and need a different recovery
     // path — see the deferred volume recovery work in config).
     {
-        const float newMajorR = cells[index].getMajorRadius();
-        const float newMinorR = cells[index].getMinorRadius();
-        const float oldMajorR = oldCell.getMajorRadius();
-        const float oldMinorR = oldCell.getMinorRadius();
-        const float minMajorR = static_cast<float>(Spheroid::cellConfig.minMajorRadius);
-        const float minMinorR = static_cast<float>(Spheroid::cellConfig.minMinorRadius);
+        const float newAR = cells[index].getARadius();
+        const float newBR = cells[index].getBRadius();
+        const float newCR = cells[index].getCRadius();
+        const float oldAR = oldCell.getARadius();
+        const float oldBR = oldCell.getBRadius();
+        const float oldCR = oldCell.getCRadius();
+        const float minAR = static_cast<float>(Spheroid::cellConfig.minARadius);
+        const float minBR = static_cast<float>(
+            Spheroid::cellConfig.maxBRadius > 0.0 ? Spheroid::cellConfig.minBRadius
+                                                  : Spheroid::cellConfig.minARadius);
+        const float minCR = static_cast<float>(Spheroid::cellConfig.minCRadius);
         constexpr float kClampEpsilon = 1e-3f;
-        const bool hitMajorFloor = (newMajorR <= minMajorR + kClampEpsilon) &&
-                                   (oldMajorR  >  minMajorR + kClampEpsilon);
-        const bool hitMinorFloor = (newMinorR <= minMinorR + kClampEpsilon) &&
-                                   (oldMinorR  >  minMinorR + kClampEpsilon);
-        if (hitMajorFloor || hitMinorFloor) {
+        const bool hitAFloor = (newAR <= minAR + kClampEpsilon) &&
+                               (oldAR  >  minAR + kClampEpsilon);
+        const bool hitBFloor = (newBR <= minBR + kClampEpsilon) &&
+                               (oldBR  >  minBR + kClampEpsilon);
+        const bool hitCFloor = (newCR <= minCR + kClampEpsilon) &&
+                               (oldCR  >  minCR + kClampEpsilon);
+        if (hitAFloor || hitBFloor || hitCFloor) {
             cells[index] = oldCell;
             return {0.0, [](bool) {}};
         }
@@ -336,23 +343,23 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight, float siz
                              oldCell, index, newImageCost, perturbDirections](bool accept)
     {
         const float brightnessStep = std::max(0.0f, Spheroid::cellConfig.brightnessProbabilityStep);
-        const float majorRadiusStep = std::max(0.0f, Spheroid::cellConfig.majorRadiusProbabilityStep);
-        const float minorRadiusStep = std::max(0.0f, Spheroid::cellConfig.minorRadiusProbabilityStep);
-        const float abRatioStep = std::max(0.0f, Spheroid::cellConfig.abRatioProbabilityStep);
+        const float aRadiusStep = std::max(0.0f, Spheroid::cellConfig.aRadiusProbabilityStep);
+        const float cRadiusStep = std::max(0.0f, Spheroid::cellConfig.cRadiusProbabilityStep);
+        const float bRadiusStep = std::max(0.0f, Spheroid::cellConfig.bRadiusProbabilityStep);
         if (accept) {
             if (perturbDirections.brightness != 0) this->cells[index].adjustBrightnessPerturbProbability(perturbDirections.brightness, brightnessStep);
-            if (perturbDirections.majorRadius != 0) this->cells[index].adjustMajorRadiusPerturbProbability(perturbDirections.majorRadius, majorRadiusStep);
-            if (perturbDirections.minorRadius != 0) this->cells[index].adjustMinorRadiusPerturbProbability(perturbDirections.minorRadius, minorRadiusStep);
-            if (perturbDirections.abRatio != 0) this->cells[index].adjustABRatioPerturbProbability(perturbDirections.abRatio, abRatioStep);
+            if (perturbDirections.aRadius != 0) this->cells[index].adjustARadiusPerturbProbability(perturbDirections.aRadius, aRadiusStep);
+            if (perturbDirections.bRadius != 0) this->cells[index].adjustBRadiusPerturbProbability(perturbDirections.bRadius, bRadiusStep);
+            if (perturbDirections.cRadius != 0) this->cells[index].adjustCRadiusPerturbProbability(perturbDirections.cRadius, cRadiusStep);
             this->_synthFrame = newSynthFrame;
             this->_currentCost = newImageCost;
             this->_currentCostPerSlice = newCostPerSlice;
         } else {
             Spheroid revertedCell = oldCell;
             if (perturbDirections.brightness != 0) revertedCell.adjustBrightnessPerturbProbability(perturbDirections.brightness, -brightnessStep);
-            if (perturbDirections.majorRadius != 0) revertedCell.adjustMajorRadiusPerturbProbability(perturbDirections.majorRadius, -majorRadiusStep);
-            if (perturbDirections.minorRadius != 0) revertedCell.adjustMinorRadiusPerturbProbability(perturbDirections.minorRadius, -minorRadiusStep);
-            if (perturbDirections.abRatio != 0) revertedCell.adjustABRatioPerturbProbability(perturbDirections.abRatio, -abRatioStep);
+            if (perturbDirections.aRadius != 0) revertedCell.adjustARadiusPerturbProbability(perturbDirections.aRadius, -aRadiusStep);
+            if (perturbDirections.bRadius != 0) revertedCell.adjustBRadiusPerturbProbability(perturbDirections.bRadius, -bRadiusStep);
+            if (perturbDirections.cRadius != 0) revertedCell.adjustCRadiusPerturbProbability(perturbDirections.cRadius, -cRadiusStep);
             this->cells[index] = revertedCell;
         }
     };
@@ -366,7 +373,7 @@ namespace {
 // but elongated cells for correctness. Runtime cost is one std::max.
 inline float boundingSphereRadius(const Spheroid &cell)
 {
-    return std::max({cell.getMajorRadius(), cell.getBRadius(), cell.getMinorRadius()});
+    return std::max({cell.getARadius(), cell.getBRadius(), cell.getCRadius()});
 }
 }
 
@@ -702,17 +709,17 @@ bool bioCheckDaughters(
     std::string &reasonOut)
 {
     const auto cellVolume = [](const Spheroid &c) {
-        return static_cast<double>(c.getMajorRadius()) *
+        return static_cast<double>(c.getARadius()) *
                static_cast<double>(c.getBRadius()) *
-               static_cast<double>(c.getMinorRadius());
+               static_cast<double>(c.getCRadius());
     };
 
-    const float d1R = std::max({daughter1.getMajorRadius(),
+    const float d1R = std::max({daughter1.getARadius(),
                                  daughter1.getBRadius(),
-                                 daughter1.getMinorRadius()});
-    const float d2R = std::max({daughter2.getMajorRadius(),
+                                 daughter1.getCRadius()});
+    const float d2R = std::max({daughter2.getARadius(),
                                  daughter2.getBRadius(),
-                                 daughter2.getMinorRadius()});
+                                 daughter2.getCRadius()});
 
     // 1. Size ratio check (catches shrink-grow degenerate splits).
     if (d1R < 1e-3f || d2R < 1e-3f) {
@@ -801,16 +808,16 @@ Spheroid buildDaughter(
     const auto &cfg = Spheroid::cellConfig;
     const float dMajor = std::clamp(
         srcMajor * volumeScale,
-        static_cast<float>(cfg.minMajorRadius),
-        static_cast<float>(cfg.maxMajorRadius));
+        static_cast<float>(cfg.minARadius),
+        static_cast<float>(cfg.maxARadius));
     const float dB = std::clamp(
         srcB * volumeScale,
-        static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.minBRadius : cfg.minMajorRadius),
-        static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.maxBRadius : cfg.maxMajorRadius));
+        static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.minBRadius : cfg.minARadius),
+        static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.maxBRadius : cfg.maxARadius));
     const float dMinor = std::clamp(
         srcMinor * volumeScale,
-        static_cast<float>(cfg.minMinorRadius),
-        static_cast<float>(cfg.maxMinorRadius));
+        static_cast<float>(cfg.minCRadius),
+        static_cast<float>(cfg.maxCRadius));
 
     SpheroidParams dp(
         name,
@@ -865,9 +872,9 @@ bool Frame::imageGroundExpectedDaughters(
     // split path's box radius. Uses snapshot (not live) radii so the
     // pre-pass sees the same region of space regardless of how Phase A
     // has since moved the parent.
-    const float srcMajor = snapshot.majorRadius;
-    const float srcB = (snapshot.bRadius > 1e-3f) ? snapshot.bRadius : snapshot.majorRadius;
-    const float srcMinor = snapshot.minorRadius;
+    const float srcMajor = snapshot.aRadius;
+    const float srcB = (snapshot.bRadius > 1e-3f) ? snapshot.bRadius : snapshot.aRadius;
+    const float srcMinor = snapshot.cRadius;
     const float boxRadius = 3.0f * std::max({srcMajor, srcB, srcMinor});
 
     GatherStats gstats;
@@ -917,9 +924,9 @@ bool Frame::calibrateCellPositionViaCentroid(
         selfClaim.push_back(snapshot.position);
     }
 
-    const float srcMajor = snapshot.majorRadius;
-    const float srcB = (snapshot.bRadius > 1e-3f) ? snapshot.bRadius : snapshot.majorRadius;
-    const float srcMinor = snapshot.minorRadius;
+    const float srcMajor = snapshot.aRadius;
+    const float srcB = (snapshot.bRadius > 1e-3f) ? snapshot.bRadius : snapshot.aRadius;
+    const float srcMinor = snapshot.cRadius;
     const float boxRadius = 3.0f * std::max({srcMajor, srcB, srcMinor});
 
     GatherStats gstats;
@@ -1053,12 +1060,12 @@ CostCallbackPair Frame::trySplitCellPhased(
     const std::string parentName = liveParent.getName();
 
     const bool snapshotValid = snapshot.valid &&
-        snapshot.majorRadius > 1e-3f &&
-        snapshot.minorRadius > 1e-3f;
-    const float srcMajor = snapshotValid ? snapshot.majorRadius : liveParent.getMajorRadius();
+        snapshot.aRadius > 1e-3f &&
+        snapshot.cRadius > 1e-3f;
+    const float srcMajor = snapshotValid ? snapshot.aRadius : liveParent.getARadius();
     const float srcB     = (snapshotValid && snapshot.bRadius > 1e-3f)
         ? snapshot.bRadius : liveParent.getBRadius();
-    const float srcMinor = snapshotValid ? snapshot.minorRadius : liveParent.getMinorRadius();
+    const float srcMinor = snapshotValid ? snapshot.cRadius : liveParent.getCRadius();
 
     // Build the snapshot-state parent: position, radii, rotation, and
     // brightness all come from the snapshot (falling back to live values
@@ -1106,7 +1113,7 @@ CostCallbackPair Frame::trySplitCellPhased(
         std::cout << "  [Split Snapshot Parent] " << parentName
                   << " livePos=(" << liveParent.getX() << "," << liveParent.getY() << "," << liveParent.getZ() << ")"
                   << " snapPos=(" << snapshot.position.x << "," << snapshot.position.y << "," << snapshot.position.z << ")"
-                  << " liveR=(" << liveParent.getMajorRadius() << "," << liveParent.getBRadius() << "," << liveParent.getMinorRadius() << ")"
+                  << " liveR=(" << liveParent.getARadius() << "," << liveParent.getBRadius() << "," << liveParent.getCRadius() << ")"
                   << " snapR=(" << srcMajor << "," << srcB << "," << srcMinor << ")"
                   << " liveCost=" << liveCostBeforeSwap
                   << " snapCost=" << swappedImageCost
@@ -1149,9 +1156,9 @@ CostCallbackPair Frame::trySplitCellPhased(
 
     // --- 1. Gather bright pixels in a snapshot-centered bounding box ---
 
-    const float parentMajor = std::max(srcMajor, parent.getMajorRadius());
+    const float parentMajor = std::max(srcMajor, parent.getARadius());
     const float parentB     = std::max(srcB,     parent.getBRadius());
-    const float parentMinor = std::max(srcMinor, parent.getMinorRadius());
+    const float parentMinor = std::max(srcMinor, parent.getCRadius());
     const float boxRadius = 3.0f * std::max({parentMajor, parentB, parentMinor});
 
     // Reference parent volume used by the bio volume-fraction check and by
@@ -1169,9 +1176,9 @@ CostCallbackPair Frame::trySplitCellPhased(
               << " snapElong=" << snapshot.shapeElongation
               << " snapLongLen=" << snapshot.longAxisLength
               << " src=(" << srcMajor << "," << srcB << "," << srcMinor << ")"
-              << " liveR=(" << liveParent.getMajorRadius() << "," << liveParent.getBRadius() << "," << liveParent.getMinorRadius() << ")"
+              << " liveR=(" << liveParent.getARadius() << "," << liveParent.getBRadius() << "," << liveParent.getCRadius() << ")"
               << " livePos=(" << liveParent.getX() << "," << liveParent.getY() << "," << liveParent.getZ() << ")"
-              << " parentNow=(" << parent.getMajorRadius() << "," << parent.getBRadius() << "," << parent.getMinorRadius() << ")"
+              << " parentNow=(" << parent.getARadius() << "," << parent.getBRadius() << "," << parent.getCRadius() << ")"
               << " parentPos=(" << parent.getX() << "," << parent.getY() << "," << parent.getZ() << ")"
               << std::endl;
 
@@ -1462,15 +1469,15 @@ CostCallbackPair Frame::trySplitCellPhased(
     PerturbParams savedPerturbX = Spheroid::cellConfig.x;
     PerturbParams savedPerturbY = Spheroid::cellConfig.y;
     PerturbParams savedPerturbZ = Spheroid::cellConfig.z;
-    PerturbParams savedPerturbMajor = Spheroid::cellConfig.majorRadius;
+    PerturbParams savedPerturbMajor = Spheroid::cellConfig.aRadius;
     PerturbParams savedPerturbB = Spheroid::cellConfig.bRadius;
-    PerturbParams savedPerturbMinor = Spheroid::cellConfig.minorRadius;
+    PerturbParams savedPerturbMinor = Spheroid::cellConfig.cRadius;
     Spheroid::cellConfig.x.sigma = savedPerturbX.sigma * posScale;
     Spheroid::cellConfig.y.sigma = savedPerturbY.sigma * posScale;
     Spheroid::cellConfig.z.sigma = savedPerturbZ.sigma * posScale;
-    Spheroid::cellConfig.majorRadius.sigma = savedPerturbMajor.sigma * radiusScale;
+    Spheroid::cellConfig.aRadius.sigma = savedPerturbMajor.sigma * radiusScale;
     Spheroid::cellConfig.bRadius.sigma     = savedPerturbB.sigma     * radiusScale;
-    Spheroid::cellConfig.minorRadius.sigma = savedPerturbMinor.sigma * radiusScale;
+    Spheroid::cellConfig.cRadius.sigma = savedPerturbMinor.sigma * radiusScale;
 
     std::cout << "  [Split Sigmas] " << parentName
               << " posScale=" << posScale
@@ -1478,9 +1485,9 @@ CostCallbackPair Frame::trySplitCellPhased(
               << " ySigma=" << savedPerturbY.sigma << "->" << Spheroid::cellConfig.y.sigma
               << " zSigma=" << savedPerturbZ.sigma << "->" << Spheroid::cellConfig.z.sigma
               << " radiusScale=" << radiusScale
-              << " majorSigma=" << savedPerturbMajor.sigma << "->" << Spheroid::cellConfig.majorRadius.sigma
+              << " majorSigma=" << savedPerturbMajor.sigma << "->" << Spheroid::cellConfig.aRadius.sigma
               << " bSigma=" << savedPerturbB.sigma << "->" << Spheroid::cellConfig.bRadius.sigma
-              << " minorSigma=" << savedPerturbMinor.sigma << "->" << Spheroid::cellConfig.minorRadius.sigma
+              << " minorSigma=" << savedPerturbMinor.sigma << "->" << Spheroid::cellConfig.cRadius.sigma
               << std::endl;
 
     for (size_t ci = 0; ci < candidates.size(); ++ci) {
@@ -1558,9 +1565,9 @@ CostCallbackPair Frame::trySplitCellPhased(
         Spheroid::cellConfig.x = savedPerturbX;
         Spheroid::cellConfig.y = savedPerturbY;
         Spheroid::cellConfig.z = savedPerturbZ;
-        Spheroid::cellConfig.majorRadius = savedPerturbMajor;
+        Spheroid::cellConfig.aRadius = savedPerturbMajor;
         Spheroid::cellConfig.bRadius     = savedPerturbB;
-        Spheroid::cellConfig.minorRadius = savedPerturbMinor;
+        Spheroid::cellConfig.cRadius = savedPerturbMinor;
         restoreLiveParent();
         return {0.0, noop};
     }
@@ -1637,8 +1644,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " d1=(" << postRefineD1.x << "," << postRefineD1.y << "," << postRefineD1.z << ")"
                   << " d2=(" << postRefineD2.x << "," << postRefineD2.y << "," << postRefineD2.z << ")"
                   << " builtR=(" << builtMajor << "," << builtB << "," << builtMinor << ")"
-                  << " d1R=(" << refinedD1.getMajorRadius() << "," << refinedD1.getBRadius() << "," << refinedD1.getMinorRadius() << ")"
-                  << " d2R=(" << refinedD2.getMajorRadius() << "," << refinedD2.getBRadius() << "," << refinedD2.getMinorRadius() << ")"
+                  << " d1R=(" << refinedD1.getARadius() << "," << refinedD1.getBRadius() << "," << refinedD1.getCRadius() << ")"
+                  << " d2R=(" << refinedD2.getARadius() << "," << refinedD2.getBRadius() << "," << refinedD2.getCRadius() << ")"
                   << std::endl;
 
         // Revert to pre-split state — gates run on savedCells baseline
@@ -1653,9 +1660,9 @@ CostCallbackPair Frame::trySplitCellPhased(
     Spheroid::cellConfig.x = savedPerturbX;
     Spheroid::cellConfig.y = savedPerturbY;
     Spheroid::cellConfig.z = savedPerturbZ;
-    Spheroid::cellConfig.majorRadius = savedPerturbMajor;
+    Spheroid::cellConfig.aRadius = savedPerturbMajor;
     Spheroid::cellConfig.bRadius     = savedPerturbB;
-    Spheroid::cellConfig.minorRadius = savedPerturbMinor;
+    Spheroid::cellConfig.cRadius = savedPerturbMinor;
 
     // --- 5. Bio checks on the best candidate's final state ---
     // Rebuild daughter indices from bestCells (parent was at cellIndex,
@@ -1669,12 +1676,12 @@ CostCallbackPair Frame::trySplitCellPhased(
     // 5a. Drift-from-seed gate. Reject if either daughter center has
     // wandered too far from its initial candidate placement during burn-in.
     // The limit is max(parent_frac * srcMaxR, daughter_frac * daughterMaxR).
-    const float bestD1MaxR = std::max({bestD1.getMajorRadius(),
+    const float bestD1MaxR = std::max({bestD1.getARadius(),
                                          bestD1.getBRadius(),
-                                         bestD1.getMinorRadius()});
-    const float bestD2MaxR = std::max({bestD2.getMajorRadius(),
+                                         bestD1.getCRadius()});
+    const float bestD2MaxR = std::max({bestD2.getARadius(),
                                          bestD2.getBRadius(),
-                                         bestD2.getMinorRadius()});
+                                         bestD2.getCRadius()});
     const float daughterMaxR = std::max(bestD1MaxR, bestD2MaxR);
     const float driftLimit = std::max(
         probConfig.bio_max_drift_parent_fraction * srcMaxR,
@@ -1819,9 +1826,9 @@ CostCallbackPair Frame::trySplitCellPhased(
         std::cout << "[Split Reject bio] " << parentName
                   << " reason=" << bioReason
                   << " d1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
-                  << " r1=(" << bestD1.getMajorRadius() << "," << bestD1.getBRadius() << "," << bestD1.getMinorRadius() << ")"
+                  << " r1=(" << bestD1.getARadius() << "," << bestD1.getBRadius() << "," << bestD1.getCRadius() << ")"
                   << " d2=(" << bestD2.getX() << "," << bestD2.getY() << "," << bestD2.getZ() << ")"
-                  << " r2=(" << bestD2.getMajorRadius() << "," << bestD2.getBRadius() << "," << bestD2.getMinorRadius() << ")"
+                  << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
                   << " refParentVolume=" << refParentVolume
                   << std::endl;
         restoreLiveParent();
@@ -1837,10 +1844,10 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << " d1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
-                  << " r1=(" << bestD1.getMajorRadius() << "," << bestD1.getBRadius() << "," << bestD1.getMinorRadius() << ")"
+                  << " r1=(" << bestD1.getARadius() << "," << bestD1.getBRadius() << "," << bestD1.getCRadius() << ")"
                   << " drift1=" << drift1
                   << " d2=(" << bestD2.getX() << "," << bestD2.getY() << "," << bestD2.getZ() << ")"
-                  << " r2=(" << bestD2.getMajorRadius() << "," << bestD2.getBRadius() << "," << bestD2.getMinorRadius() << ")"
+                  << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
                   << " drift2=" << drift2
                   << std::endl;
         restoreLiveParent();
@@ -1858,8 +1865,8 @@ CostCallbackPair Frame::trySplitCellPhased(
 
     const cv::Point3f acceptedD1Pos(bestD1.getX(), bestD1.getY(), bestD1.getZ());
     const cv::Point3f acceptedD2Pos(bestD2.getX(), bestD2.getY(), bestD2.getZ());
-    const cv::Point3f acceptedD1R(bestD1.getMajorRadius(), bestD1.getBRadius(), bestD1.getMinorRadius());
-    const cv::Point3f acceptedD2R(bestD2.getMajorRadius(), bestD2.getBRadius(), bestD2.getMinorRadius());
+    const cv::Point3f acceptedD1R(bestD1.getARadius(), bestD1.getBRadius(), bestD1.getCRadius());
+    const cv::Point3f acceptedD2R(bestD2.getARadius(), bestD2.getBRadius(), bestD2.getCRadius());
     const float acceptedDrift1 = drift1;
     const float acceptedDrift2 = drift2;
     const cv::Point3f acceptedSeed1 = bestSeedD1;

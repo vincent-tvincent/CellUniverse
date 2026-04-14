@@ -132,9 +132,9 @@ static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
 
     for (const auto &cell : frame.cells) {
         auto params = cell.getCellParams();
-        params.majorRadius *= expandFactor;
+        params.aRadius *= expandFactor;
         params.bRadius     *= expandFactor;
-        params.minorRadius *= expandFactor;
+        params.cRadius *= expandFactor;
         Spheroid expandedCell(params);
         for (size_t z = 0; z < exclusionMask.size(); ++z) {
             expandedCell.draw(exclusionMask[z], simulationConfig, static_cast<float>(z));
@@ -282,7 +282,7 @@ void CellUniverse::optimize(int frameIndex)
             auto p = cell.getCellParams();
             std::cout << "  " << p.name
                       << " pos=(" << p.x << "," << p.y << "," << p.z << ")"
-                      << " R=(" << p.majorRadius << "," << p.minorRadius << ")"
+                      << " R=(" << p.aRadius << "," << p.cRadius << ")"
                       << " theta=(" << p.theta_x << "," << p.theta_y << "," << p.theta_z << ")"
                       << " brightness=" << p.brightness
                       << std::endl;
@@ -297,8 +297,10 @@ void CellUniverse::optimize(int frameIndex)
     const float sizeReductionWeight = config.prob.size_reduction_penalty_weight;
     const float baseSplitProb = config.prob.P_split_base;
 
-    // No splits on the first frame — cells can't divide before any time has passed
-    bool allowSplits = (frameIndex > 0);
+    // Global split gate from YAML plus the existing "no frame-0 splits"
+    // rule. When disabled, the optimizer still runs normally but never
+    // classifies, attempts, or accepts splits.
+    bool allowSplits = config.prob.enable_split_checks && (frameIndex > 0);
 
     // Cells that already failed a burn-in this frame — skip all further split attempts.
     std::set<std::string> splitBlacklist;
@@ -526,16 +528,16 @@ void CellUniverse::optimize(int frameIndex)
         PerturbParams savedCalX = Spheroid::cellConfig.x;
         PerturbParams savedCalY = Spheroid::cellConfig.y;
         PerturbParams savedCalZ = Spheroid::cellConfig.z;
-        PerturbParams savedCalMajor = Spheroid::cellConfig.majorRadius;
+        PerturbParams savedCalMajor = Spheroid::cellConfig.aRadius;
         PerturbParams savedCalB = Spheroid::cellConfig.bRadius;
-        PerturbParams savedCalMinor = Spheroid::cellConfig.minorRadius;
+        PerturbParams savedCalMinor = Spheroid::cellConfig.cRadius;
 
         Spheroid::cellConfig.x.sigma = savedCalX.sigma * posScale;
         Spheroid::cellConfig.y.sigma = savedCalY.sigma * posScale;
         Spheroid::cellConfig.z.sigma = savedCalZ.sigma * posScale;
-        Spheroid::cellConfig.majorRadius.sigma = 0.0f;
+        Spheroid::cellConfig.aRadius.sigma = 0.0f;
         Spheroid::cellConfig.bRadius.sigma     = 0.0f;
-        Spheroid::cellConfig.minorRadius.sigma = 0.0f;
+        Spheroid::cellConfig.cRadius.sigma = 0.0f;
 
         std::cout << "[Calibration] frame " << displayFrame
                   << " cells=" << frame.cells.size()
@@ -627,9 +629,9 @@ void CellUniverse::optimize(int frameIndex)
         Spheroid::cellConfig.x = savedCalX;
         Spheroid::cellConfig.y = savedCalY;
         Spheroid::cellConfig.z = savedCalZ;
-        Spheroid::cellConfig.majorRadius = savedCalMajor;
+        Spheroid::cellConfig.aRadius = savedCalMajor;
         Spheroid::cellConfig.bRadius     = savedCalB;
-        Spheroid::cellConfig.minorRadius = savedCalMinor;
+        Spheroid::cellConfig.cRadius = savedCalMinor;
     }
 
     // ---- Helper: build claim-set for other cells during a split attempt ----
@@ -880,7 +882,8 @@ void CellUniverse::optimize(int frameIndex)
 
         // Triaxial fitted-shape elongation is the classification signal.
         // max(a,b,c)/min(a,b,c) from the fit, plus the world-space direction
-        // and length of the longest axis. No image-PCA anymore.
+        // and length of the chosen split axis. The active split pipeline
+        // uses the shortest fitted axis for that direction seed.
         const float fitShapeElong = frame.cells[ci].shapeElongation();
         cv::Point3f fitLongAxisDir;
         float fitLongAxisLength = 0.0f;
@@ -893,9 +896,9 @@ void CellUniverse::optimize(int frameIndex)
         snap.longAxisLength = fitLongAxisLength;
 
         snap.position = cv::Point3f(p.x, p.y, p.z);
-        snap.majorRadius = p.majorRadius;
+        snap.aRadius = p.aRadius;
         snap.bRadius     = p.bRadius;
-        snap.minorRadius = p.minorRadius;
+        snap.cRadius = p.cRadius;
         snap.thetaX = p.theta_x;
         snap.thetaY = p.theta_y;
         snap.thetaZ = p.theta_z;
@@ -991,7 +994,7 @@ void CellUniverse::saveCells(int frameIndex)
             file.close();
             file.open(cellsPath, std::ios::trunc);
         }
-        file << "file,name,x,y,z,majorRadius,bRadius,minorRadius,theta_x,theta_y,theta_z" << '\n';
+        file << "file,name,x,y,z,aRadius,bRadius,cRadius,theta_x,theta_y,theta_z" << '\n';
     }
 
     Frame &frame = frames[frameIndex];
@@ -1005,9 +1008,9 @@ void CellUniverse::saveCells(int frameIndex)
              << params.x << ","
              << params.y << ","
              << params.z << ","
-             << params.majorRadius << ","
+             << params.aRadius << ","
              << params.bRadius << ","
-             << params.minorRadius << ","
+             << params.cRadius << ","
              << params.theta_x << ","
              << params.theta_y << ","
              << params.theta_z
@@ -1030,9 +1033,9 @@ void CellUniverse::copyCellsForward(size_t to)
         for (auto &cell : frames[to].cells) {
             cell.blendAdaptivePerturbProbabilitiesWithConfig(
                 config.cell->brightnessProbabilityTrust,
-                config.cell->majorRadiusProbabilityTrust,
-                config.cell->minorRadiusProbabilityTrust,
-                config.cell->abRatioProbabilityTrust);
+                config.cell->aRadiusProbabilityTrust,
+                config.cell->cRadiusProbabilityTrust,
+                config.cell->bRadiusProbabilityTrust);
         }
     }
 }

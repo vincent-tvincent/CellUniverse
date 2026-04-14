@@ -4,10 +4,10 @@
 
 namespace {
 void ConfigureSpheroidBounds() {
-    Spheroid::cellConfig.minMajorRadius = 1.0;
-    Spheroid::cellConfig.maxMajorRadius = 10.0;
-    Spheroid::cellConfig.minMinorRadius = 0.5;
-    Spheroid::cellConfig.maxMinorRadius = 8.0;
+    Spheroid::cellConfig.minARadius = 1.0;
+    Spheroid::cellConfig.maxARadius = 10.0;
+    Spheroid::cellConfig.minCRadius = 0.5;
+    Spheroid::cellConfig.maxCRadius = 8.0;
 }
 }
 
@@ -17,19 +17,19 @@ TEST(SpheroidTest, ConstructorClampsRadiiToConfiguredBounds) {
     Spheroid spheroid(SpheroidParams("cellA", 0.0f, 0.0f, 0.0f, 20.0f, 0.1f));
     SpheroidParams params = spheroid.getCellParams();
 
-    EXPECT_DOUBLE_EQ(params.majorRadius, 10.0);
-    EXPECT_DOUBLE_EQ(params.minorRadius, 0.5);
+    EXPECT_DOUBLE_EQ(params.aRadius, 10.0);
+    EXPECT_DOUBLE_EQ(params.cRadius, 0.5);
     EXPECT_TRUE(spheroid.checkConstraints());
 }
 
-TEST(SpheroidTest, ConstructorEnforcesMinorRadiusNotGreaterThanMajor) {
+TEST(SpheroidTest, ConstructorEnforcesCRadiusNotGreaterThanMajor) {
     ConfigureSpheroidBounds();
 
     Spheroid spheroid(SpheroidParams("cellB", 0.0f, 0.0f, 0.0f, 2.0f, 5.0f));
     SpheroidParams params = spheroid.getCellParams();
 
-    EXPECT_DOUBLE_EQ(params.majorRadius, 2.0);
-    EXPECT_DOUBLE_EQ(params.minorRadius, 2.0);
+    EXPECT_DOUBLE_EQ(params.aRadius, 2.0);
+    EXPECT_DOUBLE_EQ(params.cRadius, 2.0);
 }
 
 TEST(SpheroidTest, DrawColorsCenterPixelAndLeavesFarPixelUnchanged) {

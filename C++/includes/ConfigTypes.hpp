@@ -141,6 +141,7 @@ public:
 class ProbabilityConfig {
 public:
     // ---- Triaxial pipeline fields (2026-04-11 redesign) ----
+    bool enable_split_checks = true;
     float P_split_base = 0.03f;
     float P_split_max = 0.5f;
     float shape_elongation_classify_threshold = 1.20f;
@@ -237,7 +238,7 @@ public:
     // settle to the local image optimum.
     float split_burn_in_pos_sigma_scale = 0.4f;
 
-    // Multiplier applied to the Spheroid majorRadius/bRadius/minorRadius
+    // Multiplier applied to the Spheroid aRadius/bRadius/cRadius
     // perturbation sigmas during candidate burn-in. At 0.1, radii can
     // only drift ~10% of their configured sigma per iteration, preserving
     // the snapshot-based daughter sizing (`0.794 * src`) through burn-in
@@ -250,6 +251,7 @@ public:
     ProbabilityConfig() = default;
 
     void explodeConfig(const YAML::Node& node) {
+        if (node["enable_split_checks"]) enable_split_checks = node["enable_split_checks"].as<bool>();
         if (node["P_split_base"]) P_split_base = node["P_split_base"].as<float>();
         if (node["P_split_max"]) P_split_max = node["P_split_max"].as<float>();
         if (node["shape_elongation_classify_threshold"]) shape_elongation_classify_threshold = node["shape_elongation_classify_threshold"].as<float>();
@@ -283,6 +285,7 @@ public:
 
     void printConfig() const {
         std::cout << "Probability Config\n";
+        std::cout << "enable_split_checks: " << (enable_split_checks ? "true" : "false") << '\n';
         std::cout << "P_split_base: " << P_split_base << '\n';
         std::cout << "P_split_max: " << P_split_max << '\n';
         std::cout << "shape_elongation_classify_threshold: " << shape_elongation_classify_threshold << '\n';
@@ -380,20 +383,19 @@ public:
     PerturbParams x{};
     PerturbParams y{};
     PerturbParams z{};
-    PerturbParams majorRadius{};
+    PerturbParams aRadius{};
     PerturbParams bRadius{};
-    PerturbParams minorRadius{};
-    PerturbParams abRatio{};
+    PerturbParams cRadius{};
     PerturbParams thetaX{};
     PerturbParams thetaY{};
     PerturbParams thetaZ{};
     PerturbParams brightness{};
-    double minMajorRadius{};
-    double maxMajorRadius{};
+    double minARadius{};
+    double maxARadius{};
     double minBRadius{};
     double maxBRadius{};
-    double minMinorRadius{};
-    double maxMinorRadius{};
+    double minCRadius{};
+    double maxCRadius{};
     float initialBrightness{0.2f};
     float initialRadiusScale{1.0f};
     float backgroundColor{0.0f};
@@ -401,12 +403,12 @@ public:
     double maxBrightness{1.0};
     float brightnessProbabilityStep{0.02f};
     float brightnessProbabilityTrust{1.0f};
-    float majorRadiusProbabilityStep{0.02f};
-    float majorRadiusProbabilityTrust{1.0f};
-    float minorRadiusProbabilityStep{0.02f};
-    float minorRadiusProbabilityTrust{1.0f};
-    float abRatioProbabilityStep{0.02f};
-    float abRatioProbabilityTrust{1.0f};
+    float aRadiusProbabilityStep{0.02f};
+    float aRadiusProbabilityTrust{1.0f};
+    float cRadiusProbabilityStep{0.02f};
+    float cRadiusProbabilityTrust{1.0f};
+    float bRadiusProbabilityStep{0.02f};
+    float bRadiusProbabilityTrust{1.0f};
     float brightnessUpdateBlend{0.2f};
     float brightnessMeanAmplification{1.0f};
     // Maximum valid z position (interpolated z-space). Used to clamp Spheroid
@@ -421,21 +423,21 @@ public:
         x.explodeParams(node["x"]);
         y.explodeParams(node["y"]);
         z.explodeParams(node["z"]);
-        majorRadius.explodeParams(node["majorRadius"]);
+        if (node["aRadius"]) aRadius.explodeParams(node["aRadius"]);
+        else if (node["majorRadius"]) aRadius.explodeParams(node["majorRadius"]);
         if (node["bRadius"]) bRadius.explodeParams(node["bRadius"]);
-        minorRadius.explodeParams(node["minorRadius"]);
-        if (node["abRatio"]) abRatio.explodeParams(node["abRatio"]);
+        cRadius.explodeParams(node["cRadius"] ? node["cRadius"] : node["minorRadius"]);
         thetaX.explodeParams(node["thetaX"]);
         thetaY.explodeParams(node["thetaY"]);
         thetaZ.explodeParams(node["thetaZ"]);
         if (node["brightness"]) brightness.explodeParams(node["brightness"]);
 
-        minMajorRadius = node["minMajorRadius"].as<double>();
-        maxMajorRadius = node["maxMajorRadius"].as<double>();
+        minARadius = node["minARadius"] ? node["minARadius"].as<double>() : node["minMajorRadius"].as<double>();
+        maxARadius = node["maxARadius"] ? node["maxARadius"].as<double>() : node["maxMajorRadius"].as<double>();
         if (node["minBRadius"]) minBRadius = node["minBRadius"].as<double>();
         if (node["maxBRadius"]) maxBRadius = node["maxBRadius"].as<double>();
-        minMinorRadius = node["minMinorRadius"].as<double>();
-        maxMinorRadius = node["maxMinorRadius"].as<double>();
+        minCRadius = node["minCRadius"] ? node["minCRadius"].as<double>() : node["minMinorRadius"].as<double>();
+        maxCRadius = node["maxCRadius"] ? node["maxCRadius"].as<double>() : node["maxMinorRadius"].as<double>();
         if (node["initialBrightness"]) initialBrightness = node["initialBrightness"].as<float>();
         if (node["initialRadiusScale"]) initialRadiusScale = node["initialRadiusScale"].as<float>();
         if (node["backgroundColor"]) backgroundColor = node["backgroundColor"].as<float>();
@@ -443,18 +445,24 @@ public:
         if (node["maxBrightness"]) maxBrightness = node["maxBrightness"].as<double>();
         if (node["brightnessProbabilityStep"]) brightnessProbabilityStep = node["brightnessProbabilityStep"].as<float>();
         if (node["brightnessProbabilityTrust"]) brightnessProbabilityTrust = node["brightnessProbabilityTrust"].as<float>();
-        majorRadiusProbabilityStep = brightnessProbabilityStep;
-        majorRadiusProbabilityTrust = brightnessProbabilityTrust;
-        minorRadiusProbabilityStep = brightnessProbabilityStep;
-        minorRadiusProbabilityTrust = brightnessProbabilityTrust;
-        abRatioProbabilityStep = brightnessProbabilityStep;
-        abRatioProbabilityTrust = brightnessProbabilityTrust;
-        if (node["majorRadiusProbabilityStep"]) majorRadiusProbabilityStep = node["majorRadiusProbabilityStep"].as<float>();
-        if (node["majorRadiusProbabilityTrust"]) majorRadiusProbabilityTrust = node["majorRadiusProbabilityTrust"].as<float>();
-        if (node["minorRadiusProbabilityStep"]) minorRadiusProbabilityStep = node["minorRadiusProbabilityStep"].as<float>();
-        if (node["minorRadiusProbabilityTrust"]) minorRadiusProbabilityTrust = node["minorRadiusProbabilityTrust"].as<float>();
-        if (node["abRatioProbabilityStep"]) abRatioProbabilityStep = node["abRatioProbabilityStep"].as<float>();
-        if (node["abRatioProbabilityTrust"]) abRatioProbabilityTrust = node["abRatioProbabilityTrust"].as<float>();
+        aRadiusProbabilityStep = brightnessProbabilityStep;
+        aRadiusProbabilityTrust = brightnessProbabilityTrust;
+        cRadiusProbabilityStep = brightnessProbabilityStep;
+        cRadiusProbabilityTrust = brightnessProbabilityTrust;
+        bRadiusProbabilityStep = brightnessProbabilityStep;
+        bRadiusProbabilityTrust = brightnessProbabilityTrust;
+        if (node["aRadiusProbabilityStep"]) aRadiusProbabilityStep = node["aRadiusProbabilityStep"].as<float>();
+        if (node["aRadiusProbabilityTrust"]) aRadiusProbabilityTrust = node["aRadiusProbabilityTrust"].as<float>();
+        if (node["cRadiusProbabilityStep"]) cRadiusProbabilityStep = node["cRadiusProbabilityStep"].as<float>();
+        if (node["cRadiusProbabilityTrust"]) cRadiusProbabilityTrust = node["cRadiusProbabilityTrust"].as<float>();
+        if (node["bRadiusProbabilityStep"]) bRadiusProbabilityStep = node["bRadiusProbabilityStep"].as<float>();
+        if (node["bRadiusProbabilityTrust"]) bRadiusProbabilityTrust = node["bRadiusProbabilityTrust"].as<float>();
+        if (node["majorRadiusProbabilityStep"]) aRadiusProbabilityStep = node["majorRadiusProbabilityStep"].as<float>();
+        if (node["majorRadiusProbabilityTrust"]) aRadiusProbabilityTrust = node["majorRadiusProbabilityTrust"].as<float>();
+        if (node["minorRadiusProbabilityStep"]) cRadiusProbabilityStep = node["minorRadiusProbabilityStep"].as<float>();
+        if (node["minorRadiusProbabilityTrust"]) cRadiusProbabilityTrust = node["minorRadiusProbabilityTrust"].as<float>();
+        if (node["abRatioProbabilityStep"]) bRadiusProbabilityStep = node["abRatioProbabilityStep"].as<float>();
+        if (node["abRatioProbabilityTrust"]) bRadiusProbabilityTrust = node["abRatioProbabilityTrust"].as<float>();
         if (node["brightnessUpdateBlend"]) brightnessUpdateBlend = node["brightnessUpdateBlend"].as<float>();
         if (node["brightnessMeanAmplification"]) brightnessMeanAmplification = node["brightnessMeanAmplification"].as<float>();
     }

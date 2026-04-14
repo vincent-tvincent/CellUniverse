@@ -45,12 +45,12 @@ while (std::getline(file, line)) {
 
     // ----------------------------
     // Case A: Original 7-column format:
-    // filePath, cellName, x, y, z, majorRadius, minorRadius
+    // filePath, cellName, x, y, z, aRadius, cRadius
     //
     // Triaxial extension (2026-04-11): optional 8-column format adds bRadius
-    // between majorRadius and minorRadius:
-    // filePath, cellName, x, y, z, majorRadius, bRadius, minorRadius
-    // If absent, bRadius defaults to majorRadius (oblate-compatible fallback).
+    // between aRadius and cRadius:
+    // filePath, cellName, x, y, z, aRadius, bRadius, cRadius
+    // If absent, bRadius defaults to aRadius (oblate-compatible fallback).
     // ----------------------------
     if (tokens.size() >= 7) {
         std::string filePath = tokens[0];
@@ -59,22 +59,22 @@ while (std::getline(file, line)) {
         float x = std::stof(tokens[2]);
         float y = std::stof(tokens[3]);
         float z = std::stof(tokens[4]);
-        float majorRadius = std::stof(tokens[5]) * initialRadiusScale;
+        float aRadius = std::stof(tokens[5]) * initialRadiusScale;
         float bRadius;
-        float minorRadius;
+        float cRadius;
         if (tokens.size() >= 8) {
             bRadius     = std::stof(tokens[6]) * initialRadiusScale;
-            minorRadius = std::stof(tokens[7]) * initialRadiusScale;
+            cRadius = std::stof(tokens[7]) * initialRadiusScale;
         } else {
-            bRadius     = majorRadius; // oblate fallback
-            minorRadius = std::stof(tokens[6]) * initialRadiusScale;
+            bRadius     = aRadius; // oblate fallback
+            cRadius = std::stof(tokens[6]) * initialRadiusScale;
         }
 
         float brightness = initialBrightness;
 
         z *= z_scaling;
 
-        SpheroidParams params(cellName, x, y, z, majorRadius, minorRadius,
+        SpheroidParams params(cellName, x, y, z, aRadius, cRadius,
                               0.0f, 0.0f, 0.0f, brightness);
         params.bRadius = bRadius;
         initialCells[filePath].push_back(Spheroid(params));
@@ -102,15 +102,15 @@ while (std::getline(file, line)) {
         z *= z_scaling;
 
         // Default radii for embryo initial points (tunable)
-        const float defaultMajorRadius = 10.0f * initialRadiusScale;
-        const float defaultMinorRadius = 10.0f * initialRadiusScale;
+        const float defaultARadius = 10.0f * initialRadiusScale;
+        const float defaultCRadius = 10.0f * initialRadiusScale;
 
         // Generate a stable name
         const std::string cellName = cellType + "_" + std::to_string(line_cnt + 1);
 
-        SpheroidParams params(cellName, x, y, z, defaultMajorRadius, defaultMinorRadius,
+        SpheroidParams params(cellName, x, y, z, defaultARadius, defaultCRadius,
                               0.0f, 0.0f, 0.0f, initialBrightness);
-        params.bRadius = defaultMajorRadius; // oblate fallback for Napari format
+        params.bRadius = defaultARadius; // oblate fallback for Napari format
         initialCells[filePath].push_back(Spheroid(params));
 
         ++line_cnt;

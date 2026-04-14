@@ -4,10 +4,10 @@
 
 namespace {
 void ConfigureSpheroidBounds() {
-    Spheroid::cellConfig.minMajorRadius = 1.0;
-    Spheroid::cellConfig.maxMajorRadius = 10.0;
-    Spheroid::cellConfig.minMinorRadius = 1.0;
-    Spheroid::cellConfig.maxMinorRadius = 8.0;
+    Spheroid::cellConfig.minARadius = 1.0;
+    Spheroid::cellConfig.maxARadius = 10.0;
+    Spheroid::cellConfig.minCRadius = 1.0;
+    Spheroid::cellConfig.maxCRadius = 8.0;
 }
 
 void ExpectNear(float a, float b) {

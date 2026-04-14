@@ -10,41 +10,41 @@ cell:
     increase_prob: 0.45
     decrease_prob: 0.45
     mu: 0
-    sigma: 20
+    sigma: 10
   # Center-position perturbation in y.
   y:
     increase_prob: 0.45
     decrease_prob: 0.45
     mu: 0
-    sigma: 20
+    sigma: 10
   # Center-position perturbation in z. This works in the same cell/world
   # coordinate space as x/y; actual image anisotropy is handled elsewhere
   # through `simulation.z_scaling`.
   z:
-    increase_prob: 0.35
-    decrease_prob: 0.35
+    increase_prob: 0.25
+    decrease_prob: 0.25
     mu: 0
-    sigma: 20
+    sigma: 10
   # Ellipsoid a-axis radius perturbation. This is the local x-axis radius
   # in the cell's own frame, not necessarily the longest radius after rotation.
   aRadius:
-    increase_prob: 0.9
-    decrease_prob: 0.7
+    increase_prob: 0.75
+    decrease_prob: 0.55
     mu: 0
-    sigma: 20
+    sigma: 8
   # Ellipsoid b-axis radius perturbation. Independent from aRadius.
   bRadius:
-    increase_prob: 0.9
-    decrease_prob: 0.7
+    increase_prob: 0.75
+    decrease_prob: 0.55
     mu: 0
-    sigma: 20
+    sigma: 8
   # Ellipsoid c-axis radius perturbation. Often tuned lower / tighter for
   # flatter cells because it is commonly the shortest axis.
   cRadius:
-    increase_prob: 0.75
-    decrease_prob: 0.9
+    increase_prob: 0.85
+    decrease_prob: 0.85
     mu: 0
-    sigma: 20
+    sigma: 8
   # Rotation perturbation — tuned DOWN from (prob 0.9, sigma 0.1) on
   # 2026-04-11 because the old values were fine under oblate (a==b makes
   # rotation around z a structural no-op, so the random walk was invisible)
@@ -53,28 +53,28 @@ cell:
   # iters is sqrt(0.3*350*0.0025) ≈ 0.51 rad (~29°) before the cost basin
   # pulls back — small enough to let the optimizer lock in orientation.
   thetaX:
-    increase_prob: 0.7
-    decrease_prob: 0.7
+    increase_prob: 0.4
+    decrease_prob: 0.4
     mu: 0
-    sigma: 0.125
+    sigma: 0.1
   thetaY:
-    increase_prob: 0.7
-    decrease_prob: 0.7
+    increase_prob: 0.4
+    decrease_prob: 0.4
     mu: 0
-    sigma: 0.125
+    sigma: 0.1
   thetaZ:
-    increase_prob: 0.7
-    decrease_prob: 0.7
+    increase_prob: 0.4
+    decrease_prob: 0.4
     mu: 0
-    sigma: 0.125
+    sigma: 0.1
   # Brightness perturbation. Sigma is additive intensity in normalized
   # 0-1 image space, so 0.1 means a one-step proposal can move brightness
   # by roughly 10% of the full intensity range.
   brightness:
-    increase_prob: 0.8
-    decrease_prob: 0.8
+    increase_prob: 0.2
+    decrease_prob: 0.2
     mu: 0
-    sigma: 0.1
+    sigma: 0.03
 
   # Hard lower/upper bounds on the a-axis radius during perturbation.
   minARadius: 10
@@ -96,7 +96,7 @@ cell:
   # image-driven brightness updates take over.
   initialBrightness: 0.25
   # Background intensity used for rendering / scoring in normalized 0-1 space.
-  backgroundColor: 0.05
+  backgroundColor: 0.1
 
   # Hard brightness clamp during perturbation and updates.
   minBrightness: 0.1
@@ -112,22 +112,30 @@ cell:
 
   # Same adaptive-probability controls for the a-axis radius perturbation.
   aRadiusProbabilityStep: 0.05
-  aRadiusProbabilityTrust: 0.1
+  aRadiusProbabilityTrust: 0.2
 
   # Same adaptive-probability controls for the c-axis radius perturbation.
   cRadiusProbabilityStep: 0.05
-  cRadiusProbabilityTrust: 0.1
+  cRadiusProbabilityTrust: 0.3
 
   # Same adaptive-probability controls for the b-axis radius perturbation.
   bRadiusProbabilityStep: 0.05
-  bRadiusProbabilityTrust: 0.1
+  bRadiusProbabilityTrust: 0.2
 
   # After frame 1, before each new frame starts, reduce the increase
   # probability of the CURRENT shortest radius by this amount so the
   # shortest axis is a bit less likely to expand than the other two.
   # Guarded: if the current increase probability is already at or below
   # this value, the reduction is skipped instead of pushing it near 0.
-  shortestRadiusExpansionPenalty: 0.1
+  shortestRadiusExpansionPenalty: 0.05
+
+  # Flat-cell rotation boost. Targets the shape pattern seen repeatedly in
+  # earlier logs: pancake-like cells with `a≈b>c`. Per perturbation, compute
+  # flatness = ((a+b)/2)/c - 1 when c is the shortest axis, then add
+  # `flatRotationProbabilityScale * flatness` to the total rotation
+  # probability of thetaX/thetaY/thetaZ, capped by the upper bound below.
+  flatRotationProbabilityScale: 0.025
+  flatRotationProbabilityUpperBound: 0.95
 
   # Exponential moving average blend for brightness re-estimation from image
   # evidence. Higher means keep more of the previous value, lower means react
@@ -146,7 +154,7 @@ cell:
 # were removed when the dual pipeline was torn out.
 simulation:
   # Main optimization iterations per cell in the tracking loop.
-  iterations_per_cell: 500
+  iterations_per_cell: 300
   # Relative z-spacing factor used when converting between image slices and
   # geometric distances. Larger values make z-distance count more heavily.
   z_scaling: 7
@@ -244,12 +252,12 @@ simulation:
 # direction, burn each in briefly, pick the best, then bio check + cost gate.
 prob:
   # Base split-attempt probability for a cell before elongation-based scaling.
-  P_split_base: 0.03
+  P_split_base: 0.005
   # Upper clamp on split-attempt probability after all scaling.
-  P_split_max: 0.5
+  P_split_max: 0.15
   # Cells above this snapshot elongation are pre-classified into the split-
   # focused Phase B path.
-  shape_elongation_classify_threshold: 1.20
+  shape_elongation_classify_threshold: 1.45
 
   # Minimum cost improvement required for a split to be accepted. More
   # negative candidate-vs-parent cost is better; making this larger is stricter.
@@ -257,24 +265,24 @@ prob:
   # Weight on daughter overlap in the split candidate cost.
   overlap_penalty_weight: 500.0
   # Penalty for shrinking daughters too much relative to the source parent.
-  size_reduction_penalty_weight: 30
+  size_reduction_penalty_weight: 0
 
   # If PCA/snapshot split directions agree within this angle, treat them as
   # the same primary direction instead of exploring both separately.
   split_direction_agreement_degrees: 20
   # Short pre-pass perturb iterations applied to expected daughters before the
   # main candidate burn-in.
-  expected_daughter_pre_pass_iterations: 1
+  expected_daughter_pre_pass_iterations: 2
 
   # 2 midpoints (PCA + snapshot) x 5 variants each = 10 candidates per
   # primary direction. With split_direction_agreement giving 1 primary in
   # most cases, total is 10.
   split_candidates_per_attempt: 10
   # Short burn-in iterations per split candidate before scoring.
-  split_candidate_burn_in_iterations: 20
+  split_candidate_burn_in_iterations: 24
   # Extra refine iterations on the winning candidate's daughters before
   # the bio/cost gates fire. Uses the same tight burn-in sigmas.
-  split_final_refine_iterations: 30
+  split_final_refine_iterations: 20
   # Per-cell position calibration pass between pre-pass and Phase A/B.
   # Runs M perturbCell iterations with tight position sigmas and radii
   # frozen at 0 sigma so the parent position refines without radius
@@ -299,7 +307,7 @@ prob:
   # seed position. Catches daughters escaping the parent footprint during
   # burn-in (f4/f5 false-split pathology).
   bio_max_drift_parent_fraction: 0.4
-  bio_max_drift_daughter_fraction: 0.65
+  bio_max_drift_daughter_fraction: 0.8
   # Midpoint-near-snapshot-parent gate (2026-04-11). Rejects a split
   # when the daughter midpoint is more than 0.95 * parent_maxR from the
   # snapshot (last-frame) parent center. Catches parent drift and
@@ -324,9 +332,9 @@ prob:
   # Multiplier on Ellipsoid x/y/z perturbation sigmas during candidate burn-in.
   # Main-loop sigmas (5, 5, 8) let daughters wander 15-25 voxels across
   # 20 iters; 0.4 tightens to (2, 2, 3.2) so burn-in only refines.
-  split_burn_in_pos_sigma_scale: 0.4
+  split_burn_in_pos_sigma_scale: 0.3
   # Multiplier on Ellipsoid aRadius/bRadius/cRadius perturbation sigmas during
   # burn-in. 0.1 preserves the snapshot-based daughter sizing (0.794 *
   # src) through burn-in + refine, preventing the "collapsed sliver"
   # false-split pattern where one daughter shrinks to the radius floor.
-  split_burn_in_radius_sigma_scale: 0.1
+  split_burn_in_radius_sigma_scale: 0.0

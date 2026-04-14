@@ -86,6 +86,37 @@ void scanEllipsoidVolume(
         }
     }
 }
+
+PerturbParams boostRotationPerturbForFlatness(const PerturbParams &base,
+                                              float flatnessStrength,
+                                              float totalProbabilityUpperBound)
+{
+    PerturbParams boosted = base;
+    const bool hasSeparateSignProbabilities =
+        base.increase_prob >= 0.0f || base.decrease_prob >= 0.0f;
+    if (!hasSeparateSignProbabilities || flatnessStrength <= 0.0f) {
+        return boosted;
+    }
+
+    const float baseInc = std::clamp(base.increase_prob >= 0.0f ? base.increase_prob : 0.0f, 0.0f, 1.0f);
+    const float baseDecRaw = std::clamp(base.decrease_prob >= 0.0f ? base.decrease_prob : 0.0f, 0.0f, 1.0f);
+    const float baseDec = std::min(baseDecRaw, 1.0f - baseInc);
+    const float baseTotal = baseInc + baseDec;
+
+    const float clampedUpperBound = std::clamp(totalProbabilityUpperBound, 0.0f, 0.999f);
+    const float targetTotal = std::min(clampedUpperBound, baseTotal + flatnessStrength);
+    if (targetTotal <= baseTotal + 1e-6f) {
+        return boosted;
+    }
+
+    const float incRatio = (baseTotal > 1e-6f) ? (baseInc / baseTotal) : 0.5f;
+    const float boostedInc = targetTotal * incRatio;
+    const float boostedDec = targetTotal - boostedInc;
+
+    boosted.increase_prob = std::clamp(boostedInc, 0.0f, 1.0f);
+    boosted.decrease_prob = std::clamp(boostedDec, 0.0f, std::max(0.0f, 1.0f - boosted.increase_prob));
+    return boosted;
+}
 } // namespace
 
 EllipsoidConfig Ellipsoid::cellConfig = EllipsoidConfig();
@@ -107,26 +138,23 @@ void Ellipsoid::inverseRotatePoint(double dx, double dy, double dz,
 
 void Ellipsoid::worldLongAxis(cv::Point3f &dir, float &length) const
 {
-    // Split seeding now follows the SHORTEST fitted axis rather than the
-    // longest. For compatibility, the historical helper name is retained,
-    // but the returned direction/length correspond to min(a, b, c).
-    //
-    // Rotate the corresponding local unit vector out to world space using the forward rotation
+    // Pick whichever of (a, b, c) is largest and rotate the corresponding
+    // local unit vector out to world space using the forward rotation
     // R = Rz * Ry * Rx. Since R_T in generateInverseRotationMatrix is R^T
     // stored row-major, column-i of R (which maps local axis i to world) is
     // read out of R_T as (R_T[i], R_T[3 + i], R_T[6 + i]).
     std::array<double, 9> R_T{};
     generateInverseRotationMatrix(R_T);
 
-    int selectedAxis = 0; // 0 = a (local x), 1 = b (local y), 2 = c (local z)
-    double selectedValue = a;
-    if (b < selectedValue) { selectedAxis = 1; selectedValue = b; }
-    if (c < selectedValue) { selectedAxis = 2; selectedValue = c; }
+    int longestAxis = 0; // 0 = a (local x), 1 = b (local y), 2 = c (local z)
+    double longestValue = a;
+    if (b > longestValue) { longestAxis = 1; longestValue = b; }
+    if (c > longestValue) { longestAxis = 2; longestValue = c; }
 
-    // Column `selectedAxis` of R = (R_T[selectedAxis], R_T[3 + selectedAxis], R_T[6 + selectedAxis]).
-    const double dx = R_T[selectedAxis];
-    const double dy = R_T[3 + selectedAxis];
-    const double dz = R_T[6 + selectedAxis];
+    // Column `longestAxis` of R = (R_T[longestAxis], R_T[3 + longestAxis], R_T[6 + longestAxis]).
+    const double dx = R_T[longestAxis];
+    const double dy = R_T[3 + longestAxis];
+    const double dz = R_T[6 + longestAxis];
 
     // The column should already be a unit vector because R is orthonormal,
     // but normalize defensively against floating-point drift.
@@ -139,7 +167,7 @@ void Ellipsoid::worldLongAxis(cv::Point3f &dir, float &length) const
     } else {
         dir = cv::Point3f(1.0f, 0.0f, 0.0f);
     }
-    length = static_cast<float>(selectedValue);
+    length = static_cast<float>(longestValue);
 }
 
 void Ellipsoid::generateInverseRotationMatrix(std::array<double, 9> &R_T) const {
@@ -533,6 +561,31 @@ void Ellipsoid::drawOutline(cv::Mat &image, float color, float z) const {
     const PerturbParams::Sample cRadiusSample = _cRadiusPerturbParams.samplePerturb();
     const PerturbParams::Sample bRadiusSample = _bRadiusPerturbParams.samplePerturb();
     const PerturbParams::Sample brightnessSample = _brightnessPerturbParams.samplePerturb();
+
+    const float aRadius = getARadius();
+    const float bRadius = getBRadius();
+    const float cRadius = getCRadius();
+    const float minEquatorialRadius = std::min(aRadius, bRadius);
+    const float meanEquatorialRadius = 0.5f * (aRadius + bRadius);
+    const bool isPancakeFlat = cRadius <= minEquatorialRadius + 1e-6f;
+    const float flatness = isPancakeFlat
+        ? std::max(0.0f, (meanEquatorialRadius / std::max(cRadius, 1e-6f)) - 1.0f)
+        : 0.0f;
+    const float rotationBoost =
+        std::max(0.0f, cellConfig.flatRotationProbabilityScale) * flatness;
+    const PerturbParams thetaXParams =
+        boostRotationPerturbForFlatness(cellConfig.thetaX,
+                                        rotationBoost,
+                                        cellConfig.flatRotationProbabilityUpperBound);
+    const PerturbParams thetaYParams =
+        boostRotationPerturbForFlatness(cellConfig.thetaY,
+                                        rotationBoost,
+                                        cellConfig.flatRotationProbabilityUpperBound);
+    const PerturbParams thetaZParams =
+        boostRotationPerturbForFlatness(cellConfig.thetaZ,
+                                        rotationBoost,
+                                        cellConfig.flatRotationProbabilityUpperBound);
+
     if (directions != nullptr) {
         directions->brightness = brightnessSample.direction;
         directions->aRadius = aRadiusSample.direction;
@@ -546,9 +599,9 @@ void Ellipsoid::drawOutline(cv::Mat &image, float color, float z) const {
         _position.z + cellConfig.z.getPerturbOffset(),
         _major_radius + aRadiusSample.offset,
         _minor_radius + cRadiusSample.offset,
-        static_cast<float>(_theta_x) + cellConfig.thetaX.getPerturbOffset(),
-        static_cast<float>(_theta_y) + cellConfig.thetaY.getPerturbOffset(),
-        static_cast<float>(_theta_z) + cellConfig.thetaZ.getPerturbOffset(),
+        static_cast<float>(_theta_x) + thetaXParams.getPerturbOffset(),
+        static_cast<float>(_theta_y) + thetaYParams.getPerturbOffset(),
+        static_cast<float>(_theta_z) + thetaZParams.getPerturbOffset(),
         _brightness + brightnessSample.offset);
     spheroidParams.bRadius = static_cast<float>(_b_radius) + bRadiusSample.offset;
     Ellipsoid perturbedCell(spheroidParams);

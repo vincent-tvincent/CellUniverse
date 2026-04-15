@@ -6,6 +6,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <tuple>
 
 namespace utils
 {
@@ -164,6 +165,229 @@ static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
     return computeMeanOfTopFraction(backgroundCandidates, simulationConfig.adaptive_background_top_fraction);
 }
 
+struct BrightBox
+{
+    int ix = 0;
+    int iy = 0;
+    int iz = 0;
+    cv::Point3f center{0.0f, 0.0f, 0.0f};
+    float brightness = 0.0f;
+    int voxels = 0;
+};
+
+static int chooseNearestDivisorSize(int axisLength, float targetSize)
+{
+    if (axisLength <= 1) {
+        return 1;
+    }
+
+    const float clampedTarget = std::clamp(targetSize, 1.0f, static_cast<float>(axisLength));
+    int bestDivisor = 1;
+    float bestDistance = std::abs(static_cast<float>(bestDivisor) - clampedTarget);
+    for (int d = 1; d <= axisLength; ++d) {
+        if (axisLength % d != 0) {
+            continue;
+        }
+        const float distance = std::abs(static_cast<float>(d) - clampedTarget);
+        if (distance < bestDistance ||
+            (std::abs(distance - bestDistance) <= 1e-6f && d > bestDivisor)) {
+            bestDivisor = d;
+            bestDistance = distance;
+        }
+    }
+    return bestDivisor;
+}
+
+static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
+    const Frame &frame,
+    const BaseConfig &config,
+    int displayFrame)
+{
+    std::vector<Frame::SignalCenter> centers;
+    const auto &realFrame = frame.getRealFrame();
+    if (realFrame.empty()) {
+        return centers;
+    }
+
+    const int sizeX = realFrame[0].cols;
+    const int sizeY = realFrame[0].rows;
+    const int sizeZ = static_cast<int>(realFrame.size());
+    if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) {
+        return centers;
+    }
+
+    const float boxScale = std::max(0.1f, config.simulation.signal_guided_box_size_scale);
+    const float maxDiamX = 2.0f * static_cast<float>(config.cell->maxARadius);
+    const float maxDiamY = 2.0f * static_cast<float>(
+        config.cell->maxBRadius > 0.0 ? config.cell->maxBRadius : config.cell->maxARadius);
+    const float maxDiamZ = 2.0f * static_cast<float>(config.cell->maxCRadius);
+    const float targetBoxX = std::max(1.0f, (maxDiamX / 3.0f) * boxScale);
+    const float targetBoxY = std::max(1.0f, (maxDiamY / 3.0f) * boxScale);
+    const float targetBoxZ = std::max(1.0f, (maxDiamZ / 3.0f) * boxScale);
+
+    const int boxSizeX = chooseNearestDivisorSize(sizeX, targetBoxX);
+    const int boxSizeY = chooseNearestDivisorSize(sizeY, targetBoxY);
+    const int boxSizeZ = chooseNearestDivisorSize(sizeZ, targetBoxZ);
+    const int gridX = std::max(1, sizeX / boxSizeX);
+    const int gridY = std::max(1, sizeY / boxSizeY);
+    const int gridZ = std::max(1, sizeZ / boxSizeZ);
+
+    const float backgroundValue = frame.getBackgroundValue();
+    const float minDelta = std::max(0.0f, config.simulation.signal_guided_min_box_brightness_delta);
+
+    std::vector<BrightBox> boxes;
+    boxes.reserve(static_cast<size_t>(gridX) * gridY * gridZ);
+    for (int iz = 0; iz < gridZ; ++iz) {
+        const int z0 = iz * boxSizeZ;
+        const int z1 = z0 + boxSizeZ;
+        for (int iy = 0; iy < gridY; ++iy) {
+            const int y0 = iy * boxSizeY;
+            const int y1 = y0 + boxSizeY;
+            for (int ix = 0; ix < gridX; ++ix) {
+                const int x0 = ix * boxSizeX;
+                const int x1 = x0 + boxSizeX;
+
+                double sum = 0.0;
+                int voxels = 0;
+                for (int z = z0; z < z1; ++z) {
+                    for (int y = y0; y < y1; ++y) {
+                        const float *row = realFrame[z].ptr<float>(y);
+                        for (int x = x0; x < x1; ++x) {
+                            sum += row[x];
+                            ++voxels;
+                        }
+                    }
+                }
+                if (voxels <= 0) {
+                    continue;
+                }
+
+                const float meanBrightness = static_cast<float>(sum / static_cast<double>(voxels));
+                if (meanBrightness <= backgroundValue + minDelta) {
+                    continue;
+                }
+
+                boxes.push_back({
+                    ix, iy, iz,
+                    cv::Point3f(
+                        static_cast<float>(x0 + x1 - 1) * 0.5f,
+                        static_cast<float>(y0 + y1 - 1) * 0.5f,
+                        static_cast<float>(z0 + z1 - 1) * 0.5f),
+                    meanBrightness,
+                    voxels
+                });
+            }
+        }
+    }
+
+    std::sort(boxes.begin(), boxes.end(),
+              [](const BrightBox &a, const BrightBox &b) {
+                  return a.brightness > b.brightness;
+              });
+
+    std::map<std::tuple<int, int, int>, size_t> boxIndex;
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        boxIndex[{boxes[i].ix, boxes[i].iy, boxes[i].iz}] = i;
+    }
+
+    std::vector<char> visited(boxes.size(), 0);
+    float maxCenterBrightness = backgroundValue;
+    for (size_t seed = 0; seed < boxes.size(); ++seed) {
+        if (visited[seed]) {
+            continue;
+        }
+
+        std::vector<size_t> stack{seed};
+        visited[seed] = 1;
+        double weightSum = 0.0;
+        double xSum = 0.0, ySum = 0.0, zSum = 0.0;
+        double brightnessSum = 0.0;
+        int clusterBoxes = 0;
+
+        while (!stack.empty()) {
+            const size_t current = stack.back();
+            stack.pop_back();
+            const BrightBox &box = boxes[current];
+            const float weight = std::max(1e-6f, box.brightness - backgroundValue);
+            weightSum += weight;
+            xSum += weight * static_cast<double>(box.center.x);
+            ySum += weight * static_cast<double>(box.center.y);
+            zSum += weight * static_cast<double>(box.center.z);
+            brightnessSum += static_cast<double>(box.brightness);
+            ++clusterBoxes;
+
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+                        auto it = boxIndex.find({box.ix + dx, box.iy + dy, box.iz + dz});
+                        if (it == boxIndex.end()) {
+                            continue;
+                        }
+                        const size_t neighbor = it->second;
+                        if (visited[neighbor]) {
+                            continue;
+                        }
+                        visited[neighbor] = 1;
+                        stack.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        if (clusterBoxes <= 0 || weightSum <= 0.0) {
+            continue;
+        }
+
+        Frame::SignalCenter center;
+        center.position = cv::Point3f(
+            static_cast<float>(xSum / weightSum),
+            static_cast<float>(ySum / weightSum),
+            static_cast<float>(zSum / weightSum));
+        center.brightness = static_cast<float>(brightnessSum / static_cast<double>(clusterBoxes));
+        center.boxes = clusterBoxes;
+        centers.push_back(center);
+        maxCenterBrightness = std::max(maxCenterBrightness, center.brightness);
+    }
+
+    for (auto &center : centers) {
+        const float normalized = (maxCenterBrightness > backgroundValue + 1e-6f)
+            ? std::clamp((center.brightness - backgroundValue) /
+                         (maxCenterBrightness - backgroundValue), 0.0f, 1.0f)
+            : 0.0f;
+        center.sigmaScale = std::max(
+            config.simulation.signal_guided_min_sigma_scale,
+            1.0f - normalized * (1.0f - config.simulation.signal_guided_min_sigma_scale));
+    }
+
+    std::sort(centers.begin(), centers.end(),
+              [](const Frame::SignalCenter &a, const Frame::SignalCenter &b) {
+                  return a.brightness > b.brightness;
+              });
+
+    std::cout << "[Signal Centers] frame " << displayFrame
+              << " enabled=" << config.simulation.signal_guided_position_enabled
+              << " boxSize=(" << boxSizeX << "," << boxSizeY << "," << boxSizeZ << ")"
+              << " grid=(" << gridX << "," << gridY << "," << gridZ << ")"
+              << " background=" << backgroundValue
+              << " keptBoxes=" << boxes.size()
+              << " clusters=" << centers.size()
+              << std::endl;
+    for (size_t i = 0; i < centers.size(); ++i) {
+        const auto &center = centers[i];
+        std::cout << "  [Signal Center] idx=" << i
+                  << " pos=(" << center.position.x << "," << center.position.y << "," << center.position.z << ")"
+                  << " brightness=" << center.brightness
+                  << " sigmaScale=" << center.sigmaScale
+                  << " boxes=" << center.boxes
+                  << std::endl;
+    }
+
+    return centers;
+}
+
 // Preprocessing moved to ImageHandler. Single preprocessed stack via
 // ImageHandler::loadFrame.
 CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initialCells,
@@ -269,8 +493,12 @@ void CellUniverse::optimize(int frameIndex)
 
     frame.regenerateSynthFrame();
 
-    size_t totalIterations = frame.length() * config.simulation.iterations_per_cell;
     int displayFrame = firstFrame + frameIndex;
+    const int optimizeItersPerCell =
+        config.simulation.signal_guided_main_iterations_per_cell >= 0
+            ? config.simulation.signal_guided_main_iterations_per_cell
+            : config.simulation.iterations_per_cell;
+    size_t totalIterations = frame.length() * static_cast<size_t>(std::max(0, optimizeItersPerCell));
 
     std::cout << "[Optimize] frame " << displayFrame
               << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)" << std::endl;
@@ -369,7 +597,17 @@ void CellUniverse::optimize(int frameIndex)
     // Refine each cell's position FIRST so Voronoi claim points in the
     // pre-pass use calibrated positions, not raw snapshot positions.
     // This makes neighbor exclusion more accurate.
-    const int calibrationIters = std::max(0, config.prob.split_calibration_iterations_per_cell);
+    if (config.simulation.signal_guided_position_enabled) {
+        frame.setSignalCenters(localizeSignalCentersForFrame(frame, config, displayFrame));
+    } else {
+        frame.setSignalCenters({});
+    }
+
+    const int calibrationIters = std::max(
+        0,
+        config.simulation.signal_guided_calibration_iterations_per_cell >= 0
+            ? config.simulation.signal_guided_calibration_iterations_per_cell
+            : config.prob.split_calibration_iterations_per_cell);
     if (calibrationIters > 0 && !frame.cells.empty()) {
         const float posScale = std::max(0.0f, config.prob.split_burn_in_pos_sigma_scale);
 
@@ -426,7 +664,8 @@ void CellUniverse::optimize(int frameIndex)
             // Step 2: perturbation refinement
             int calAccepts = 0;
             for (int it = 0; it < calibrationIters; ++it) {
-                auto calResult = frame.perturbCell(ci, overlapWeight);
+                auto calResult = frame.perturbCell(
+                    ci, overlapWeight, config.simulation.signal_guided_position_enabled);
                 const bool calAccept = calResult.first < 0.0;
                 if (calAccept) ++calAccepts;
                 calResult.second(calAccept);
@@ -696,7 +935,11 @@ void CellUniverse::optimize(int frameIndex)
                         std::set<std::string> &splitRejectedInPhase) {
         if (phaseNames.empty()) return;
 
-        const size_t perCellIters = static_cast<size_t>(config.simulation.iterations_per_cell);
+        const int configuredMainIters =
+            config.simulation.signal_guided_main_iterations_per_cell >= 0
+                ? config.simulation.signal_guided_main_iterations_per_cell
+                : config.simulation.iterations_per_cell;
+        const size_t perCellIters = static_cast<size_t>(std::max(0, configuredMainIters));
         const size_t totalPhaseIters = perCellIters * phaseNames.size();
 
         // Maintain eligibility incrementally. Only changes when a split
@@ -795,9 +1038,30 @@ void CellUniverse::optimize(int frameIndex)
 
                     // Compensation perturb. The revert left cells[cellIdx]
                     // as the parent (in place), so no find_if needed.
-                    auto compResult = frame.perturbCell(cellIdx, overlapWeight);
+                    if (cellIdx >= frame.cells.size()) {
+                        std::cout << "  [Split Reject Recovery] cell=" << cellNameCopy
+                                  << " status=skip_compensation"
+                                  << " reason=index_out_of_range"
+                                  << " cellIdx=" << cellIdx
+                                  << " cells=" << frame.cells.size()
+                                  << std::endl;
+                        continue;
+                    }
+                    std::cout << "  [Split Reject Recovery] cell=" << cellNameCopy
+                              << " status=before_compensation"
+                              << " cellIdx=" << cellIdx
+                              << " liveCell=" << frame.cells[cellIdx].getName()
+                              << std::endl;
+                    auto compResult = frame.perturbCell(
+                        cellIdx, overlapWeight, config.simulation.signal_guided_position_enabled);
                     const bool compAccept = compResult.first < 0.0;
                     compResult.second(compAccept);
+                    std::cout << "  [Split Reject Recovery] cell=" << cellNameCopy
+                              << " status=after_compensation"
+                              << " accepted=" << compAccept
+                              << " costDiff=" << compResult.first
+                              << " liveCell=" << frame.cells[cellIdx].getName()
+                              << std::endl;
                     if (compAccept) {
                         perturbAccepted++;
                         residSum += compResult.first;
@@ -807,7 +1071,8 @@ void CellUniverse::optimize(int frameIndex)
                 }
             } else {
                 // --- Perturbation ---
-                auto result = frame.perturbCell(cellIdx, overlapWeight);
+                auto result = frame.perturbCell(
+                    cellIdx, overlapWeight, config.simulation.signal_guided_position_enabled);
                 double costDiff = result.first;
                 auto callback = result.second;
                 if (costDiff < 0) {
@@ -908,15 +1173,38 @@ void CellUniverse::optimize(int frameIndex)
     if (brightnessBlend > 0.0f && config.cell) {
         const auto &realFrame = frame.getRealFrame();
         const float brightnessAmplification = std::max(0.0f, config.cell->brightnessMeanAmplification);
-        const float brightnessMeasurementTopPercentile =
-            std::clamp(config.cell->brightnessMeasurementTopPercentile, 0.0f, 1.0f);
         for (auto &cell : frame.cells) {
-            const float observedBrightness =
-                cell.measureMeanBrightness(realFrame, brightnessMeasurementTopPercentile);
+            const float previousBrightness = cell.getBrightness();
+            const BrightnessMeasurementDebug debug = cell.measureBrightnessDebug(realFrame);
+            const float observedBrightness = debug.value;
             const float amplifiedObservedBrightness = observedBrightness * brightnessAmplification;
+            const float unclampedUpdatedBrightness =
+                previousBrightness * (1.0f - brightnessBlend) + amplifiedObservedBrightness * brightnessBlend;
+            const float minBrightness = static_cast<float>(config.cell->minBrightness);
+            const float maxBrightness = static_cast<float>(config.cell->maxBrightness);
             const float updatedBrightness =
-                cell.getBrightness() * (1.0f - brightnessBlend) + amplifiedObservedBrightness * brightnessBlend;
+                std::clamp(unclampedUpdatedBrightness, minBrightness, maxBrightness);
             cell.setBrightness(updatedBrightness);
+
+            std::cout << "  [Brightness Update] cell=" << cell.getName()
+                      << " mode=" << debug.mode
+                      << " prev=" << previousBrightness
+                      << " observed=" << observedBrightness
+                      << " amplified=" << amplifiedObservedBrightness
+                      << " new=" << updatedBrightness
+                      << " delta=" << (updatedBrightness - previousBrightness)
+                      << " blend=" << brightnessBlend
+                      << " inside=" << debug.insideVoxelCount
+                      << " kept=" << debug.keptVoxelCount;
+            if (debug.mode == "adaptive_signal") {
+                std::cout << " low=" << debug.low
+                          << " high=" << debug.high
+                          << " threshold=" << debug.threshold;
+            }
+            if (debug.fallbackUsed) {
+                std::cout << " fallback=1";
+            }
+            std::cout << std::endl;
         }
         frame.regenerateSynthFrame();
     }

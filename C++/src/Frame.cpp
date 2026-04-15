@@ -42,17 +42,6 @@ static double asymmetricL2Slice(const cv::Mat &real, const cv::Mat &synth, float
     return std::sqrt(std::max(0.0, asymSumSq));
 }
 
-static const cv::Mat &maybeBlurSynthSlice(const cv::Mat &synth, float sigma, cv::Mat &scratch)
-{
-    if (sigma <= 0.0f)
-    {
-        return synth;
-    }
-
-    cv::GaussianBlur(synth, scratch, cv::Size(0, 0), sigma, sigma);
-    return scratch;
-}
-
 // Function to interpolate between two slices
 void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, 
                        std::vector<cv::Mat>& processedSlices, int numInterpolations) {
@@ -83,7 +72,33 @@ Frame::Frame(const std::vector<cv::Mat> &realFrame, const SimulationConfig &simu
         double zValue = i;
         z_slices.push_back(zValue);
     }
-    _synthFrame = generateSynthFrame();
+    rerenderSynthFrameInPlace();
+    refreshFullCostCache();
+}
+
+void Frame::rerenderSynthFrameInPlace()
+{
+    cv::Size shape = getImageShape();
+    if (_synthFrame.size() != z_slices.size()) {
+        _synthFrame.resize(z_slices.size());
+    }
+
+    for (size_t i = 0; i < z_slices.size(); ++i)
+    {
+        cv::Mat &synthImage = _synthFrame[i];
+        synthImage.create(shape, CV_32F);
+        synthImage.setTo(cv::Scalar(_backgroundValue));
+        const float z = static_cast<float>(z_slices[i]);
+        for (const auto &cell : cells)
+        {
+            cell.draw(synthImage, simulationConfig, z);
+        }
+    }
+}
+
+void Frame::regenerateSynthFrame()
+{
+    rerenderSynthFrameInPlace();
     refreshFullCostCache();
 }
 
@@ -96,13 +111,10 @@ void Frame::refreshFullCostCache()
 
     _currentCostPerSlice.assign(_realFrame.size(), 0.0);
     const float asymK = simulationConfig.asymmetric_cost_weight;
-    const float blurSigma = simulationConfig.comparison_blur_sigma;
     double totalCost = 0.0;
     for (size_t i = 0; i < _realFrame.size(); ++i)
     {
-        cv::Mat blurredSynth;
-        const cv::Mat &costSynth = maybeBlurSynthSlice(_synthFrame[i], blurSigma, blurredSynth);
-        const double sliceCost = asymmetricL2Slice(_realFrame[i], costSynth, asymK);
+        const double sliceCost = asymmetricL2Slice(_realFrame[i], _synthFrame[i], asymK);
         _currentCostPerSlice[i] = sliceCost;
         totalCost += sliceCost;
     }
@@ -130,12 +142,9 @@ double Frame::calculateIncrementalCost(const std::vector<cv::Mat> &newSynthFrame
         const int zMin = std::max(0, affectedZMin);
         const int zMax = std::min(nSlices - 1, affectedZMax);
         const float asymK = simulationConfig.asymmetric_cost_weight;
-        const float blurSigma = simulationConfig.comparison_blur_sigma;
         for (int i = zMin; i <= zMax; ++i)
         {
-            cv::Mat blurredSynth;
-            const cv::Mat &costSynth = maybeBlurSynthSlice(newSynthFrame[i], blurSigma, blurredSynth);
-            outNewPerSlice[i] = asymmetricL2Slice(_realFrame[i], costSynth, asymK);
+            outNewPerSlice[i] = asymmetricL2Slice(_realFrame[i], newSynthFrame[i], asymK);
         }
     }
 
@@ -184,13 +193,10 @@ Cost Frame::calculateCost(const std::vector<cv::Mat> &synthFrame)
     }
 
     const float asymK = simulationConfig.asymmetric_cost_weight;
-    const float blurSigma = simulationConfig.comparison_blur_sigma;
     double totalCost = 0.0;
     for (size_t i = 0; i < _realFrame.size(); ++i)
     {
-        cv::Mat blurredSynth;
-        const cv::Mat &costSynth = maybeBlurSynthSlice(synthFrame[i], blurSigma, blurredSynth);
-        totalCost += asymmetricL2Slice(_realFrame[i], costSynth, asymK);
+        totalCost += asymmetricL2Slice(_realFrame[i], synthFrame[i], asymK);
     }
     return totalCost;
 }
@@ -283,21 +289,18 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
 std::vector<cv::Mat> Frame::generateOutputSynthFrame()
 {
     std::vector<cv::Mat> outputSynthFrame;
-    const float blurSigma = simulationConfig.comparison_blur_sigma;
 
     for (const auto &synthImage : _synthFrame)
     {
-        cv::Mat blurredSynth;
-        const cv::Mat &displaySynth = maybeBlurSynthSlice(synthImage, blurSigma, blurredSynth);
         cv::Mat outputImage;
-        if (displaySynth.depth() != CV_8U)
+        if (synthImage.depth() != CV_8U)
         {
             // Convert to 8-bit image if necessary, scaling pixel values by 255
-            displaySynth.convertTo(outputImage, CV_8U, 255.0);
+            synthImage.convertTo(outputImage, CV_8U, 255.0);
         }
         else
         {
-            outputImage = displaySynth.clone();
+            outputImage = synthImage.clone();
         }
 
         outputSynthFrame.push_back(outputImage);
@@ -311,7 +314,7 @@ size_t Frame::length() const
     return cells.size();
 }
 
-CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight)
+CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight, bool useSignalGuidance)
 {
     if (index >= cells.size()) {
         return {0.0, [](bool) {}};
@@ -324,6 +327,39 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight)
     double oldOverlapCell = computeOverlapForCell(index, overlapWeight);
 
     cells[index] = cells[index].getPerturbedCell(&perturbDirections);
+    if (useSignalGuidance && !_signalCenters.empty() && !_realFrame.empty()) {
+        const cv::Point3f oldPos(oldCell.getX(), oldCell.getY(), oldCell.getZ());
+        const SignalCenter *nearestCenter = nullptr;
+        float bestDist = std::numeric_limits<float>::max();
+        for (const auto &center : _signalCenters) {
+            const float dist = static_cast<float>(cv::norm(center.position - oldPos));
+            if (dist < bestDist) {
+                bestDist = dist;
+                nearestCenter = &center;
+            }
+        }
+
+        if (nearestCenter != nullptr) {
+            thread_local std::mt19937 gen{std::random_device{}()};
+            const float sigmaScale = std::max(
+                simulationConfig.signal_guided_min_sigma_scale,
+                nearestCenter->sigmaScale);
+            std::normal_distribution<float> dx(nearestCenter->position.x,
+                                               std::max(1e-3f, Ellipsoid::cellConfig.x.sigma * sigmaScale));
+            std::normal_distribution<float> dy(nearestCenter->position.y,
+                                               std::max(1e-3f, Ellipsoid::cellConfig.y.sigma * sigmaScale));
+            std::normal_distribution<float> dz(nearestCenter->position.z,
+                                               std::max(1e-3f, Ellipsoid::cellConfig.z.sigma * sigmaScale));
+
+            const float maxX = static_cast<float>(_realFrame[0].cols - 1);
+            const float maxY = static_cast<float>(_realFrame[0].rows - 1);
+            const float maxZ = static_cast<float>(_realFrame.size() - 1);
+            cells[index].setPosition(
+                std::clamp(dx(gen), 0.0f, maxX),
+                std::clamp(dy(gen), 0.0f, maxY),
+                std::clamp(dz(gen), 0.0f, maxZ));
+        }
+    }
 
     // Min-radius hard clamp (2026-04-09): prevent cells from ratcheting down to
     // minimum radius bounds via unconstrained perturbation. The Ellipsoid ctor
@@ -387,7 +423,9 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight)
     double costDiff = (newImageCost + newOverlapCell)
                     - (oldImageCost + oldOverlapCell);
 
-    CallBackFunc callback = [this, newSynthFrame, newCostPerSlice,
+    CallBackFunc callback = [this,
+                             newSynthFrame = std::move(newSynthFrame),
+                             newCostPerSlice = std::move(newCostPerSlice),
                              oldCell, index, newImageCost, perturbDirections](bool accept)
     {
         const float brightnessStep = std::max(0.0f, Ellipsoid::cellConfig.brightnessProbabilityStep);
@@ -1584,18 +1622,13 @@ CostCallbackPair Frame::trySplitCellPhased(
         if (!snapshotValid) return;
         if (cellIndex >= cells.size()) return;
         cells[cellIndex] = liveParent;
-        int affMinR = -1, affMaxR = -1;
-        Ellipsoid snapshotMutable = snapshotParent;
-        Ellipsoid liveMutable = liveParent;
-        auto revertedSynth = generateSynthFrameFast(snapshotMutable, liveMutable,
-                                                     &affMinR, &affMaxR);
-        std::vector<double> revertedPerSlice;
-        const double revertedCost = calculateIncrementalCost(revertedSynth,
-                                                                affMinR, affMaxR,
-                                                                revertedPerSlice);
-        _synthFrame = revertedSynth;
-        _currentCost = revertedCost;
-        _currentCostPerSlice = revertedPerSlice;
+        // Reject recovery is correctness-critical and runs after the split
+        // attempt has mutated several transient frame states. Rebuild the
+        // live-parent frame from scratch here instead of relying on another
+        // incremental old->new swap; that keeps the pipeline behavior the
+        // same while avoiding reject-path cache corruption.
+        rerenderSynthFrameInPlace();
+        refreshFullCostCache();
     };
 
     // --- 1. Gather bright pixels in a snapshot-centered bounding box ---
@@ -1951,10 +1984,10 @@ CostCallbackPair Frame::trySplitCellPhased(
     const double baselineImageCost = _currentCost;
     const double baselineOverlap = computeOverlapPenalty(probConfig.overlap_penalty_weight);
     const double baselineTotal = baselineImageCost + baselineOverlap;
-    const std::vector<cv::Mat> savedSynth = _synthFrame;
-    const std::vector<double> savedPerSlice = _currentCostPerSlice;
+    std::vector<cv::Mat> savedSynth = _synthFrame;
+    std::vector<double> savedPerSlice = _currentCostPerSlice;
     const double savedCost = _currentCost;
-    const std::vector<Ellipsoid> savedCells = cells;
+    std::vector<Ellipsoid> savedCells = cells;
 
     std::cout << "  [Split Baseline] " << parentName
               << " imageCost=" << baselineImageCost
@@ -1974,6 +2007,28 @@ CostCallbackPair Frame::trySplitCellPhased(
     cv::Point3f bestSeedD1{0, 0, 0};
     cv::Point3f bestSeedD2{0, 0, 0};
     std::string bestLabel;
+
+    auto makeDeferredRejectCallback =
+        [this](std::vector<Ellipsoid> rejectCells,
+               Ellipsoid liveParentCopy,
+               size_t rejectCellIndex,
+               bool snapshotValidCopy) -> CallBackFunc {
+        return [this,
+                rejectCells = std::move(rejectCells),
+                liveParentCopy,
+                rejectCellIndex,
+                snapshotValidCopy](bool accept) mutable {
+            if (accept) return;
+            this->cells = std::move(rejectCells);
+            if (snapshotValidCopy && rejectCellIndex < this->cells.size()) {
+                this->cells[rejectCellIndex] = liveParentCopy;
+            }
+            // Rebuild synth + cache from the restored parent state instead
+            // of first installing possibly stale saved image buffers.
+            this->rerenderSynthFrameInPlace();
+            this->refreshFullCostCache();
+        };
+    };
 
     const int burnIters = std::max(0, probConfig.split_candidate_burn_in_iterations);
 
@@ -2020,14 +2075,15 @@ CostCallbackPair Frame::trySplitCellPhased(
         const size_t d2Idx = cells.size() - 1;
 
         // Full render + cost refresh (candidate set is small, K<=5).
-        _synthFrame = generateSynthFrame();
+        rerenderSynthFrameInPlace();
         refreshFullCostCache();
 
         // Short alternating burn-in on each daughter.
         for (int it = 0; it < burnIters; ++it) {
             const size_t target = (it % 2 == 0) ? d1Idx : d2Idx;
             CostCallbackPair cp = perturbCell(target,
-                                              probConfig.overlap_penalty_weight);
+                                              probConfig.overlap_penalty_weight,
+                                              false);
             const bool accept = cp.first < 0.0;
             cp.second(accept);
         }
@@ -2078,8 +2134,11 @@ CostCallbackPair Frame::trySplitCellPhased(
         Ellipsoid::cellConfig.x = savedPerturbX;
         Ellipsoid::cellConfig.y = savedPerturbY;
         Ellipsoid::cellConfig.z = savedPerturbZ;
-        restoreLiveParent();
-        return {0.0, noop};
+        return {0.0, makeDeferredRejectCallback(
+            std::move(savedCells),
+            liveParent,
+            cellIndex,
+            snapshotValid)};
     }
 
     // Log which candidate won the burn-in competition.
@@ -2124,7 +2183,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         for (int it = 0; it < refineIters; ++it) {
             const size_t target = (it % 2 == 0) ? d1IdxRefine : d2IdxRefine;
             CostCallbackPair cp = perturbCell(target,
-                                              probConfig.overlap_penalty_weight);
+                                              probConfig.overlap_penalty_weight,
+                                              false);
             const bool accept = cp.first < 0.0;
             if (accept) ++refineAccepts;
             cp.second(accept);
@@ -2198,7 +2258,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             refitOne(d2IdxRefine, "d2");
 
             // Radii changed → regenerate synth + refresh cost cache.
-            _synthFrame = generateSynthFrame();
+            rerenderSynthFrameInPlace();
             refreshFullCostCache();
         }
 
@@ -2463,18 +2523,21 @@ CostCallbackPair Frame::trySplitCellPhased(
             // cost delta. Measured in the same real-image units as the
             // sigmoid-calibrated background (~0.0), so 0.05 is ~5% above
             // background — well below any real cell body (~0.1-0.3).
-            constexpr float kMinEdgeBrightAbsolute = 0.05f;
+            const float minEdgeBrightAbsolute = probConfig.bio_min_edge_bright_absolute;
             if (edge1Count > 0 && edge2Count > 0 &&
-                std::min(edge1Bright, edge2Bright) < kMinEdgeBrightAbsolute) {
+                std::min(edge1Bright, edge2Bright) < minEdgeBrightAbsolute) {
                 std::cout << "[Split Reject bio] " << parentName
                           << " reason=edge_too_dim"
                           << " edge1Bright=" << edge1Bright
                           << " edge2Bright=" << edge2Bright
                           << " minEdgeBright=" << std::min(edge1Bright, edge2Bright)
-                          << " threshold=" << kMinEdgeBrightAbsolute
+                          << " threshold=" << minEdgeBrightAbsolute
                           << std::endl;
-                restoreLiveParent();
-                return {0.0, noop};
+                return {0.0, makeDeferredRejectCallback(
+                    std::move(savedCells),
+                    liveParent,
+                    cellIndex,
+                    snapshotValid)};
             }
 
             // Per-daughter valley gate. Rejects when the bright-pixel
@@ -2511,8 +2574,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " valleyLimit=" << probConfig.bio_bridge_max_valley_ratio
                           << " noValleyTier=" << noValleyAtAll
                           << std::endl;
-                restoreLiveParent();
-                return {0.0, noop};
+                return {0.0, makeDeferredRejectCallback(
+                    std::move(savedCells),
+                    liveParent,
+                    cellIndex,
+                    snapshotValid)};
             }
         }
     }
@@ -2529,8 +2595,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
                   << " refParentVolume=" << refParentVolume
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        return {0.0, makeDeferredRejectCallback(
+            std::move(savedCells),
+            liveParent,
+            cellIndex,
+            snapshotValid)};
     }
 
     // --- 6. Cost check ---
@@ -2548,18 +2617,18 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
                   << " drift2=" << drift2
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        return {0.0, makeDeferredRejectCallback(
+            std::move(savedCells),
+            liveParent,
+            cellIndex,
+            snapshotValid)};
     }
 
     // Accept: install the best candidate state. The callback applies on
     // accept; the caller uses perturbCell's contract where the callback is
     // invoked after the decision. To stay consistent with that contract we
     // return the (costDiff, callback) pair that installs bestCells state.
-    auto savedCellsCopy = savedCells;
-    auto savedSynthCopy = savedSynth;
-    auto savedPerSliceCopy = savedPerSlice;
-    double savedCostCopy = savedCost;
+    auto savedCellsCopy = std::move(savedCells);
 
     const cv::Point3f acceptedD1Pos(bestD1.getX(), bestD1.getY(), bestD1.getZ());
     const cv::Point3f acceptedD2Pos(bestD2.getX(), bestD2.getY(), bestD2.getZ());
@@ -2579,8 +2648,12 @@ CostCallbackPair Frame::trySplitCellPhased(
 
     const std::string acceptedLabel = bestLabel;
 
-    CallBackFunc callback = [this, bestCells, bestSynth, bestPerSlice, bestImageCost,
-                             savedCellsCopy, savedSynthCopy, savedPerSliceCopy, savedCostCopy,
+    CallBackFunc callback = [this,
+                             bestCells = std::move(bestCells),
+                             bestSynth = std::move(bestSynth),
+                             bestPerSlice = std::move(bestPerSlice),
+                             bestImageCost,
+                             savedCellsCopy = std::move(savedCellsCopy),
                              parentName, costDiff, acceptedD1Pos, acceptedD2Pos,
                              acceptedD1R, acceptedD2R, acceptedSeed1, acceptedSeed2,
                              acceptedDrift1, acceptedDrift2, acceptedLabel,
@@ -2604,30 +2677,15 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " drift2=" << acceptedDrift2
                       << std::endl;
         } else {
-            // Reject path: restore the snapshot-parent-state first (which
-            // is what savedCellsCopy holds), then swap cells[cellIndexCopy]
-            // back to the live parent and re-render the affected z-range
-            // so Phase B's live state isn't lost.
+            // Reject path: restore cells only, then rebuild synth/cost from
+            // scratch. This avoids depending on any saved image/cache
+            // buffers from the split attempt.
             this->cells = savedCellsCopy;
-            this->_synthFrame = savedSynthCopy;
-            this->_currentCostPerSlice = savedPerSliceCopy;
-            this->_currentCost = savedCostCopy;
-
             if (snapshotValidCopy && cellIndexCopy < this->cells.size()) {
                 this->cells[cellIndexCopy] = liveParentCopy;
-                int affMinR = -1, affMaxR = -1;
-                Ellipsoid snapshotMutable = snapshotParentCopy;
-                Ellipsoid liveMutable = liveParentCopy;
-                auto revertedSynth = this->generateSynthFrameFast(snapshotMutable, liveMutable,
-                                                                    &affMinR, &affMaxR);
-                std::vector<double> revertedPerSlice;
-                const double revertedCost = this->calculateIncrementalCost(revertedSynth,
-                                                                             affMinR, affMaxR,
-                                                                             revertedPerSlice);
-                this->_synthFrame = revertedSynth;
-                this->_currentCost = revertedCost;
-                this->_currentCostPerSlice = revertedPerSlice;
             }
+            this->rerenderSynthFrameInPlace();
+            this->refreshFullCostCache();
         }
     };
 

@@ -54,7 +54,18 @@ cell:
 
   brightnessUpdateBlend: 0.95
   brightnessMeanAmplification: 1.1
-  brightnessMeasurementTopPercentile: 0.3
+  # Brightness estimator used for the per-cell EMA render brightness update.
+  # "adaptive_signal" keeps only voxels above a cell-local threshold
+  # low + thresholdFraction * (high - low), then computes a trimmed mean.
+  # "top_percentile" preserves the legacy behavior.
+  brightnessMeasurementMode: adaptive_signal
+  brightnessMeasurementTopPercentile: 1.0
+  brightnessMeasurementLowPercentile: 0.1
+  brightnessMeasurementHighPercentile: 0.95
+  brightnessMeasurementThresholdFraction: 0.9
+  brightnessMeasurementTrimLowFraction: 0.1
+  brightnessMeasurementTrimHighFraction: 0.0
+  brightnessMeasurementMinVoxelCount: 16
 
   # Iterative PCA shape fit (per frame, before perturbation loop).
   # Converges rotation + radii (+ centroid) to the Voronoi-filtered
@@ -75,7 +86,20 @@ simulation:
   iterations_per_cell: 500
   z_scaling: 7
   blur_sigma: 0.0
-  comparison_blur_sigma: 2.0
+  signal_guided_position_enabled: true
+  # Box side lengths are chosen as divisors of the stack size, as close as
+  # possible to (max cell diameter / 3) on each axis so a max-sized cell fits
+  # inside a 3 x 3 x 3 box neighborhood.
+  signal_guided_box_size_scale: 0.5
+  # Keep only boxes whose mean brightness exceeds background + delta.
+  signal_guided_min_box_brightness_delta: 0.1
+  # Brighter detected centers get narrower perturbation sigma. This is the
+  # lower bound on that sigma scale.
+  signal_guided_min_sigma_scale: 0.35
+  # First trial with guided proposals: cut live-cell perturbation iterations
+  # in half without hard-coding it in C++.
+  signal_guided_main_iterations_per_cell: 25
+  signal_guided_calibration_iterations_per_cell: 25
 
   iterative_penalty: 0.1
   iterative_min_penalty: 0.005
@@ -99,7 +123,7 @@ simulation:
 
   post_process_blur_sigma: 2.5
   post_process_amplification: 2.5
-  post_process_black_percentile: 0.1
+  post_process_black_percentile: 0.11
   post_process_white_percentile: 0.5
 
   michelson_low_percentile: 0.10
@@ -136,17 +160,22 @@ prob:
   # P_split_max at snap elong=2.0 (clamped above). No classification
   # threshold — every cell has at least P_split_base chance per iter,
   # elongated cells get progressively higher.
-  P_split_base: 0.03
-  P_split_max: 0.5
+  # P_split_base: 0.03
+  # P_split_max: 0.5
+  P_split_base: 0.02
+  P_split_max: 0.30
 
   split_cost: 15
   overlap_penalty_weight: 500.0
 
   expected_daughter_pre_pass_iterations: 1
 
-  split_candidates_per_attempt: 30
-  split_candidate_burn_in_iterations: 50
-  split_final_refine_iterations: 30
+  # split_candidates_per_attempt: 30
+  # split_candidate_burn_in_iterations: 50
+  # split_final_refine_iterations: 30
+  split_candidates_per_attempt: 15
+  split_candidate_burn_in_iterations: 20
+  split_final_refine_iterations: 15
   split_calibration_iterations_per_cell: 50
   split_candidate_rotation_delta_degrees: 8
   split_candidate_translation_delta_fraction: 0.2
@@ -155,8 +184,12 @@ prob:
   bio_combined_volume_min_fraction: 0.6
   bio_combined_volume_max_fraction: 1.3
   bio_max_single_daughter_volume_fraction: 0.65
-  bio_bridge_max_gap_density: 0.18
-  bio_bridge_max_valley_ratio: 0.85
+  # bio_min_edge_bright_absolute: 0.05
+  bio_min_edge_bright_absolute: 0.025
+  # bio_bridge_max_gap_density: 0.18
+  # bio_bridge_max_valley_ratio: 0.85
+  bio_bridge_max_gap_density: 0.22
+  bio_bridge_max_valley_ratio: 0.95
 
   split_burn_in_pos_sigma_scale: 0.4
 
@@ -165,5 +198,6 @@ prob:
   # while phantom daughters in empty space hit the floor and gain nothing.
   # Clamps to split_daughter_refit_min_radius_fraction * built_radii to
   # prevent collapsed-sliver regressions. Set iterations=0 to disable.
-  split_daughter_refit_iterations: 3
+  # split_daughter_refit_iterations: 3
+  split_daughter_refit_iterations: 2
   split_daughter_refit_min_radius_fraction: 0.6

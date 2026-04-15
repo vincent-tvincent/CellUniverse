@@ -8,6 +8,54 @@ namespace {
 template <typename>
 inline constexpr bool alwaysFalseV = false;
 
+float clampPercentile(float value)
+{
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float computePercentile(std::vector<float> values, float percentile)
+{
+    if (values.empty()) {
+        return 0.0f;
+    }
+
+    const float clampedPercentile = clampPercentile(percentile);
+    const std::size_t index = static_cast<std::size_t>(
+        std::floor(clampedPercentile * static_cast<float>(values.size() - 1)));
+    std::nth_element(values.begin(),
+                     values.begin() + static_cast<std::ptrdiff_t>(index),
+                     values.end());
+    return values[index];
+}
+
+float computeTrimmedMean(std::vector<float> values, float trimLowFraction, float trimHighFraction)
+{
+    if (values.empty()) {
+        return 0.0f;
+    }
+
+    std::sort(values.begin(), values.end());
+
+    const std::size_t n = values.size();
+    const std::size_t trimLow = static_cast<std::size_t>(
+        std::floor(clampPercentile(trimLowFraction) * static_cast<float>(n)));
+    const std::size_t trimHigh = static_cast<std::size_t>(
+        std::floor(clampPercentile(trimHighFraction) * static_cast<float>(n)));
+
+    std::size_t begin = std::min(trimLow, n);
+    std::size_t end = (trimHigh >= n) ? 0 : (n - trimHigh);
+    if (begin >= end) {
+        begin = 0;
+        end = n;
+    }
+
+    double sum = 0.0;
+    for (std::size_t i = begin; i < end; ++i) {
+        sum += values[i];
+    }
+    return static_cast<float>(sum / static_cast<double>(end - begin));
+}
+
 template <typename Visitor>
 void scanEllipsoidSlice(
     int minX, int maxX, int minY, int maxY,
@@ -407,16 +455,18 @@ void Ellipsoid::draw(cv::Mat &image, const SimulationConfig &simulationConfig, f
         });
 }
 
-float Ellipsoid::measureMeanBrightness(const std::vector<cv::Mat> &image,
-                                      float topPercentile) const
+float Ellipsoid::measureMeanBrightness(const std::vector<cv::Mat> &image) const
 {
-    if (image.empty()) {
-        return _brightness;
-    }
+    return measureBrightnessDebug(image).value;
+}
 
-    const float clampedTopPercentile = std::clamp(topPercentile, 0.0f, 1.0f);
-    if (clampedTopPercentile >= 1.0f) {
-        return measureBrightnessStats(image).first;
+BrightnessMeasurementDebug Ellipsoid::measureBrightnessDebug(const std::vector<cv::Mat> &image) const
+{
+    BrightnessMeasurementDebug debug;
+    if (image.empty()) {
+        debug.value = _brightness;
+        debug.fallbackUsed = true;
+        return debug;
     }
 
     std::array<double, 9> R_T;
@@ -444,22 +494,79 @@ float Ellipsoid::measureMeanBrightness(const std::vector<cv::Mat> &image,
                 brightnessValues.push_back(pixel);
             }
         });
+    debug.insideVoxelCount = static_cast<int>(brightnessValues.size());
 
     if (brightnessValues.empty()) {
-        return _brightness;
+        debug.value = _brightness;
+        debug.fallbackUsed = true;
+        return debug;
     }
 
-    const std::size_t keepCount = std::max<std::size_t>(
-        1, static_cast<std::size_t>(std::ceil(brightnessValues.size() * clampedTopPercentile)));
-    const auto keepBegin = brightnessValues.end() - static_cast<std::ptrdiff_t>(keepCount);
-    std::nth_element(brightnessValues.begin(), keepBegin, brightnessValues.end());
+    const std::string &mode = cellConfig.brightnessMeasurementMode;
+    debug.mode = mode;
+    if (mode == "top_percentile") {
+        const float clampedTopPercentile =
+            std::clamp(cellConfig.brightnessMeasurementTopPercentile, 0.0f, 1.0f);
+        if (clampedTopPercentile >= 1.0f) {
+            debug.mode = "mean";
+            debug.value = measureBrightnessStats(image).first;
+            return debug;
+        }
 
-    double sum = 0.0;
-    for (auto it = keepBegin; it != brightnessValues.end(); ++it) {
-        sum += *it;
+        const std::size_t keepCount = std::max<std::size_t>(
+            1, static_cast<std::size_t>(std::ceil(brightnessValues.size() * clampedTopPercentile)));
+        const auto keepBegin = brightnessValues.end() - static_cast<std::ptrdiff_t>(keepCount);
+        std::nth_element(brightnessValues.begin(), keepBegin, brightnessValues.end());
+
+        double sum = 0.0;
+        for (auto it = keepBegin; it != brightnessValues.end(); ++it) {
+            sum += *it;
+        }
+
+        debug.keptVoxelCount = static_cast<int>(keepCount);
+        debug.value = static_cast<float>(sum / static_cast<double>(keepCount));
+        return debug;
     }
 
-    return static_cast<float>(sum / static_cast<double>(keepCount));
+    if (mode != "adaptive_signal") {
+        debug.mode = "mean";
+        debug.value = measureBrightnessStats(image).first;
+        return debug;
+    }
+
+    const float lowPercentile =
+        std::clamp(cellConfig.brightnessMeasurementLowPercentile, 0.0f, 1.0f);
+    const float highPercentile =
+        std::clamp(cellConfig.brightnessMeasurementHighPercentile, 0.0f, 1.0f);
+    const float low = computePercentile(brightnessValues, std::min(lowPercentile, highPercentile));
+    const float high = computePercentile(brightnessValues, std::max(lowPercentile, highPercentile));
+    const float thresholdFraction =
+        std::clamp(cellConfig.brightnessMeasurementThresholdFraction, 0.0f, 1.0f);
+    const float threshold = low + thresholdFraction * (high - low);
+    debug.low = low;
+    debug.high = high;
+    debug.threshold = threshold;
+
+    std::vector<float> keptValues;
+    keptValues.reserve(brightnessValues.size());
+    for (float value : brightnessValues) {
+        if (value >= threshold) {
+            keptValues.push_back(value);
+        }
+    }
+    debug.keptVoxelCount = static_cast<int>(keptValues.size());
+
+    if (static_cast<int>(keptValues.size()) < std::max(1, cellConfig.brightnessMeasurementMinVoxelCount)) {
+        debug.value = _brightness;
+        debug.fallbackUsed = true;
+        return debug;
+    }
+
+    debug.value = computeTrimmedMean(
+        std::move(keptValues),
+        cellConfig.brightnessMeasurementTrimLowFraction,
+        cellConfig.brightnessMeasurementTrimHighFraction);
+    return debug;
 }
 
 std::pair<float, float> Ellipsoid::measureBrightnessStats(const std::vector<cv::Mat> &image) const

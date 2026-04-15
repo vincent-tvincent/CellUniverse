@@ -17,6 +17,13 @@ void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, std::vector
 class Frame
 {
 public:
+    struct SignalCenter {
+        cv::Point3f position{0.0f, 0.0f, 0.0f};
+        float brightness = 0.0f;
+        float sigmaScale = 1.0f;
+        int boxes = 0;
+    };
+
     // Single-pipeline constructor — the analysis-frame / dual-pipeline
     // variant was removed on 2026-04-11 when the new ImageHandler preprocessing
     // replaced the sigmoid-first / raw-analysis split.
@@ -33,7 +40,8 @@ public:
     // Cost and optimization
     Cost calculateCost(const std::vector<cv::Mat> &synthFrame);
     size_t length() const;
-    CostCallbackPair perturbCell(size_t index, float overlapWeight = 1000.0f);
+    CostCallbackPair perturbCell(size_t index, float overlapWeight = 1000.0f,
+                                 bool useSignalGuidance = false);
     double computeOverlapPenalty(float weight) const;
     double computeOverlapForCell(size_t cellIdx, float weight) const;
 
@@ -129,7 +137,9 @@ public:
     const std::vector<cv::Mat>& getRealFrame() const { return _realFrame; }
     void setBackgroundColor(float backgroundColor) { _backgroundValue = backgroundColor; }
     float getBackgroundValue() const { return _backgroundValue; }
-    void regenerateSynthFrame() { _synthFrame = generateSynthFrame(); refreshFullCostCache(); }
+    void setSignalCenters(std::vector<SignalCenter> centers) { _signalCenters = std::move(centers); }
+    const std::vector<SignalCenter>& getSignalCenters() const { return _signalCenters; }
+    void regenerateSynthFrame();
     std::string getImageName() const { return imageName; }
     std::vector<Ellipsoid> cells;
 
@@ -140,6 +150,7 @@ private:
     std::string imageName;
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
+    std::vector<SignalCenter> _signalCenters;
     double _currentCost = -1.0; // cached L2 image cost of _synthFrame
     // Per-slice L2 contribution of _synthFrame to the total image cost. Kept
     // in sync with _synthFrame / _currentCost so that a perturbation touching
@@ -152,6 +163,7 @@ private:
     // CellUniverse::optimize via setBackgroundColor().
     float _backgroundValue = 0.0f;
     cv::Size getImageShape();
+    void rerenderSynthFrameInPlace();
 
     // Rebuild _currentCostPerSlice and _currentCost from scratch by walking
     // every slice of _synthFrame vs _realFrame. Used after a full render

@@ -15,7 +15,6 @@ public:
     int iterations_per_cell;
     float z_scaling;
     float blur_sigma;
-    float comparison_blur_sigma = 0.0f;
     int z_slices;
     float iterative_penalty = 0.1f;
     float iterative_min_penalty = 0.005f;
@@ -52,6 +51,12 @@ public:
     bool quit_after_preprocessing = false;
     float adaptive_background_expand_factor = 1.1f;
     float adaptive_background_top_fraction = 0.4f;
+    bool signal_guided_position_enabled = false;
+    float signal_guided_box_size_scale = 1.0f;
+    float signal_guided_min_box_brightness_delta = 0.0f;
+    float signal_guided_min_sigma_scale = 0.35f;
+    int signal_guided_main_iterations_per_cell = -1;
+    int signal_guided_calibration_iterations_per_cell = -1;
 
     // Asymmetric L2 cost weight (Fix E). Per-voxel squared error is
     // multiplied by this factor when synth > real (cell covers darker
@@ -71,7 +76,6 @@ public:
         iterations_per_cell = node["iterations_per_cell"].as<int>();
         z_scaling = node["z_scaling"].as<float>();
         blur_sigma = node["blur_sigma"].as<float>();
-        if (node["comparison_blur_sigma"]) comparison_blur_sigma = node["comparison_blur_sigma"].as<float>();
         if (node["iterative_penalty"]) iterative_penalty = node["iterative_penalty"].as<float>();
         if (node["iterative_min_penalty"]) iterative_min_penalty = node["iterative_min_penalty"].as<float>();
         if (node["iterative_collapse_backoff"]) iterative_collapse_backoff = node["iterative_collapse_backoff"].as<float>();
@@ -107,6 +111,12 @@ public:
         if (node["quit_after_preprocessing"]) quit_after_preprocessing = node["quit_after_preprocessing"].as<bool>();
         if (node["adaptive_background_expand_factor"]) adaptive_background_expand_factor = node["adaptive_background_expand_factor"].as<float>();
         if (node["adaptive_background_top_fraction"]) adaptive_background_top_fraction = node["adaptive_background_top_fraction"].as<float>();
+        if (node["signal_guided_position_enabled"]) signal_guided_position_enabled = node["signal_guided_position_enabled"].as<bool>();
+        if (node["signal_guided_box_size_scale"]) signal_guided_box_size_scale = node["signal_guided_box_size_scale"].as<float>();
+        if (node["signal_guided_min_box_brightness_delta"]) signal_guided_min_box_brightness_delta = node["signal_guided_min_box_brightness_delta"].as<float>();
+        if (node["signal_guided_min_sigma_scale"]) signal_guided_min_sigma_scale = node["signal_guided_min_sigma_scale"].as<float>();
+        if (node["signal_guided_main_iterations_per_cell"]) signal_guided_main_iterations_per_cell = node["signal_guided_main_iterations_per_cell"].as<int>();
+        if (node["signal_guided_calibration_iterations_per_cell"]) signal_guided_calibration_iterations_per_cell = node["signal_guided_calibration_iterations_per_cell"].as<int>();
         if (node["asymmetric_cost_weight"]) asymmetric_cost_weight = node["asymmetric_cost_weight"].as<float>();
     }
     void printConfig() const {
@@ -114,7 +124,6 @@ public:
         std::cout << "iterations_per_cell: " << iterations_per_cell << '\n';
         std::cout << "z_scaling: " << z_scaling << '\n';
         std::cout << "blur_sigma: " << blur_sigma << '\n';
-        std::cout << "comparison_blur_sigma: " << comparison_blur_sigma << '\n';
         std::cout << "iterative_penalty: " << iterative_penalty << '\n';
         std::cout << "iterative_min_penalty: " << iterative_min_penalty << '\n';
         std::cout << "iterative_collapse_backoff: " << iterative_collapse_backoff << '\n';
@@ -148,6 +157,12 @@ public:
         std::cout << "quit_after_preprocessing: " << quit_after_preprocessing << '\n';
         std::cout << "adaptive_background_expand_factor: " << adaptive_background_expand_factor << '\n';
         std::cout << "adaptive_background_top_fraction: " << adaptive_background_top_fraction << '\n';
+        std::cout << "signal_guided_position_enabled: " << signal_guided_position_enabled << '\n';
+        std::cout << "signal_guided_box_size_scale: " << signal_guided_box_size_scale << '\n';
+        std::cout << "signal_guided_min_box_brightness_delta: " << signal_guided_min_box_brightness_delta << '\n';
+        std::cout << "signal_guided_min_sigma_scale: " << signal_guided_min_sigma_scale << '\n';
+        std::cout << "signal_guided_main_iterations_per_cell: " << signal_guided_main_iterations_per_cell << '\n';
+        std::cout << "signal_guided_calibration_iterations_per_cell: " << signal_guided_calibration_iterations_per_cell << '\n';
         std::cout << "z_slices: " << z_slices << std::endl;
     }
 };
@@ -198,6 +213,7 @@ public:
     // (d2 volume = 0.74 * parent) where one daughter inherits the parent
     // and the other is a small bolt-on.
     float bio_max_single_daughter_volume_fraction = 0.65f;
+    float bio_min_edge_bright_absolute = 0.05f;
 
     // Bridge brightness gate — catches the "two equal-size daughters at
     // parent center covering one continuous cell" pattern that passes
@@ -259,6 +275,7 @@ public:
         if (node["bio_combined_volume_min_fraction"]) bio_combined_volume_min_fraction = node["bio_combined_volume_min_fraction"].as<float>();
         if (node["bio_combined_volume_max_fraction"]) bio_combined_volume_max_fraction = node["bio_combined_volume_max_fraction"].as<float>();
         if (node["bio_max_single_daughter_volume_fraction"]) bio_max_single_daughter_volume_fraction = node["bio_max_single_daughter_volume_fraction"].as<float>();
+        if (node["bio_min_edge_bright_absolute"]) bio_min_edge_bright_absolute = node["bio_min_edge_bright_absolute"].as<float>();
         if (node["bio_bridge_max_gap_density"]) bio_bridge_max_gap_density = node["bio_bridge_max_gap_density"].as<float>();
         if (node["bio_bridge_max_valley_ratio"]) bio_bridge_max_valley_ratio = node["bio_bridge_max_valley_ratio"].as<float>();
         if (node["split_burn_in_pos_sigma_scale"]) split_burn_in_pos_sigma_scale = node["split_burn_in_pos_sigma_scale"].as<float>();
@@ -278,6 +295,7 @@ public:
         std::cout << "overlap_penalty_weight: " << overlap_penalty_weight << '\n';
         std::cout << "split_candidates_per_attempt: " << split_candidates_per_attempt << '\n';
         std::cout << "split_candidate_burn_in_iterations: " << split_candidate_burn_in_iterations << '\n';
+        std::cout << "bio_min_edge_bright_absolute: " << bio_min_edge_bright_absolute << '\n';
         std::cout << "bio_daughter_size_ratio_max: " << bio_daughter_size_ratio_max << std::endl;
     }
 };
@@ -396,6 +414,13 @@ public:
     float brightnessUpdateBlend{0.2f};
     float brightnessMeanAmplification{1.0f};
     float brightnessMeasurementTopPercentile{0.3f};
+    std::string brightnessMeasurementMode{"adaptive_signal"};
+    float brightnessMeasurementLowPercentile{0.2f};
+    float brightnessMeasurementHighPercentile{0.9f};
+    float brightnessMeasurementThresholdFraction{0.3f};
+    float brightnessMeasurementTrimLowFraction{0.1f};
+    float brightnessMeasurementTrimHighFraction{0.0f};
+    int brightnessMeasurementMinVoxelCount{16};
     // Iterative PCA shape fit (per frame). Converges rotation + radii +
     // optional centroid position to the bright-pixel cloud inside a
     // Voronoi-filtered ellipsoid mask. See Frame::calibrateCellShapeViaPca.
@@ -467,6 +492,13 @@ public:
         if (node["brightnessUpdateBlend"]) brightnessUpdateBlend = node["brightnessUpdateBlend"].as<float>();
         if (node["brightnessMeanAmplification"]) brightnessMeanAmplification = node["brightnessMeanAmplification"].as<float>();
         if (node["brightnessMeasurementTopPercentile"]) brightnessMeasurementTopPercentile = node["brightnessMeasurementTopPercentile"].as<float>();
+        if (node["brightnessMeasurementMode"]) brightnessMeasurementMode = node["brightnessMeasurementMode"].as<std::string>();
+        if (node["brightnessMeasurementLowPercentile"]) brightnessMeasurementLowPercentile = node["brightnessMeasurementLowPercentile"].as<float>();
+        if (node["brightnessMeasurementHighPercentile"]) brightnessMeasurementHighPercentile = node["brightnessMeasurementHighPercentile"].as<float>();
+        if (node["brightnessMeasurementThresholdFraction"]) brightnessMeasurementThresholdFraction = node["brightnessMeasurementThresholdFraction"].as<float>();
+        if (node["brightnessMeasurementTrimLowFraction"]) brightnessMeasurementTrimLowFraction = node["brightnessMeasurementTrimLowFraction"].as<float>();
+        if (node["brightnessMeasurementTrimHighFraction"]) brightnessMeasurementTrimHighFraction = node["brightnessMeasurementTrimHighFraction"].as<float>();
+        if (node["brightnessMeasurementMinVoxelCount"]) brightnessMeasurementMinVoxelCount = node["brightnessMeasurementMinVoxelCount"].as<int>();
         if (node["pcaShapeMaxIters"]) pcaShapeMaxIters = node["pcaShapeMaxIters"].as<int>();
         if (node["pcaShapeRadiusScale"]) pcaShapeRadiusScale = node["pcaShapeRadiusScale"].as<float>();
         if (node["pcaShapeMinPixels"]) pcaShapeMinPixels = node["pcaShapeMinPixels"].as<int>();

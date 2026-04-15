@@ -72,6 +72,18 @@ struct PerturbDirections
     int cRadius = 0;
 };
 
+struct BrightnessMeasurementDebug
+{
+    std::string mode{"mean"};
+    float value = 0.0f;
+    float low = 0.0f;
+    float high = 0.0f;
+    float threshold = 0.0f;
+    int insideVoxelCount = 0;
+    int keptVoxelCount = 0;
+    bool fallbackUsed = false;
+};
+
 class Ellipsoid
 {
     private:
@@ -148,6 +160,7 @@ class Ellipsoid
         float getThetaX() const { return static_cast<float>(_theta_x); }
         float getThetaY() const { return static_cast<float>(_theta_y); }
         float getThetaZ() const { return static_cast<float>(_theta_z); }
+        void setPosition(float x, float y, float z) { _position = cv::Point3f(x, y, z); }
         void setARadiusPerturbProbabilities(float increaseProbability, float decreaseProbability);
         void setBRadiusPerturbProbabilities(float increaseProbability, float decreaseProbability);
         void setCRadiusPerturbProbabilities(float increaseProbability, float decreaseProbability);
@@ -161,8 +174,8 @@ class Ellipsoid
         void adjustBRadiusPerturbProbability(int direction, float delta);
         void adjustCRadiusPerturbProbability(int direction, float delta);
         void adjustBrightnessPerturbProbability(int direction, float delta);
-        float measureMeanBrightness(const std::vector<cv::Mat> &image,
-                                    float topPercentile = 1.0f) const;
+        float measureMeanBrightness(const std::vector<cv::Mat> &image) const;
+        BrightnessMeasurementDebug measureBrightnessDebug(const std::vector<cv::Mat> &image) const;
         std::pair<float, float> measureBrightnessStats(const std::vector<cv::Mat> &image) const;
 
         void printCellInfo() const {

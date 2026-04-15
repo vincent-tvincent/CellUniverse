@@ -75,6 +75,7 @@ simulation:
   iterations_per_cell: 500
   z_scaling: 7
   blur_sigma: 0.0
+  comparison_blur_sigma: 2.0
 
   iterative_penalty: 0.1
   iterative_min_penalty: 0.005

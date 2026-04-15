@@ -42,6 +42,17 @@ static double asymmetricL2Slice(const cv::Mat &real, const cv::Mat &synth, float
     return std::sqrt(std::max(0.0, asymSumSq));
 }
 
+static const cv::Mat &maybeBlurSynthSlice(const cv::Mat &synth, float sigma, cv::Mat &scratch)
+{
+    if (sigma <= 0.0f)
+    {
+        return synth;
+    }
+
+    cv::GaussianBlur(synth, scratch, cv::Size(0, 0), sigma, sigma);
+    return scratch;
+}
+
 // Function to interpolate between two slices
 void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, 
                        std::vector<cv::Mat>& processedSlices, int numInterpolations) {
@@ -85,10 +96,13 @@ void Frame::refreshFullCostCache()
 
     _currentCostPerSlice.assign(_realFrame.size(), 0.0);
     const float asymK = simulationConfig.asymmetric_cost_weight;
+    const float blurSigma = simulationConfig.comparison_blur_sigma;
     double totalCost = 0.0;
     for (size_t i = 0; i < _realFrame.size(); ++i)
     {
-        const double sliceCost = asymmetricL2Slice(_realFrame[i], _synthFrame[i], asymK);
+        cv::Mat blurredSynth;
+        const cv::Mat &costSynth = maybeBlurSynthSlice(_synthFrame[i], blurSigma, blurredSynth);
+        const double sliceCost = asymmetricL2Slice(_realFrame[i], costSynth, asymK);
         _currentCostPerSlice[i] = sliceCost;
         totalCost += sliceCost;
     }
@@ -116,9 +130,12 @@ double Frame::calculateIncrementalCost(const std::vector<cv::Mat> &newSynthFrame
         const int zMin = std::max(0, affectedZMin);
         const int zMax = std::min(nSlices - 1, affectedZMax);
         const float asymK = simulationConfig.asymmetric_cost_weight;
+        const float blurSigma = simulationConfig.comparison_blur_sigma;
         for (int i = zMin; i <= zMax; ++i)
         {
-            outNewPerSlice[i] = asymmetricL2Slice(_realFrame[i], newSynthFrame[i], asymK);
+            cv::Mat blurredSynth;
+            const cv::Mat &costSynth = maybeBlurSynthSlice(newSynthFrame[i], blurSigma, blurredSynth);
+            outNewPerSlice[i] = asymmetricL2Slice(_realFrame[i], costSynth, asymK);
         }
     }
 
@@ -167,10 +184,13 @@ Cost Frame::calculateCost(const std::vector<cv::Mat> &synthFrame)
     }
 
     const float asymK = simulationConfig.asymmetric_cost_weight;
+    const float blurSigma = simulationConfig.comparison_blur_sigma;
     double totalCost = 0.0;
     for (size_t i = 0; i < _realFrame.size(); ++i)
     {
-        totalCost += asymmetricL2Slice(_realFrame[i], synthFrame[i], asymK);
+        cv::Mat blurredSynth;
+        const cv::Mat &costSynth = maybeBlurSynthSlice(synthFrame[i], blurSigma, blurredSynth);
+        totalCost += asymmetricL2Slice(_realFrame[i], costSynth, asymK);
     }
     return totalCost;
 }
@@ -263,18 +283,21 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
 std::vector<cv::Mat> Frame::generateOutputSynthFrame()
 {
     std::vector<cv::Mat> outputSynthFrame;
+    const float blurSigma = simulationConfig.comparison_blur_sigma;
 
     for (const auto &synthImage : _synthFrame)
     {
+        cv::Mat blurredSynth;
+        const cv::Mat &displaySynth = maybeBlurSynthSlice(synthImage, blurSigma, blurredSynth);
         cv::Mat outputImage;
-        if (synthImage.depth() != CV_8U)
+        if (displaySynth.depth() != CV_8U)
         {
             // Convert to 8-bit image if necessary, scaling pixel values by 255
-            synthImage.convertTo(outputImage, CV_8U, 255.0);
+            displaySynth.convertTo(outputImage, CV_8U, 255.0);
         }
         else
         {
-            outputImage = synthImage.clone();
+            outputImage = displaySynth.clone();
         }
 
         outputSynthFrame.push_back(outputImage);

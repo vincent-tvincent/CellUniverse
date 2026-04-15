@@ -15,6 +15,7 @@ public:
     int iterations_per_cell;
     float z_scaling;
     float blur_sigma;
+    float comparison_blur_sigma = 0.0f;
     int z_slices;
     float iterative_penalty = 0.1f;
     float iterative_min_penalty = 0.005f;
@@ -70,6 +71,7 @@ public:
         iterations_per_cell = node["iterations_per_cell"].as<int>();
         z_scaling = node["z_scaling"].as<float>();
         blur_sigma = node["blur_sigma"].as<float>();
+        if (node["comparison_blur_sigma"]) comparison_blur_sigma = node["comparison_blur_sigma"].as<float>();
         if (node["iterative_penalty"]) iterative_penalty = node["iterative_penalty"].as<float>();
         if (node["iterative_min_penalty"]) iterative_min_penalty = node["iterative_min_penalty"].as<float>();
         if (node["iterative_collapse_backoff"]) iterative_collapse_backoff = node["iterative_collapse_backoff"].as<float>();
@@ -112,6 +114,7 @@ public:
         std::cout << "iterations_per_cell: " << iterations_per_cell << '\n';
         std::cout << "z_scaling: " << z_scaling << '\n';
         std::cout << "blur_sigma: " << blur_sigma << '\n';
+        std::cout << "comparison_blur_sigma: " << comparison_blur_sigma << '\n';
         std::cout << "iterative_penalty: " << iterative_penalty << '\n';
         std::cout << "iterative_min_penalty: " << iterative_min_penalty << '\n';
         std::cout << "iterative_collapse_backoff: " << iterative_collapse_backoff << '\n';

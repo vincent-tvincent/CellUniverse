@@ -9,8 +9,8 @@ namespace {
 SimulationConfig MakeFrameConfig(int zSlices, float background) {
     SimulationConfig cfg;
     cfg.z_slices = zSlices;
-    cfg.background_color = background;
     cfg.z_scaling = 1.0f;
+    cfg.comparison_blur_sigma = 0.0f;
     return cfg;
 }
 }
@@ -37,6 +37,22 @@ TEST(FrameTest, CalculateCostSumsL2NormAcrossSlices) {
     };
 
     EXPECT_NEAR(frame.calculateCost(synth), 6.0, 1e-9);
+}
+
+TEST(FrameTest, CalculateCostCanBlurSyntheticSliceBeforeComparison) {
+    SimulationConfig cfg = MakeFrameConfig(1, 0.0f);
+    cfg.comparison_blur_sigma = 1.0f;
+
+    cv::Mat real = cv::Mat::zeros(7, 7, CV_32F);
+    cv::Mat synth = cv::Mat::zeros(7, 7, CV_32F);
+    synth.at<float>(3, 3) = 1.0f;
+
+    Frame frame({real}, cfg, {}, "", "blurred-cost");
+
+    cv::Mat blurredSynth;
+    cv::GaussianBlur(synth, blurredSynth, cv::Size(0, 0), cfg.comparison_blur_sigma, cfg.comparison_blur_sigma);
+
+    EXPECT_NEAR(frame.calculateCost({synth}), cv::norm(real, blurredSynth, cv::NORM_L2), 1e-6);
 }
 
 TEST(FrameTest, CalculateCostThrowsOnMismatchedStackSize) {

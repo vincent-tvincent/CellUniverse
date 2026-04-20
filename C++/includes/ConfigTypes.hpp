@@ -74,6 +74,9 @@ public:
     int signal_center_min_bright_surrounding_cubes = 2;
     float signal_center_recursive_top_percentile = 0.5f;
     int signal_center_recursive_max_depth = 2;
+    int signal_center_min_group_size_for_face_contact_split = 0;
+    int signal_center_min_face_contacts_to_keep_chunk = 5;
+    float signal_center_overlap_merge_radius_scale = 0.75f;
     float adaptive_background_expand_factor = 1.1f;
     float adaptive_background_top_fraction = 0.4f;
     bool signal_guided_position_enabled = false;
@@ -162,6 +165,10 @@ public:
         if (node["signal_center_min_bright_surrounding_cubes"]) signal_center_min_bright_surrounding_cubes = node["signal_center_min_bright_surrounding_cubes"].as<int>();
         if (node["signal_center_recursive_top_percentile"]) signal_center_recursive_top_percentile = node["signal_center_recursive_top_percentile"].as<float>();
         if (node["signal_center_recursive_max_depth"]) signal_center_recursive_max_depth = node["signal_center_recursive_max_depth"].as<int>();
+        if (node["signal_center_min_group_size_for_face_contact_split"]) signal_center_min_group_size_for_face_contact_split = node["signal_center_min_group_size_for_face_contact_split"].as<int>();
+        if (node["signal_center_recursive_min_group_size"]) signal_center_min_group_size_for_face_contact_split = node["signal_center_recursive_min_group_size"].as<int>();
+        if (node["signal_center_min_face_contacts_to_keep_chunk"]) signal_center_min_face_contacts_to_keep_chunk = node["signal_center_min_face_contacts_to_keep_chunk"].as<int>();
+        if (node["signal_center_overlap_merge_radius_scale"]) signal_center_overlap_merge_radius_scale = node["signal_center_overlap_merge_radius_scale"].as<float>();
         if (node["signal_guided_box_size_scale"]) signal_center_pooling_cube_scale = node["signal_guided_box_size_scale"].as<float>();
         if (node["signal_guided_min_box_brightness_delta"]) signal_center_min_cube_brightness_delta = node["signal_guided_min_box_brightness_delta"].as<float>();
         if (node["adaptive_background_expand_factor"]) adaptive_background_expand_factor = node["adaptive_background_expand_factor"].as<float>();
@@ -235,6 +242,9 @@ public:
         std::cout << "signal_center_min_bright_surrounding_cubes: " << signal_center_min_bright_surrounding_cubes << '\n';
         std::cout << "signal_center_recursive_top_percentile: " << signal_center_recursive_top_percentile << '\n';
         std::cout << "signal_center_recursive_max_depth: " << signal_center_recursive_max_depth << '\n';
+        std::cout << "signal_center_min_group_size_for_face_contact_split: " << signal_center_min_group_size_for_face_contact_split << '\n';
+        std::cout << "signal_center_min_face_contacts_to_keep_chunk: " << signal_center_min_face_contacts_to_keep_chunk << '\n';
+        std::cout << "signal_center_overlap_merge_radius_scale: " << signal_center_overlap_merge_radius_scale << '\n';
         std::cout << "adaptive_background_expand_factor: " << adaptive_background_expand_factor << '\n';
         std::cout << "adaptive_background_top_fraction: " << adaptive_background_top_fraction << '\n';
         std::cout << "signal_guided_position_enabled: " << signal_guided_position_enabled << '\n';

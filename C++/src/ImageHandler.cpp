@@ -634,6 +634,10 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         std::clamp(config.simulation.signal_center_recursive_top_percentile, 0.0f, 1.0f);
     const int recursiveMaxDepth =
         std::max(0, config.simulation.signal_center_recursive_max_depth);
+    const int minGroupSizeForFaceContactSplit =
+        std::max(0, config.simulation.signal_center_min_group_size_for_face_contact_split);
+    const int minFaceContactsToKeepChunk =
+        std::max(1, config.simulation.signal_center_min_face_contacts_to_keep_chunk);
 
     std::vector<BrightBox> boxes;
     boxes.reserve(static_cast<size_t>(gridX) * gridY * gridZ);
@@ -793,6 +797,136 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         return components;
     };
 
+    auto selectTopPercentileNodes =
+        [&](const std::vector<size_t> &group, float percentile) -> std::vector<size_t>
+    {
+        if (group.empty())
+        {
+            return {};
+        }
+
+        std::vector<size_t> sortedGroup = group;
+        sortIndicesByBrightness(sortedGroup);
+
+        const float clampedPercentile = std::clamp(percentile, 0.0f, 1.0f);
+        const size_t selectedCount = std::max<size_t>(
+            1, static_cast<size_t>(std::ceil(
+                   clampedPercentile * static_cast<float>(sortedGroup.size()))));
+        std::vector<size_t> selected(
+            sortedGroup.begin(),
+            sortedGroup.begin() + static_cast<std::ptrdiff_t>(
+                                    std::min(selectedCount, sortedGroup.size())));
+        std::sort(selected.begin(), selected.end());
+        return selected;
+    };
+
+    std::function<std::vector<std::vector<size_t>>(const std::vector<size_t> &)>
+        splitWeakFaceAttachments;
+    splitWeakFaceAttachments =
+        [&](const std::vector<size_t> &group) -> std::vector<std::vector<size_t>>
+    {
+        if (group.size() <= 1 ||
+            group.size() < static_cast<size_t>(minGroupSizeForFaceContactSplit))
+        {
+            return {group};
+        }
+
+        std::vector<char> inGroup(boxes.size(), 0);
+        for (const size_t node : group)
+        {
+            inGroup[node] = 1;
+        }
+
+        size_t bestInterfaceFaces = group.size() + 1;
+        std::vector<size_t> bestDetached;
+        std::vector<size_t> bestRemainder;
+
+        for (const size_t removedNode : group)
+        {
+            std::vector<size_t> remaining;
+            remaining.reserve(group.size() - 1);
+            for (const size_t node : group)
+            {
+                if (node != removedNode)
+                {
+                    remaining.push_back(node);
+                }
+            }
+
+            std::vector<std::vector<size_t>> components = connectedComponentsForNodes(remaining);
+            if (components.size() < 2)
+            {
+                continue;
+            }
+
+            for (const auto &component : components)
+            {
+                if (component.empty())
+                {
+                    continue;
+                }
+
+                std::vector<char> inComponent(boxes.size(), 0);
+                for (const size_t node : component)
+                {
+                    inComponent[node] = 1;
+                }
+
+                size_t interfaceFaces = 0;
+                for (const size_t node : component)
+                {
+                    for (const size_t neighbor : adjacency[node])
+                    {
+                        if (!inGroup[neighbor] || inComponent[neighbor])
+                        {
+                            continue;
+                        }
+                        ++interfaceFaces;
+                    }
+                }
+
+                if (interfaceFaces >= static_cast<size_t>(minFaceContactsToKeepChunk) ||
+                    interfaceFaces >= bestInterfaceFaces)
+                {
+                    continue;
+                }
+
+                std::vector<size_t> remainder;
+                remainder.reserve(group.size() - component.size());
+                for (const size_t node : group)
+                {
+                    if (!inComponent[node])
+                    {
+                        remainder.push_back(node);
+                    }
+                }
+                if (remainder.empty())
+                {
+                    continue;
+                }
+
+                bestInterfaceFaces = interfaceFaces;
+                bestDetached = component;
+                bestRemainder = std::move(remainder);
+            }
+        }
+
+        if (bestDetached.empty())
+        {
+            return {group};
+        }
+
+        sortIndicesByBrightness(bestDetached);
+        sortIndicesByBrightness(bestRemainder);
+
+        std::vector<std::vector<size_t>> splitGroups;
+        std::vector<std::vector<size_t>> detachedGroups = splitWeakFaceAttachments(bestDetached);
+        std::vector<std::vector<size_t>> remainderGroups = splitWeakFaceAttachments(bestRemainder);
+        splitGroups.insert(splitGroups.end(), detachedGroups.begin(), detachedGroups.end());
+        splitGroups.insert(splitGroups.end(), remainderGroups.begin(), remainderGroups.end());
+        return splitGroups;
+    };
+
     std::function<std::vector<std::vector<size_t>>(
         const std::vector<size_t> &,
         int,
@@ -819,17 +953,8 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
             return {group};
         }
 
-        std::vector<size_t> sortedGroup = group;
-        sortIndicesByBrightness(sortedGroup);
-
         const float effectivePercentile = recursivePercentileForDepth(depth);
-        const size_t selectedCount = std::max<size_t>(
-            1, static_cast<size_t>(std::ceil(
-                   effectivePercentile * static_cast<float>(sortedGroup.size()))));
-        std::vector<size_t> selected(sortedGroup.begin(),
-                                     sortedGroup.begin() + static_cast<std::ptrdiff_t>(
-                                         std::min(selectedCount, sortedGroup.size())));
-        std::sort(selected.begin(), selected.end());
+        std::vector<size_t> selected = selectTopPercentileNodes(group, effectivePercentile);
         if (!previousSelected.empty() && selected == previousSelected)
         {
             return refineGroup(group, depth + 1, selected);
@@ -911,8 +1036,30 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
             return nodes;
         }());
 
-    std::vector<std::vector<size_t>> finalGroups;
+    std::vector<std::vector<size_t>> bfsSplitGroups;
     for (const auto &group : initialGroups)
+    {
+        std::vector<std::vector<size_t>> splitGroups = splitWeakFaceAttachments(group);
+        bfsSplitGroups.insert(bfsSplitGroups.end(), splitGroups.begin(), splitGroups.end());
+    }
+
+    std::vector<std::vector<size_t>> recursiveStartGroups;
+    for (const auto &group : bfsSplitGroups)
+    {
+        std::vector<size_t> startNodes = selectTopPercentileNodes(group, recursiveTopPercentile);
+        std::vector<std::vector<size_t>> seedGroups = connectedComponentsForNodes(startNodes);
+        if (seedGroups.empty())
+        {
+            recursiveStartGroups.push_back(group);
+            continue;
+        }
+        recursiveStartGroups.insert(recursiveStartGroups.end(),
+                                    seedGroups.begin(),
+                                    seedGroups.end());
+    }
+
+    std::vector<std::vector<size_t>> finalGroups;
+    for (const auto &group : recursiveStartGroups)
     {
         std::vector<std::vector<size_t>> refined = refineGroup(group, 0, {});
         finalGroups.insert(finalGroups.end(), refined.begin(), refined.end());
@@ -1084,6 +1231,78 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         result.centers.push_back(merged);
     }
 
+    const float overlapMergeRadiusScale =
+        std::max(0.0f, config.simulation.signal_center_overlap_merge_radius_scale);
+    const float overlapSphereRadius = overlapMergeRadiusScale * minRadius;
+    const float overlapMergeDistance = 2.0f * overlapSphereRadius;
+
+    std::vector<Frame::SignalCenter> overlapMergedCenters;
+    std::vector<char> overlapVisited(result.centers.size(), 0);
+    int overlapMergedCenterGroups = 0;
+    for (size_t seed = 0; seed < result.centers.size(); ++seed)
+    {
+        if (overlapVisited[seed])
+        {
+            continue;
+        }
+
+        std::vector<size_t> component{seed};
+        overlapVisited[seed] = 1;
+        size_t cursor = 0;
+        while (cursor < component.size())
+        {
+            const size_t current = component[cursor++];
+            for (size_t other = 0; other < result.centers.size(); ++other)
+            {
+                if (overlapVisited[other])
+                {
+                    continue;
+                }
+
+                const float dist = static_cast<float>(
+                    cv::norm(result.centers[current].position - result.centers[other].position));
+                if (dist < overlapMergeDistance)
+                {
+                    overlapVisited[other] = 1;
+                    component.push_back(other);
+                }
+            }
+        }
+
+        if (component.size() == 1)
+        {
+            overlapMergedCenters.push_back(result.centers[seed]);
+            continue;
+        }
+
+        ++overlapMergedCenterGroups;
+        double xSum = 0.0;
+        double ySum = 0.0;
+        double zSum = 0.0;
+        double brightnessSum = 0.0;
+        int totalBoxes = 0;
+        for (const size_t idx : component)
+        {
+            const Frame::SignalCenter &center = result.centers[idx];
+            xSum += static_cast<double>(center.position.x);
+            ySum += static_cast<double>(center.position.y);
+            zSum += static_cast<double>(center.position.z);
+            brightnessSum += static_cast<double>(center.brightness);
+            totalBoxes += center.boxes;
+        }
+
+        Frame::SignalCenter merged;
+        const double invCount = 1.0 / static_cast<double>(component.size());
+        merged.position = cv::Point3f(
+            static_cast<float>(xSum * invCount),
+            static_cast<float>(ySum * invCount),
+            static_cast<float>(zSum * invCount));
+        merged.brightness = static_cast<float>(brightnessSum * invCount);
+        merged.boxes = totalBoxes;
+        overlapMergedCenters.push_back(merged);
+    }
+    result.centers = std::move(overlapMergedCenters);
+
     for (auto &center : result.centers)
     {
         const float normalized = (maxCenterBrightness > backgroundValue + 1e-6f)
@@ -1116,12 +1335,19 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         << " minDelta=" << minDelta
         << " recursiveTopPercentile=" << recursiveTopPercentile
         << " recursiveMaxDepth=" << recursiveMaxDepth
+        << " minGroupSizeForFaceContactSplit=" << minGroupSizeForFaceContactSplit
+        << " minFaceContactsToKeepChunk=" << minFaceContactsToKeepChunk
         << " keptBoxes=" << boxes.size()
         << " initialGroups=" << initialGroups.size()
+        << " bfsSplitGroups=" << bfsSplitGroups.size()
+        << " recursiveStartGroups=" << recursiveStartGroups.size()
         << " surroundingZeroThreshold=" << surroundingZeroThreshold
         << " minBrightSurroundingCubes=" << minBrightSurroundingCubes
         << " removedDarkSurroundCenters=" << removedDarkSurroundCenters
         << " mergedCenterGroups=" << mergedCenterGroups
+        << " overlapMergeRadiusScale=" << overlapMergeRadiusScale
+        << " overlapSphereRadius=" << overlapSphereRadius
+        << " overlapMergedCenterGroups=" << overlapMergedCenterGroups
         << " clusters=" << result.centers.size()
         << std::endl;
     for (size_t i = 0; i < result.centers.size(); ++i)

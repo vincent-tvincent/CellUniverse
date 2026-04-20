@@ -46,7 +46,33 @@ Instead:
 - two cubes are neighbors only if they share one face
 - initial groups are plain BFS connected components on that face-neighbor graph
 
-### 2.2 Recursive brightest-subset regrouping
+### 2.2 Post-BFS weakest-neck split
+
+After the initial BFS face-connected components are built, each BFS chunk now goes through an
+optional weak-attachment split pass before recursive brightest-subset regrouping starts.
+
+Current behavior:
+
+- the algorithm tests whether a subpart of the chunk is attached to the rest through too few
+  face contacts
+- if it finds such a weak attachment, that subpart is split off
+- this is repeated recursively until no more weak attachments are found
+
+Important details:
+
+- this split is only based on full-face adjacency
+- it is intended for narrow-neck / bridge-like attachments
+- it is **skipped** for small groups whose size is below
+  `signal_center_min_group_size_for_face_contact_split`
+- small groups still continue to the recursive center search; the threshold only disables this
+  face-contact-based separation step
+
+Current YAML knobs:
+
+- `signal_center_min_group_size_for_face_contact_split`
+- `signal_center_min_face_contacts_to_keep_chunk`
+
+### 2.3 Recursive brightest-subset regrouping
 
 After initial grouping, each group is recursively refined:
 
@@ -56,13 +82,24 @@ After initial grouping, each group is recursively refined:
 4. if that subset splits into multiple components, use those components as seeds to repartition the whole parent group
 5. recurse into the resulting child groups
 
-### 2.3 Recursion terminate conditions
+Important update from later in the session:
+
+- recursive splitting no longer starts from the full BFS chunk
+- after BFS grouping and optional weak-neck splitting, the recursive stage starts from the top
+  `signal_center_recursive_top_percentile` subset of each chunk
+- that top-percentile subset is itself grouped by face-touch BFS, and those seed groups become the
+  inputs to recursive refinement
+
+This makes recursion more peak-focused from the very first recursive round.
+
+### 2.4 Recursion terminate conditions
 
 Recursion stops when any of these happens:
 
 - the current group has size `<= 1`
 - recursion depth reaches `signal_center_recursive_max_depth`
-- the newly selected brightest subset is exactly the same as the previous subset for that branch
+- the newly selected brightest subset is exactly the same as the previous subset for that branch,
+  in which case that recursion level is skipped and the code advances to the next recursion depth
 - the brightest subset does not split into at least 2 face-connected components
 
 Important note:
@@ -70,6 +107,8 @@ Important note:
 - The recursive stage does **not** re-pool the image at each level.
 - Pooling happens once.
 - Recursion only re-groups the already-created bright cubes.
+- The effective brightest-subset percentile increases with depth toward `1.0`, so deeper rounds
+  become more inclusive.
 
 ---
 
@@ -137,6 +176,27 @@ Merged center values:
 - `position`: brightness-weighted average
 - `brightness`: average brightness of merged centers
 - `boxes`: sum of merged `boxes`
+
+### 4.4 Additional overlap-sphere merge
+
+After the close-center merge above, there is now one more post-processing merge pass.
+
+Current behavior:
+
+- each signal center gets a sphere of radius
+  `signal_center_overlap_merge_radius_scale * minRadius`
+- if multiple such spheres overlap, those centers are grouped together
+- the grouped centers are merged into a single center
+
+Merged-center fields in this pass:
+
+- `position`: plain average of member coordinates
+- `brightness`: average brightness of the merged centers
+- `boxes`: sum of merged `boxes`
+
+Current YAML knob:
+
+- `signal_center_overlap_merge_radius_scale`
 
 ---
 
@@ -211,6 +271,13 @@ YAML switch:
 
 - `export_signal_center_images`
 
+Important detail:
+
+- the debug export marker size is the signal-center detector's current cube size, not a single voxel
+- so the drawn cube can still look large even when `signal_center_pooling_cube_scale` is `1.0`,
+  because the final cube size still depends on the adaptive-pooling base cube size and the
+  post-max cube scale
+
 ### 6.2 Post-localization debug export restored
 
 During this session it was discovered that:
@@ -258,6 +325,41 @@ YAML switch:
 - `signal_center_min_bright_surrounding_cubes`
 - `signal_center_recursive_top_percentile`
 - `signal_center_recursive_max_depth`
+- `signal_center_min_group_size_for_face_contact_split`
+- `signal_center_min_face_contacts_to_keep_chunk`
+- `signal_center_overlap_merge_radius_scale`
+
+### Compatibility note
+
+- `signal_center_recursive_min_group_size` is still accepted as a backward-compatible alias, but
+  it now maps to `signal_center_min_group_size_for_face_contact_split`
+- its meaning is no longer "skip recursive checking for small groups"
+- its meaning is now "skip the weak face-contact separation step for small groups"
+
+---
+
+## 8. Later Accepted Changes Summary
+
+The codebase now includes the following accepted signal-center modifications beyond the earlier
+summary note:
+
+- recursive brightest-subset logic now skips a stalled iteration and continues to deeper recursion
+  instead of terminating immediately when the selected subset does not change
+- weak face-contact separation now runs after BFS grouping and is controlled by:
+  - `signal_center_min_group_size_for_face_contact_split`
+  - `signal_center_min_face_contacts_to_keep_chunk`
+- recursive splitting now starts from the top-percentile subset of each BFS chunk, not from the
+  full BFS chunk
+- the top-percentile recursion guard no longer excludes small chunks from center checking
+- an additional overlap-based merge now merges centers whose min-radius-relative spheres overlap
+- the overlap merge radius is configurable with
+  `signal_center_overlap_merge_radius_scale`
+
+Current code locations:
+
+- config parsing / printing: `includes/ConfigTypes.hpp`
+- signal-center detection pipeline: `src/ImageHandler.cpp`
+- signal-center debug export usage: `src/CellUniverse.cpp`
 
 ### Post-localization export
 
@@ -345,4 +447,3 @@ The project was rebuilt successfully after the final changes in this archive wit
 ```bash
 cmake --build build -j $(nproc)
 ```
-

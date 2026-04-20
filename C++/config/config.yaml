@@ -293,10 +293,10 @@ simulation:
   post_process_white_percentile: 0.3
   brightness_alignment_enabled: false
 
-  export_preprocessed_images: false
-  export_signal_center_images: false
+  export_preprocessed_images: true
+  export_signal_center_images: true
   export_post_localization_images: true
-  quit_after_preprocessing: false
+  quit_after_preprocessing: true
 
   # Adaptive cube pooling — YP's b575246 introduced this as an optional
   # final-stage pooling step that averages pixels into cubes (~0.6× minR
@@ -317,6 +317,7 @@ simulation:
   adaptive_cube_pooling_remove_isolated_bright_cubes: true
   adaptive_cube_pooling_isolated_bright_cube_threshold: 0.07
   adaptive_cube_pooling_min_chunk_size_scale: 1.0
+  adaptive_cube_pooling_post_max_scale: 2.0
 
   # Signal-center detection runs once here, on the post-pooling frame, and
   # the resulting centers are cached on each frame for later signal-guided
@@ -327,12 +328,12 @@ simulation:
   # face-touch connected components, then recursively tries to split each
   # group by running the same face-touch grouping on the top percentile of
   # brightest cubes inside it.
-  signal_center_pooling_cube_scale: 2.0
+  signal_center_pooling_cube_scale: 1.0
   signal_center_pooling_mode: max
-  signal_center_min_cube_brightness_delta: 0.05
-  signal_center_min_bright_surrounding_cubes: 13
-  signal_center_recursive_top_percentile: 0.5
-  signal_center_recursive_max_depth: 2
+  signal_center_min_cube_brightness_delta: 0.1
+  signal_center_min_bright_surrounding_cubes: 8
+  signal_center_recursive_top_percentile: 0.2
+  signal_center_recursive_max_depth: 30
 
   adaptive_background_expand_factor: 1.1
   # 2026-04-19 audit: 0.4 → 0.2. Yp preprocessing brightens halos, so top 40%

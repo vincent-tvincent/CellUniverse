@@ -67,6 +67,7 @@ public:
     bool adaptive_cube_pooling_remove_isolated_bright_cubes = false;
     float adaptive_cube_pooling_isolated_bright_cube_threshold = 0.08f;
     float adaptive_cube_pooling_min_chunk_size_scale = 0.25f;
+    float adaptive_cube_pooling_post_max_scale = 1.0f;
     float signal_center_pooling_cube_scale = 1.0f;
     std::string signal_center_pooling_mode = "max";
     float signal_center_min_cube_brightness_delta = 0.0f;
@@ -154,6 +155,7 @@ public:
         if (node["adaptive_cube_pooling_remove_isolated_bright_cubes"]) adaptive_cube_pooling_remove_isolated_bright_cubes = node["adaptive_cube_pooling_remove_isolated_bright_cubes"].as<bool>();
         if (node["adaptive_cube_pooling_isolated_bright_cube_threshold"]) adaptive_cube_pooling_isolated_bright_cube_threshold = node["adaptive_cube_pooling_isolated_bright_cube_threshold"].as<float>();
         if (node["adaptive_cube_pooling_min_chunk_size_scale"]) adaptive_cube_pooling_min_chunk_size_scale = node["adaptive_cube_pooling_min_chunk_size_scale"].as<float>();
+        if (node["adaptive_cube_pooling_post_max_scale"]) adaptive_cube_pooling_post_max_scale = node["adaptive_cube_pooling_post_max_scale"].as<float>();
         if (node["signal_center_pooling_cube_scale"]) signal_center_pooling_cube_scale = node["signal_center_pooling_cube_scale"].as<float>();
         if (node["signal_center_pooling_mode"]) signal_center_pooling_mode = node["signal_center_pooling_mode"].as<std::string>();
         if (node["signal_center_min_cube_brightness_delta"]) signal_center_min_cube_brightness_delta = node["signal_center_min_cube_brightness_delta"].as<float>();
@@ -226,6 +228,7 @@ public:
         std::cout << "adaptive_cube_pooling_remove_isolated_bright_cubes: " << adaptive_cube_pooling_remove_isolated_bright_cubes << '\n';
         std::cout << "adaptive_cube_pooling_isolated_bright_cube_threshold: " << adaptive_cube_pooling_isolated_bright_cube_threshold << '\n';
         std::cout << "adaptive_cube_pooling_min_chunk_size_scale: " << adaptive_cube_pooling_min_chunk_size_scale << '\n';
+        std::cout << "adaptive_cube_pooling_post_max_scale: " << adaptive_cube_pooling_post_max_scale << '\n';
         std::cout << "signal_center_pooling_cube_scale: " << signal_center_pooling_cube_scale << '\n';
         std::cout << "signal_center_pooling_mode: " << signal_center_pooling_mode << '\n';
         std::cout << "signal_center_min_cube_brightness_delta: " << signal_center_min_cube_brightness_delta << '\n';

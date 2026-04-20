@@ -145,6 +145,93 @@ int computeAdaptiveCubeSize(const BaseConfig &config)
     return std::max(1, static_cast<int>(std::lround(cubeSizeTarget)));
 }
 
+int computeEffectivePooledCubeSize(const BaseConfig &config)
+{
+    const int baseCubeSize = computeAdaptiveCubeSize(config);
+    const float postMaxScale =
+        std::max(1.0f, config.simulation.adaptive_cube_pooling_post_max_scale);
+    return std::max(
+        1, static_cast<int>(std::lround(static_cast<float>(baseCubeSize) * postMaxScale)));
+}
+
+ImageStack applyCubeMaxPooling(const ImageStack &stack,
+                               int cubeSize,
+                               std::ostream &log)
+{
+    if (stack.empty() || cubeSize <= 1)
+    {
+        return cloneStack(stack);
+    }
+
+    const int depth = static_cast<int>(stack.size());
+    const int rows = stack[0].rows;
+    const int cols = stack[0].cols;
+    if (depth <= 0 || rows <= 0 || cols <= 0)
+    {
+        return cloneStack(stack);
+    }
+
+    const int gridZ = (depth + cubeSize - 1) / cubeSize;
+    const int gridY = (rows + cubeSize - 1) / cubeSize;
+    const int gridX = (cols + cubeSize - 1) / cubeSize;
+
+    ImageStack pooled(depth);
+    for (int z = 0; z < depth; ++z)
+    {
+        pooled[static_cast<size_t>(z)] = cv::Mat::zeros(rows, cols, CV_32F);
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int gz = 0; gz < gridZ; ++gz)
+    {
+        const int z0 = gz * cubeSize;
+        const int z1 = std::min(depth, z0 + cubeSize);
+        for (int gy = 0; gy < gridY; ++gy)
+        {
+            const int y0 = gy * cubeSize;
+            const int y1 = std::min(rows, y0 + cubeSize);
+            for (int gx = 0; gx < gridX; ++gx)
+            {
+                const int x0 = gx * cubeSize;
+                const int x1 = std::min(cols, x0 + cubeSize);
+
+                float maxValue = 0.0f;
+                for (int z = z0; z < z1; ++z)
+                {
+                    const cv::Mat &slice = stack[static_cast<size_t>(z)];
+                    for (int y = y0; y < y1; ++y)
+                    {
+                        const float *row = slice.ptr<float>(y);
+                        for (int x = x0; x < x1; ++x)
+                        {
+                            maxValue = std::max(maxValue, row[x]);
+                        }
+                    }
+                }
+
+                for (int z = z0; z < z1; ++z)
+                {
+                    cv::Mat &slice = pooled[static_cast<size_t>(z)];
+                    for (int y = y0; y < y1; ++y)
+                    {
+                        float *row = slice.ptr<float>(y);
+                        for (int x = x0; x < x1; ++x)
+                        {
+                            row[x] = maxValue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    log << "[PostMaxCubePooling]"
+        << " cubeSize=" << cubeSize
+        << " grid=" << gridX << "x" << gridY << "x" << gridZ
+        << std::endl;
+    return pooled;
+}
+
 ImageStack applyAdaptiveCubePooling(const ImageStack &stack,
                                     const BaseConfig &config,
                                     std::ostream &log)
@@ -478,6 +565,15 @@ ImageStack applyAdaptiveCubePooling(const ImageStack &stack,
         << " removedSmallChunkCubes=" << removedSmallChunkCubes
         << std::endl;
 
+    const float postMaxScale =
+        std::max(1.0f, config.simulation.adaptive_cube_pooling_post_max_scale);
+    const int postMaxCubeSize = std::max(
+        1, static_cast<int>(std::lround(static_cast<float>(cubeSize) * postMaxScale)));
+    if (postMaxCubeSize > cubeSize)
+    {
+        pooled = applyCubeMaxPooling(pooled, postMaxCubeSize, log);
+    }
+
     return pooled;
 }
 
@@ -521,7 +617,7 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         return result;
     }
 
-    const int baseCubeSize = computeAdaptiveCubeSize(config);
+    const int baseCubeSize = computeEffectivePooledCubeSize(config);
     const float cubeScale = std::max(1.0f, config.simulation.signal_center_pooling_cube_scale);
     const int cubeSize = std::max(
         1, static_cast<int>(std::lround(static_cast<float>(baseCubeSize) * cubeScale)));
@@ -701,6 +797,18 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         const std::vector<size_t> &,
         int,
         const std::vector<size_t> &)> refineGroup;
+    auto recursivePercentileForDepth = [&](int depth) -> float
+    {
+        if (recursiveMaxDepth <= 0)
+        {
+            return recursiveTopPercentile;
+        }
+
+        const float depthRatio = std::clamp(
+            static_cast<float>(depth) / static_cast<float>(recursiveMaxDepth), 0.0f, 1.0f);
+        return recursiveTopPercentile +
+               (1.0f - recursiveTopPercentile) * depthRatio;
+    };
     refineGroup =
         [&](const std::vector<size_t> &group,
             int depth,
@@ -714,16 +822,17 @@ ImageHandler::SignalCenterDetectionResult detectSignalCenters(
         std::vector<size_t> sortedGroup = group;
         sortIndicesByBrightness(sortedGroup);
 
+        const float effectivePercentile = recursivePercentileForDepth(depth);
         const size_t selectedCount = std::max<size_t>(
             1, static_cast<size_t>(std::ceil(
-                   recursiveTopPercentile * static_cast<float>(sortedGroup.size()))));
+                   effectivePercentile * static_cast<float>(sortedGroup.size()))));
         std::vector<size_t> selected(sortedGroup.begin(),
                                      sortedGroup.begin() + static_cast<std::ptrdiff_t>(
                                          std::min(selectedCount, sortedGroup.size())));
         std::sort(selected.begin(), selected.end());
         if (!previousSelected.empty() && selected == previousSelected)
         {
-            return {group};
+            return refineGroup(group, depth + 1, selected);
         }
 
         std::vector<std::vector<size_t>> selectedComponents =

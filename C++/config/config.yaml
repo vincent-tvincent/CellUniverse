@@ -288,7 +288,7 @@ simulation:
   post_process_final_direct_amplification: 0.8
   post_process_final_blurred_amplification: 1.5
 
-  post_process_amplification: 5.0
+  post_process_amplification: 8.0
   post_process_black_percentile: 0.08
   post_process_white_percentile: 0.3
   brightness_alignment_enabled: false
@@ -310,14 +310,14 @@ simulation:
   # shape/size issue).
   adaptive_cube_pooling_enabled: true
   adaptive_cube_pooling_cost_comparison_enabled: false
-  adaptive_cube_pooling_cube_size_scale: 1.0
+  adaptive_cube_pooling_cube_size_scale: 0.6
   adaptive_cube_pooling_zero_threshold: 0.035
   adaptive_cube_pooling_majority_threshold: 0.7
-  adaptive_cube_pooling_strong_peak_threshold: 0.1
+  adaptive_cube_pooling_strong_peak_threshold: 0.05
   adaptive_cube_pooling_remove_isolated_bright_cubes: true
   adaptive_cube_pooling_isolated_bright_cube_threshold: 0.07
   adaptive_cube_pooling_min_chunk_size_scale: 3.0
-  adaptive_cube_pooling_post_max_scale: 1.5
+  adaptive_cube_pooling_post_max_scale: 1.0
 
   # Signal-center detection runs once here, on the post-pooling frame, and
   # the resulting centers are cached on each frame for later signal-guided
@@ -327,13 +327,13 @@ simulation:
   # cube's brightness is measured before chunking. Grouping first builds
   # face-touch connected components, then recursively tries to split each
   # group by running the same face-touch grouping on the top percentile of
-  # brightest cubes inside it.
-  signal_center_pooling_cube_scale: 1.0
+  # brightest cubes inside it.  
+  signal_center_pooling_cube_scale: 2.5
   signal_center_pooling_mode: max
-  signal_center_min_cube_brightness_delta: 0.01
-  signal_center_min_bright_surrounding_cubes: 10
-  signal_center_recursive_top_percentile: 0.5
-  signal_center_recursive_max_depth: 10
+  signal_center_min_cube_brightness_delta: 0.1
+  signal_center_min_bright_surrounding_cubes: 20
+  signal_center_recursive_top_percentile: 0.45
+  signal_center_recursive_max_depth: 3
   signal_center_min_group_size_for_face_contact_split: 50
   signal_center_min_face_contacts_to_keep_chunk: 50
   signal_center_overlap_merge_radius_scale: 2.0

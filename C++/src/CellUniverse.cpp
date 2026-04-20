@@ -765,6 +765,20 @@ void CellUniverse::optimize(int frameIndex)
         Ellipsoid::cellConfig.z = savedCalZ;
     }
 
+    if (config.simulation.export_post_localization_images) {
+        const std::vector<Image> localizationImages = frame.generateOutputFrame();
+        const fs::path frameOutputDir =
+            fs::path(outputPath) / "post_localization" / std::to_string(displayFrame);
+        fs::create_directories(frameOutputDir);
+        for (size_t i = 0; i < localizationImages.size(); ++i) {
+            cv::imwrite((frameOutputDir / (std::to_string(i) + ".png")).string(),
+                        localizationImages[i]);
+        }
+        std::cout << "[Post-Localization Export] frame " << displayFrame
+                  << " dir=" << frameOutputDir.string()
+                  << std::endl;
+    }
+
     // ---- Per-cell iterative PCA shape fit ----
     // Runs AFTER position calibration so Voronoi neighbor exclusion uses
     // refined positions. PCA on the Voronoi-filtered bright pixels inside

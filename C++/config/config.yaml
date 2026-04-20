@@ -293,9 +293,10 @@ simulation:
   post_process_white_percentile: 0.3
   brightness_alignment_enabled: false
 
-  export_preprocessed_images: true
-  export_signal_center_images: true
-  quit_after_preprocessing: true
+  export_preprocessed_images: false
+  export_signal_center_images: false
+  export_post_localization_images: true
+  quit_after_preprocessing: false
 
   # Adaptive cube pooling — YP's b575246 introduced this as an optional
   # final-stage pooling step that averages pixels into cubes (~0.6× minR
@@ -404,14 +405,14 @@ simulation:
   # 2026-04-19: temporarily disabled to isolate PCA shape revert effect.
   # When false, useSignalGuidanceThisFrame is always false → all frames use
   # random_iterations_per_cell + pure-random perturbation.
-  signal_guided_position_enabled: false
+  signal_guided_position_enabled: true
   # Floor on the per-cluster sigma scale. Brighter clusters get smaller sigma
   # (tighter teleport); dimmer clusters get sigma toward 1.0 (looser).
   # 0.35 = brightest cluster's sigma is 35% of cellConfig.x/y/z.sigma.
   signal_guided_min_sigma_scale: 0.35
   # Sigma range multiplier on top of cellConfig.x/y/z.sigma. yp tuned 10.0
   # which gives wide-jump teleports.
-  signal_guided_sigma_range_multiplier: 10.0
+  signal_guided_sigma_range_multiplier: 2.0
 
 # Triaxial split detection pipeline.
 prob:

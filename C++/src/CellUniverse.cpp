@@ -183,190 +183,63 @@ static void exportPreprocessedStack(const std::vector<cv::Mat> &stack,
     }
 }
 
-// === Signal-guided perturbation helpers (yp ffc1917) ===
-//
-// Detect bright clusters in the real frame and use them as teleport
-// targets for cells that get stuck on local optima. Per-frame init only;
-// the actual cell teleport happens in Frame::perturbCell when
-// useSignalGuidance=true.
-
-struct BrightBox {
-    int ix = 0;
-    int iy = 0;
-    int iz = 0;
-    cv::Point3f center{0.0f, 0.0f, 0.0f};
-    float brightness = 0.0f;
-    int voxels = 0;
-};
-
-static int chooseNearestDivisorSize(int axisLength, float targetSize)
+static void exportSignalCenterStack(const std::vector<cv::Mat> &referenceStack,
+                                    const std::vector<Frame::SignalCenter> &centers,
+                                    int cubeSize,
+                                    const fs::path &baseOutputDir,
+                                    int displayFrame)
 {
-    if (axisLength <= 1) return 1;
-    const float clampedTarget = std::clamp(targetSize, 1.0f, static_cast<float>(axisLength));
-    int bestDivisor = 1;
-    float bestDistance = std::abs(static_cast<float>(bestDivisor) - clampedTarget);
-    for (int d = 1; d <= axisLength; ++d) {
-        if (axisLength % d != 0) continue;
-        const float distance = std::abs(static_cast<float>(d) - clampedTarget);
-        if (distance < bestDistance ||
-            (std::abs(distance - bestDistance) <= 1e-6f && d > bestDivisor)) {
-            bestDivisor = d;
-            bestDistance = distance;
-        }
+    if (referenceStack.empty())
+    {
+        return;
     }
-    return bestDivisor;
-}
 
-static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
-    const Frame &frame,
-    const BaseConfig &config,
-    int displayFrame)
-{
-    std::vector<Frame::SignalCenter> centers;
-    const auto &realFrame = frame.getRealFrame();
-    if (realFrame.empty() || !config.cell) return centers;
+    const int rows = referenceStack[0].rows;
+    const int cols = referenceStack[0].cols;
+    const int depth = static_cast<int>(referenceStack.size());
+    const int markSize = std::max(1, cubeSize);
 
-    const int sizeX = realFrame[0].cols;
-    const int sizeY = realFrame[0].rows;
-    const int sizeZ = static_cast<int>(realFrame.size());
-    if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) return centers;
+    std::vector<cv::Mat> outputStack(static_cast<size_t>(depth));
+    for (int z = 0; z < depth; ++z)
+    {
+        outputStack[static_cast<size_t>(z)] = cv::Mat::zeros(rows, cols, CV_8U);
+    }
 
-    const float boxScale = std::max(0.1f, config.simulation.signal_guided_box_size_scale);
-    const float maxDiamX = 2.0f * static_cast<float>(config.cell->maxARadius);
-    const float maxDiamY = 2.0f * static_cast<float>(
-        config.cell->maxBRadius > 0.0 ? config.cell->maxBRadius : config.cell->maxARadius);
-    const float maxDiamZ = 2.0f * static_cast<float>(config.cell->maxCRadius);
-    const float targetBoxX = std::max(1.0f, (maxDiamX / 3.0f) * boxScale);
-    const float targetBoxY = std::max(1.0f, (maxDiamY / 3.0f) * boxScale);
-    const float targetBoxZ = std::max(1.0f, (maxDiamZ / 3.0f) * boxScale);
+    for (const auto &center : centers)
+    {
+        const int cx = static_cast<int>(std::lround(center.position.x));
+        const int cy = static_cast<int>(std::lround(center.position.y));
+        const int cz = static_cast<int>(std::lround(center.position.z));
+        const int half = markSize / 2;
+        const int x0 = std::max(0, cx - half);
+        const int y0 = std::max(0, cy - half);
+        const int z0 = std::max(0, cz - half);
+        const int x1 = std::min(cols, x0 + markSize);
+        const int y1 = std::min(rows, y0 + markSize);
+        const int z1 = std::min(depth, z0 + markSize);
 
-    const int boxSizeX = chooseNearestDivisorSize(sizeX, targetBoxX);
-    const int boxSizeY = chooseNearestDivisorSize(sizeY, targetBoxY);
-    const int boxSizeZ = chooseNearestDivisorSize(sizeZ, targetBoxZ);
-    const int gridX = std::max(1, sizeX / boxSizeX);
-    const int gridY = std::max(1, sizeY / boxSizeY);
-    const int gridZ = std::max(1, sizeZ / boxSizeZ);
-
-    const float backgroundValue = frame.getBackgroundValue();
-    const float minDelta = std::max(0.0f, config.simulation.signal_guided_min_box_brightness_delta);
-
-    std::vector<BrightBox> boxes;
-    boxes.reserve(static_cast<size_t>(gridX) * gridY * gridZ);
-    for (int iz = 0; iz < gridZ; ++iz) {
-        const int z0 = iz * boxSizeZ;
-        const int z1 = z0 + boxSizeZ;
-        for (int iy = 0; iy < gridY; ++iy) {
-            const int y0 = iy * boxSizeY;
-            const int y1 = y0 + boxSizeY;
-            for (int ix = 0; ix < gridX; ++ix) {
-                const int x0 = ix * boxSizeX;
-                const int x1 = x0 + boxSizeX;
-                double sum = 0.0;
-                int voxels = 0;
-                for (int z = z0; z < z1; ++z) {
-                    for (int y = y0; y < y1; ++y) {
-                        const float *row = realFrame[z].ptr<float>(y);
-                        for (int x = x0; x < x1; ++x) {
-                            sum += row[x];
-                            ++voxels;
-                        }
-                    }
+        for (int z = z0; z < z1; ++z)
+        {
+            cv::Mat &slice = outputStack[static_cast<size_t>(z)];
+            for (int y = y0; y < y1; ++y)
+            {
+                unsigned char *row = slice.ptr<unsigned char>(y);
+                for (int x = x0; x < x1; ++x)
+                {
+                    row[x] = 255;
                 }
-                if (voxels <= 0) continue;
-                const float meanBrightness = static_cast<float>(sum / static_cast<double>(voxels));
-                if (meanBrightness <= backgroundValue + minDelta) continue;
-                boxes.push_back({
-                    ix, iy, iz,
-                    cv::Point3f(
-                        static_cast<float>(x0 + x1 - 1) * 0.5f,
-                        static_cast<float>(y0 + y1 - 1) * 0.5f,
-                        static_cast<float>(z0 + z1 - 1) * 0.5f),
-                    meanBrightness, voxels
-                });
             }
         }
     }
 
-    std::sort(boxes.begin(), boxes.end(),
-              [](const BrightBox &a, const BrightBox &b) { return a.brightness > b.brightness; });
-
-    std::map<std::tuple<int, int, int>, size_t> boxIndex;
-    for (size_t i = 0; i < boxes.size(); ++i) boxIndex[{boxes[i].ix, boxes[i].iy, boxes[i].iz}] = i;
-
-    std::vector<char> visited(boxes.size(), 0);
-    float maxCenterBrightness = backgroundValue;
-    for (size_t seed = 0; seed < boxes.size(); ++seed) {
-        if (visited[seed]) continue;
-        std::vector<size_t> stack{seed};
-        visited[seed] = 1;
-        double weightSum = 0.0, xSum = 0.0, ySum = 0.0, zSum = 0.0, brightnessSum = 0.0;
-        int clusterBoxes = 0;
-        while (!stack.empty()) {
-            const size_t current = stack.back();
-            stack.pop_back();
-            const BrightBox &box = boxes[current];
-            const float weight = std::max(1e-6f, box.brightness - backgroundValue);
-            weightSum += weight;
-            xSum += weight * static_cast<double>(box.center.x);
-            ySum += weight * static_cast<double>(box.center.y);
-            zSum += weight * static_cast<double>(box.center.z);
-            brightnessSum += static_cast<double>(box.brightness);
-            ++clusterBoxes;
-            for (int dz = -1; dz <= 1; ++dz)
-                for (int dy = -1; dy <= 1; ++dy)
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        if (dx == 0 && dy == 0 && dz == 0) continue;
-                        auto it = boxIndex.find({box.ix + dx, box.iy + dy, box.iz + dz});
-                        if (it == boxIndex.end()) continue;
-                        const size_t neighbor = it->second;
-                        if (visited[neighbor]) continue;
-                        visited[neighbor] = 1;
-                        stack.push_back(neighbor);
-                    }
-        }
-        if (clusterBoxes <= 0 || weightSum <= 0.0) continue;
-        Frame::SignalCenter center;
-        center.position = cv::Point3f(
-            static_cast<float>(xSum / weightSum),
-            static_cast<float>(ySum / weightSum),
-            static_cast<float>(zSum / weightSum));
-        center.brightness = static_cast<float>(brightnessSum / static_cast<double>(clusterBoxes));
-        center.boxes = clusterBoxes;
-        centers.push_back(center);
-        maxCenterBrightness = std::max(maxCenterBrightness, center.brightness);
+    const fs::path frameOutputDir = baseOutputDir / "signal_centers" /
+                                    std::to_string(displayFrame);
+    fs::create_directories(frameOutputDir);
+    for (size_t i = 0; i < outputStack.size(); ++i)
+    {
+        cv::imwrite((frameOutputDir / (std::to_string(i) + ".png")).string(),
+                    outputStack[i]);
     }
-
-    for (auto &center : centers) {
-        const float normalized = (maxCenterBrightness > backgroundValue + 1e-6f)
-            ? std::clamp((center.brightness - backgroundValue) /
-                         (maxCenterBrightness - backgroundValue), 0.0f, 1.0f)
-            : 0.0f;
-        center.sigmaScale = std::max(
-            config.simulation.signal_guided_min_sigma_scale,
-            1.0f - normalized * (1.0f - config.simulation.signal_guided_min_sigma_scale));
-    }
-
-    std::sort(centers.begin(), centers.end(),
-              [](const Frame::SignalCenter &a, const Frame::SignalCenter &b) {
-                  return a.brightness > b.brightness;
-              });
-
-    std::cout << "[Signal Centers] frame " << displayFrame
-              << " enabled=" << config.simulation.signal_guided_position_enabled
-              << " boxSize=(" << boxSizeX << "," << boxSizeY << "," << boxSizeZ << ")"
-              << " grid=(" << gridX << "," << gridY << "," << gridZ << ")"
-              << " background=" << backgroundValue
-              << " keptBoxes=" << boxes.size()
-              << " clusters=" << centers.size() << '\n';
-    for (size_t i = 0; i < centers.size(); ++i) {
-        const auto &c = centers[i];
-        std::cout << "  [Signal Center] idx=" << i
-                  << " pos=(" << c.position.x << "," << c.position.y << "," << c.position.z << ")"
-                  << " brightness=" << c.brightness
-                  << " sigmaScale=" << c.sigmaScale
-                  << " boxes=" << c.boxes << '\n';
-    }
-    return centers;
 }
 
 static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
@@ -540,9 +413,25 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
     for (size_t i = 0; i < imagePaths.size(); ++i)
     {
         std::vector<cv::Mat> &real_frame = loadedFrames[i];
+        std::ostringstream signalCenterLog;
+        const ImageHandler::SignalCenterDetectionResult signalCenterResult =
+            ImageHandler::detectSignalCentersInStack(real_frame, config, &signalCenterLog);
+        const std::string signalCenterLogText = signalCenterLog.str();
+        if (!signalCenterLogText.empty()) {
+            std::cout << "[Signal Centers Cached] frame=" << (firstFrame + static_cast<int>(i))
+                      << " file=" << imagePaths[i].filename().string() << '\n'
+                      << signalCenterLogText;
+        }
 
         if (config.simulation.export_preprocessed_images) {
             exportPreprocessedStack(real_frame, fs::path(outputPath), imagePaths[i]);
+        }
+        if (config.simulation.export_signal_center_images) {
+            exportSignalCenterStack(real_frame,
+                                    signalCenterResult.centers,
+                                    signalCenterResult.cubeSize,
+                                    fs::path(outputPath),
+                                    firstFrame + static_cast<int>(i));
         }
         if (config.simulation.quit_after_preprocessing) {
             continue;
@@ -563,6 +452,7 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
         {
             frames.emplace_back(real_frame, config.simulation, std::vector<Ellipsoid>(), outputPath, file_name);
         }
+        frames.back().setSignalCenters(signalCenterResult.centers);
 
         if (config.cell) {
             frames.back().setBackgroundColor(config.cell->backgroundColor);
@@ -613,15 +503,15 @@ void CellUniverse::optimize(int frameIndex)
     frame.regenerateSynthFrame();
 
     // Signal-guided perturbation init (yp ffc1917 — full per-frame design).
-    // When enabled and enough signal centers are detected (>= previous frame
-    // cell count), the entire frame uses signal-guided perturbation with
-    // signal_guided_iterations_per_cell. When disabled or not enough centers,
-    // fall back to random perturbation with random_iterations_per_cell.
+    // Signal centers are precomputed once during preprocessing and cached on
+    // each Frame. When enabled and enough cached centers are available
+    // (>= previous frame cell count), the entire frame uses signal-guided
+    // perturbation with signal_guided_iterations_per_cell. When disabled or
+    // not enough centers, fall back to random perturbation with
+    // random_iterations_per_cell.
     bool useSignalGuidanceThisFrame = false;
+    const std::vector<Frame::SignalCenter> &centers = frame.getSignalCenters();
     if (config.simulation.signal_guided_position_enabled) {
-        std::vector<Frame::SignalCenter> centers =
-            localizeSignalCentersForFrame(frame, config, firstFrame + frameIndex);
-        frame.setSignalCenters(centers);
         useSignalGuidanceThisFrame = true;
         if (frameIndex > 0) {
             const size_t previousCellCount = frames[frameIndex - 1].cells.size();
@@ -633,8 +523,6 @@ void CellUniverse::optimize(int frameIndex)
                           << " mode=random\n";
             }
         }
-    } else {
-        frame.setSignalCenters({});
     }
 
     const int guidedPerCellIters =

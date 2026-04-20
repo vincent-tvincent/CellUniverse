@@ -11,6 +11,16 @@
 class ImageHandler
 {
 public:
+    struct SignalCenterDetectionResult {
+        std::vector<Frame::SignalCenter> centers;
+        int cubeSize = 1;
+        int gridX = 0;
+        int gridY = 0;
+        int gridZ = 0;
+        int keptBoxes = 0;
+        std::string poolingMode = "max";
+    };
+
     static Image processImage(const Image &image, const BaseConfig &config);
     static std::vector<cv::Mat> loadRawFrame(const std::string &imageFile,
                                              const BaseConfig &config,
@@ -19,6 +29,10 @@ public:
                                                       const std::string &imageFile,
                                                       const BaseConfig &config,
                                                       std::ostream *logSink = nullptr);
+    static SignalCenterDetectionResult detectSignalCentersInStack(
+        const ImageStack &stack,
+        const BaseConfig &config,
+        std::ostream *logSink = nullptr);
     static float evaluateSequenceContrastScore(const ImageStack &sequence, const BaseConfig &config);
     static std::vector<cv::Mat> loadFrame(const std::string &imageFile,
                                           BaseConfig &config,

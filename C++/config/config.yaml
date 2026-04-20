@@ -293,8 +293,9 @@ simulation:
   post_process_white_percentile: 0.3
   brightness_alignment_enabled: false
 
-  export_preprocessed_images: false
-  quit_after_preprocessing: false
+  export_preprocessed_images: true
+  export_signal_center_images: true
+  quit_after_preprocessing: true
 
   # Adaptive cube pooling — YP's b575246 introduced this as an optional
   # final-stage pooling step that averages pixels into cubes (~0.6× minR
@@ -308,11 +309,29 @@ simulation:
   # shape/size issue).
   adaptive_cube_pooling_enabled: true
   adaptive_cube_pooling_cost_comparison_enabled: false
-  adaptive_cube_pooling_cube_size_scale: 0.6
+  adaptive_cube_pooling_cube_size_scale: 1.0
   adaptive_cube_pooling_zero_threshold: 0.035
   adaptive_cube_pooling_majority_threshold: 0.7
+  adaptive_cube_pooling_strong_peak_threshold: 0.08
   adaptive_cube_pooling_remove_isolated_bright_cubes: true
   adaptive_cube_pooling_isolated_bright_cube_threshold: 0.07
+  adaptive_cube_pooling_min_chunk_size_scale: 1.0
+
+  # Signal-center detection runs once here, on the post-pooling frame, and
+  # the resulting centers are cached on each frame for later signal-guided
+  # perturbation. `signal_center_pooling_cube_scale=1` means use the same
+  # cube size as adaptive pooling; `3` means group 3 small cubes per side
+  # into one larger analysis cube. Pooling mode controls how each analysis
+  # cube's brightness is measured before chunking. Grouping first builds
+  # face-touch connected components, then recursively tries to split each
+  # group by running the same face-touch grouping on the top percentile of
+  # brightest cubes inside it.
+  signal_center_pooling_cube_scale: 2.0
+  signal_center_pooling_mode: max
+  signal_center_min_cube_brightness_delta: 0.05
+  signal_center_min_bright_surrounding_cubes: 13
+  signal_center_recursive_top_percentile: 0.5
+  signal_center_recursive_max_depth: 2
 
   adaptive_background_expand_factor: 1.1
   # 2026-04-19 audit: 0.4 → 0.2. Yp preprocessing brightens halos, so top 40%
@@ -386,12 +405,6 @@ simulation:
   # When false, useSignalGuidanceThisFrame is always false → all frames use
   # random_iterations_per_cell + pure-random perturbation.
   signal_guided_position_enabled: false
-  # Box size (relative to max cell diameter / 3). Smaller = more boxes,
-  # finer-grain clusters. yp default 0.4.
-  signal_guided_box_size_scale: 0.4
-  # Minimum brightness (above background) for a box to be considered. Filters
-  # out background noise. yp default 0.4.
-  signal_guided_min_box_brightness_delta: 0.4
   # Floor on the per-cluster sigma scale. Brighter clusters get smaller sigma
   # (tighter teleport); dimmer clusters get sigma toward 1.0 (looser).
   # 0.35 = brightest cluster's sigma is 35% of cellConfig.x/y/z.sigma.

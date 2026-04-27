@@ -419,238 +419,6 @@ ImageStack applyAdaptiveCubePooling(const ImageStack &stack,
     return pooled;
 }
 
-struct BrightBox
-{
-    int ix = 0;
-    int iy = 0;
-    int iz = 0;
-    cv::Point3f center{0.0f, 0.0f, 0.0f};
-    float brightness = 0.0f;
-    int voxels = 0;
-};
-
-int chooseNearestDivisorSize(int axisLength, float targetSize)
-{
-    if (axisLength <= 1)
-    {
-        return 1;
-    }
-
-    const float clampedTarget = std::clamp(targetSize, 1.0f, static_cast<float>(axisLength));
-    int bestDivisor = 1;
-    float bestDistance = std::abs(static_cast<float>(bestDivisor) - clampedTarget);
-    for (int d = 1; d <= axisLength; ++d)
-    {
-        if (axisLength % d != 0)
-        {
-            continue;
-        }
-        const float distance = std::abs(static_cast<float>(d) - clampedTarget);
-        if (distance < bestDistance ||
-            (std::abs(distance - bestDistance) <= 1e-6f && d > bestDivisor))
-        {
-            bestDivisor = d;
-            bestDistance = distance;
-        }
-    }
-    return bestDivisor;
-}
-
-std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &stack,
-                                                              const BaseConfig &config)
-{
-    std::vector<Frame::SignalCenter> centers;
-    if (stack.empty() || !config.cell)
-    {
-        return centers;
-    }
-
-    const int sizeX = stack[0].cols;
-    const int sizeY = stack[0].rows;
-    const int sizeZ = static_cast<int>(stack.size());
-    if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0)
-    {
-        return centers;
-    }
-
-    const float boxScale = std::max(0.1f, config.simulation.signal_guided_box_size_scale);
-    const float zShrink = std::max(1.0f, config.simulation.z_scaling);
-    const float maxDiamX = 2.0f * static_cast<float>(config.cell->maxARadius);
-    const float maxDiamY = 2.0f * static_cast<float>(
-        config.cell->maxBRadius > 0.0 ? config.cell->maxBRadius : config.cell->maxARadius);
-    const float maxDiamZ = 2.0f * static_cast<float>(config.cell->maxCRadius);
-    const float targetBoxX = std::max(1.0f, (maxDiamX / 3.0f) * boxScale);
-    const float targetBoxY = std::max(1.0f, (maxDiamY / 3.0f) * boxScale);
-    const float targetBoxZ = std::max(1.0f, (maxDiamZ / 3.0f) * (boxScale / zShrink));
-
-    const int boxSizeX = chooseNearestDivisorSize(sizeX, targetBoxX);
-    const int boxSizeY = chooseNearestDivisorSize(sizeY, targetBoxY);
-    const int boxSizeZ = chooseNearestDivisorSize(sizeZ, targetBoxZ);
-    const int gridX = std::max(1, sizeX / boxSizeX);
-    const int gridY = std::max(1, sizeY / boxSizeY);
-    const int gridZ = std::max(1, sizeZ / boxSizeZ);
-
-    const float backgroundValue = 0.0f;
-    const float minDelta = std::max(0.0f, config.simulation.signal_guided_min_box_brightness_delta);
-
-    std::vector<BrightBox> boxes;
-    boxes.reserve(static_cast<size_t>(gridX) * gridY * gridZ);
-    for (int iz = 0; iz < gridZ; ++iz)
-    {
-        const int z0 = iz * boxSizeZ;
-        const int z1 = z0 + boxSizeZ;
-        for (int iy = 0; iy < gridY; ++iy)
-        {
-            const int y0 = iy * boxSizeY;
-            const int y1 = y0 + boxSizeY;
-            for (int ix = 0; ix < gridX; ++ix)
-            {
-                const int x0 = ix * boxSizeX;
-                const int x1 = x0 + boxSizeX;
-
-                double sum = 0.0;
-                int voxels = 0;
-                for (int z = z0; z < z1; ++z)
-                {
-                    for (int y = y0; y < y1; ++y)
-                    {
-                        const float *row = stack[static_cast<size_t>(z)].ptr<float>(y);
-                        for (int x = x0; x < x1; ++x)
-                        {
-                            sum += row[x];
-                            ++voxels;
-                        }
-                    }
-                }
-                if (voxels <= 0)
-                {
-                    continue;
-                }
-
-                const float meanBrightness = static_cast<float>(sum / static_cast<double>(voxels));
-                if (meanBrightness <= backgroundValue + minDelta)
-                {
-                    continue;
-                }
-
-                boxes.push_back({
-                    ix, iy, iz,
-                    cv::Point3f(
-                        static_cast<float>(x0 + x1 - 1) * 0.5f,
-                        static_cast<float>(y0 + y1 - 1) * 0.5f,
-                        static_cast<float>(z0 + z1 - 1) * 0.5f),
-                    meanBrightness,
-                    voxels
-                });
-            }
-        }
-    }
-
-    std::sort(boxes.begin(), boxes.end(),
-              [](const BrightBox &a, const BrightBox &b)
-              {
-                  return a.brightness > b.brightness;
-              });
-
-    std::map<std::tuple<int, int, int>, size_t> boxIndex;
-    for (size_t i = 0; i < boxes.size(); ++i)
-    {
-        boxIndex[{boxes[i].ix, boxes[i].iy, boxes[i].iz}] = i;
-    }
-
-    std::vector<char> visited(boxes.size(), 0);
-    float maxCenterBrightness = backgroundValue;
-    for (size_t seed = 0; seed < boxes.size(); ++seed)
-    {
-        if (visited[seed])
-        {
-            continue;
-        }
-
-        std::vector<size_t> stackIndices{seed};
-        visited[seed] = 1;
-        double weightSum = 0.0;
-        double xSum = 0.0;
-        double ySum = 0.0;
-        double zSum = 0.0;
-        double brightnessSum = 0.0;
-        int clusterBoxes = 0;
-
-        while (!stackIndices.empty())
-        {
-            const size_t current = stackIndices.back();
-            stackIndices.pop_back();
-            const BrightBox &box = boxes[current];
-            const float weight = std::max(1e-6f, box.brightness - backgroundValue);
-            weightSum += weight;
-            xSum += weight * static_cast<double>(box.center.x);
-            ySum += weight * static_cast<double>(box.center.y);
-            zSum += weight * static_cast<double>(box.center.z);
-            brightnessSum += static_cast<double>(box.brightness);
-            ++clusterBoxes;
-
-            for (int dz = -1; dz <= 1; ++dz)
-            {
-                for (int dy = -1; dy <= 1; ++dy)
-                {
-                    for (int dx = -1; dx <= 1; ++dx)
-                    {
-                        if (dx == 0 && dy == 0 && dz == 0)
-                        {
-                            continue;
-                        }
-                        auto it = boxIndex.find({box.ix + dx, box.iy + dy, box.iz + dz});
-                        if (it == boxIndex.end())
-                        {
-                            continue;
-                        }
-                        const size_t neighbor = it->second;
-                        if (visited[neighbor])
-                        {
-                            continue;
-                        }
-                        visited[neighbor] = 1;
-                        stackIndices.push_back(neighbor);
-                    }
-                }
-            }
-        }
-
-        if (clusterBoxes <= 0 || weightSum <= 0.0)
-        {
-            continue;
-        }
-
-        Frame::SignalCenter center;
-        center.position = cv::Point3f(
-            static_cast<float>(xSum / weightSum),
-            static_cast<float>(ySum / weightSum),
-            static_cast<float>(zSum / weightSum));
-        center.brightness = static_cast<float>(brightnessSum / static_cast<double>(clusterBoxes));
-        center.boxes = clusterBoxes;
-        centers.push_back(center);
-        maxCenterBrightness = std::max(maxCenterBrightness, center.brightness);
-    }
-
-    for (auto &center : centers)
-    {
-        const float normalized = (maxCenterBrightness > backgroundValue + 1e-6f)
-            ? std::clamp((center.brightness - backgroundValue) /
-                         (maxCenterBrightness - backgroundValue), 0.0f, 1.0f)
-            : 0.0f;
-        center.sigmaScale = std::max(
-            config.simulation.signal_guided_min_sigma_scale,
-            1.0f - normalized * (1.0f - config.simulation.signal_guided_min_sigma_scale));
-    }
-
-    std::sort(centers.begin(), centers.end(),
-              [](const Frame::SignalCenter &a, const Frame::SignalCenter &b)
-              {
-                  return a.brightness > b.brightness;
-              });
-
-    return centers;
-}
 
 void clipStack(ImageStack &sequence)
 {
@@ -1021,10 +789,37 @@ ImageStack ImageHandler::processPreparedSequence(const ImageStack &sequence,
 
         if (score == 0.0f)
         {
+            // Score==0 rollback (2026-04-22 fix for f62/f64 purple-background bug):
+            // When the iterative penalty loop drives the sequence into a
+            // "no-structure" state — every voxel either collapsed to 0 or
+            // uniformly bright — the contrast metric evaluates to 0. The old
+            // rollback only reduced penalty and restored `bestSequence`, but
+            // left `scorePercentile`, `rewardGate`, and `hasPreviousScore`
+            // in their drifted state. That caused subsequent iterations to
+            // evaluate scores against a SHIFTED metric (percentile keeps
+            // climbing toward max, rewardGate keeps shrinking toward min),
+            // preventing `bestSequence` from improving on its early-captured
+            // state with elevated background. Result: final best_score
+            // artificially frozen at the round-0 value, `bestSequence` kept
+            // as the state with mean=0.27-0.46 background (vs typical 0.015)
+            // → post-processing amplified the residual background 5x →
+            // purple-tinted output → downstream edge_too_dim rejections +
+            // eventual FP cascade in tracking.
+            //
+            // Reset the three drifted scoring knobs to their initial config
+            // values so the next iterations re-explore with a clean metric
+            // frame of reference. Clear `hasPreviousScore` so the score-drop
+            // guard doesn't fire spuriously against the old score we just
+            // abandoned. `bestScore` is intentionally kept — we don't want
+            // the rollback to overwrite a genuinely better state if one was
+            // captured before the collapse.
             currentPenalty = std::max(
                 config.simulation.iterative_min_penalty,
                 currentPenalty * config.simulation.iterative_collapse_backoff);
             current = cloneStack(bestSequence);
+            scorePercentile = config.simulation.iterative_score_percentile;
+            rewardGate = config.simulation.iterative_reward_gate;
+            hasPreviousScore = false;
             continue;
         }
 

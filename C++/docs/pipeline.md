@@ -1,10 +1,49 @@
 # CellUniverse Pipeline (Current)
 
-**Last updated:** 2026-04-16 (evening) — adaptive mask + position refinement + soft Voronoi + asymK threshold + neighbor-bridging gate + z-skip render
+**Last updated:** 2026-04-22 — score==0 rollback reset + slab-min bridge + additive bleed penalty + velocity cap drop + RNG seed + checkpoint CLI.
 
-This is the authoritative end-to-end pipeline for a single frame. Per-fix rationale lives in `docs/changelogs/changelogv7.md`.
+Active changelog: **`docs/changelogs/changelogv8.md`**. Legacy body of this doc (dated 2026-04-16) retained below for per-stage mechanics; the **2026-04-22 State** block immediately below is authoritative where the two disagree.
 
 ---
+
+## 2026-04-22 State (Current baseline)
+
+Changes since the 2026-04-16 body:
+
+### Image preprocessing
+- **`score==0` rollback now resets drifted scoring knobs** (`scorePercentile`, `rewardGate`, `hasPreviousScore`). Fixes the "purple frame" bug (`processed_sequence mean=0.27-0.46` on f62/f64 instead of 0.015). `ImageHandler.cpp:1022-1058`.
+- Adaptive cube pooling: OpenMP pragmas **commented out** pending determinism audit. Serial execution costs ~60-90 s on 45 frames. Re-enable once RNG seeding (below) validates no cross-run variance leakage.
+
+### Split gates
+- **Slab-min gap brightness** in bridge gate: gap zone split into `kGapSlabs=5` thin slabs, the darkest slab's mean is `gapBright`. Replaces flat mean. Survives pooled-cube smearing of narrow gaps. Applied in both PreFilter and final Bridge. `Frame.cpp:3581-3675`.
+- Bio gate defense-in-depth: `bio_bridge_max_valley_ratio=0.75` plus `bio_bridge_min_edge_brightness_absolute=0.07` (raised from 0.04) plus neighbor-buried / bridging checks.
+
+### Perturbation cost additions
+- **Additive Voronoi bleed penalty**: per perturb, `weight × |{ellipsoid voxels outside own snap-Voronoi territory}|`. Additive to image-L2 (does not replace it → shape-fit gradient intact). Config: `voronoi_bleed_penalty_enabled=true`, `voronoi_bleed_penalty_weight=0.5`. Gate on map fidelity via RAII `VoronoiDisableGuard` during `trySplitCellPhased` (cells[] mutates; map stale). `Frame.cpp` (`computeVoronoiBleedVoxels`).
+- **Velocity cap dropped** to 0/0 defaults (was 15 xy / 20 z). The hard cap clipped 20-27 vx/frame legit biological motion during early frames. Position-prior quadratic penalty remains and handles late-frame drift without clipping.
+
+### Birth-growth cap
+- Gated at `factor=1.8` × birth radii AND `shapeElong ≥ 1.8`. Known-permissive (cells reach 1.5× birth freely). Target for Fix C in the 2026-04-22 ablation plan (continuous log-barrier replacement).
+
+### I/O + reproducibility
+- **Checkpoint resume** moved from YAML to INI preset + positional CLI args 7/8. Scripts can now flip resume without editing `config.yaml`.
+- **Per-frame TIFF output** alongside PNG in `saveImages`: `real_tiff/`, `synth_tiff/`.
+- **`mc_rng_seed` config** (2026-04-22, defaults to 0 = random_device): when `>0` seeds the main MC RNG in `optimize()` deterministically. Thread-local RNGs (perturb samplers, signal-guided) still use `random_device` per thread — ~2% residual non-determinism, acceptable for ablation A/B comparison.
+
+### Active baseline validation
+Run `output_jihang_20260422_124756` (resume from f60 of `output_jihang_20260422_004745` with all 2026-04-22 code): 19 splits across f60-f72, 49 cells final. f62 + f64 preprocessing means at 0.016 / 0.014 (matching normal frames). Late-frame residual issues documented in `docs/plans/2026-04-22-late-frame-ablation-plan.md` — e3d03 drift + f67 split, 23001 cost-gate lockout, a5100 bloat to 1.8× birth pushing 8cbdf86d at z=224.
+
+### Known residual issues (ablation targets)
+1. Drift into empty space (no gradient pulls cells back to brightness)
+2. Bloat below the 1.8× birth-cap threshold (e3d03 at 1.5×, a5100 at 1.8×)
+3. Cost-gate lockout for genuine splits of elongating parents (23001 never caught)
+4. Opportunistic one-frame split commits with asymmetric drifts (a5100 f67)
+
+Candidate fixes C/A/B/D tracked in `docs/plans/2026-04-22-late-frame-ablation-plan.md`.
+
+---
+
+## Historical reference (2026-04-16 body — defer to block above where they disagree)
 
 ## Frame-level flow
 

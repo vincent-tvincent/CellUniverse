@@ -6,6 +6,64 @@ CellUniverse tracks 3D cells across time-lapse microscopy frames. For each frame
 
 ---
 
+## 0.4. 2026-04-22 Update Pointer (read this first)
+
+Canonical current pipeline: **`docs/pipeline.md`** (updated 2026-04-22 header block). Active changelog: **`docs/changelogs/changelogv8.md`**. Active plan: **`docs/plans/2026-04-22-late-frame-ablation-plan.md`**.
+
+Key additions since 2026-04-19 (session branch `jl_voronoi_bleed_penalty_04212026`):
+
+**Perturbation cost**
+- `voronoi_bleed_penalty_enabled: true`, `voronoi_bleed_penalty_weight: 0.5f` (`ConfigTypes.hpp`) — additive penalty on ellipsoid voxels outside own snap-Voronoi territory. Computed by `Frame::computeVoronoiBleedVoxels(cell, cellIdx)`. Added in `perturbCell` delta cost.
+- Voronoi map built once per frame (`Frame::rebuildVoronoiMap()`) from snap positions (fixed for entire frame) + rebuilt after every split accept. RAII `VoronoiDisableGuard` in `trySplitCellPhased` prevents stale-index queries during split burn-in.
+- `max_perturb_drift_xy = 0.0f`, `max_perturb_drift_z = 0.0f` (disabled defaults). Velocity cap was clipping legit 20-27 vx/frame motion in early frames — dropped; position-prior quadratic penalty handles drift resistance.
+
+**Split gates**
+- Slab-min bridge (`kGapSlabs=5`): gap zone partitioned into 5 thin slabs along split axis, the darkest slab's mean replaces legacy flat mean as `gapBright`. Survives pooled-cube smearing of narrow biological gaps. Implemented in both the per-candidate PreFilter and the final Bridge (`Frame.cpp` ~3581-3675).
+
+**Image preprocessing**
+- Score==0 rollback fix (`ImageHandler.cpp:1022-1058`): when the iterative contrast enhancer collapses the sequence to zero-contrast, rollback now ALSO resets `scorePercentile`, `rewardGate`, `hasPreviousScore` to config defaults. Fixes the "purple frame" pathology where `bestSequence` locked at an elevated-background early-iteration capture. Validated on f62/f64: `processed_sequence mean` drops from 0.27/0.46 → 0.016/0.014.
+
+**Ablation fixes (in progress, T3)**
+- `bloat_cap_barrier_weight: float = 0.0f` (T1 / Fix C, SHIPPING CANDIDATE) — continuous log-barrier per-axis growth penalty, linearly extrapolated past `bloat_cap_barrier_end`; installed per cell from `cellShapeBirth` at frame start. Added in `perturbCell` delta cost.
+- `brightness_centroid_anchor_weight: float = 0.0f` (T2 / Fix A, SHELVED 2026-04-23 after T2 / T2b failures — see `ablation/T2-fix-c-smoothed-plus-fix-a.md` + `ablation/T2b-narrowed-centroid.md`).
+- `brightness_centroid_radius_factor: float = 1.5f` — inert at weight=0.
+- `split_persistence_required_frames: int = 0` (T3 / Fix D, 2026-04-23) — gate split commits on matching candidate at previous frame. `0`/`1` disable, `2+` enable. Orthogonal to Fix A — attacks FP rejection via attempt stability. State: `CellUniverse::splitAttemptHistory` (map keyed by parent cell name). Winner daughter positions surfaced from `Frame::trySplitCellPhased` via new optional `SplitWinnerInfo *winnerOut` out-param.
+- `split_persistence_position_tolerance_vx: float = 10.0f` — max Euclidean distance (voxels) between matched daughter positions across the two pairings.
+- `split_persistence_cost_tolerance_ratio: float = 0.5f` — max relative change in costDiff between consecutive attempts.
+
+**Reproducibility + I/O**
+- `mc_rng_seed: int = 0` (`SimulationConfig`, 2026-04-22). `0` = random_device (production); `>0` = deterministic seed for main MC RNG in `optimize()`. Thread-local RNGs keep random_device (small residual variance — acceptable for ablation A/B).
+- `resume_from` + `resume_source_dir` moved from `config.yaml` to INI preset + CLI positional args 7/8. Added to `run_celluniverse.sh`. Binary's `argv[resumeFrom]` / `argv[resumeSourceDir]` override YAML when present.
+- Checkpoint save/load (`CellUniverse::saveCheckpoint(N)` / `loadCheckpoint(N)`) — plain-text state per frame in `{output}/checkpoints/frame_{N:03d}.txt`. Resume loads at `{source}/checkpoints/frame_{resume_from-1:03d}.txt`.
+- Per-frame TIFF output added alongside PNG in `saveImages` (`real_tiff/{N}.tiff`, `synth_tiff/{N}.tiff`).
+
+**Known residual (ablation targets)**
+- Drift into empty space (cells with no bright signal under them at f71)
+- Bloat below 1.8× birth-cap threshold (e3d03 at 1.5×, a5100 at 1.8×)
+- Cost-gate lockout of genuine splits on elongating parents (23001 never caught across f66-f71)
+- Opportunistic single-frame splits with asymmetric drifts (a5100 at f67 with drifts 33/12)
+
+Ablation protocol: see `C++/docs/plans/2026-04-22-late-frame-ablation-plan.md`.
+
+**2026-04-24 additions (CC split trigger + image-aware bury overrides)**
+- `simulation.use_cc_split_trigger`, `cc_split_bright_threshold`,
+  `cc_split_min_component_volume` (Change 25). CC trigger block in
+  `Frame::trySplitCellPhased` — labels connected bright components
+  in parent's Voronoi territory via BFS flood; K ≥ 2 activates a "cc2"
+  primary axis with pre-computed daughter centroids. Falls back to
+  kmeans2/PCA when K < 2.
+- `prob.bio_buried_image_check_enabled`, `bio_buried_bright_valley_threshold`,
+  `bio_buried_birth_envelope_factor` (Fix H + H2). Two override paths in
+  `bioCheckDaughters` for the geometric `d_buried_in_X` reject:
+  (H) dim-valley check between daughter and `X.center` along the real
+  image; (H2) distance-to-X.center exceeds `factor × max(X.birth_radii)`.
+  Either fires → override the reject (X is bloated past its biological
+  core, daughter is on different biology).
+- Watershed territory and shape-fit hard cap from earlier 2026-04-24
+  iterations were tested and removed; see Change 26 for the post-mortem.
+
+---
+
 ## 0.3. 2026-04-16 Update Pointer (read this first)
 
 Canonical current pipeline: **`docs/pipeline.md`**. Active changelog: **`docs/changelogs/changelogv6.md`**.

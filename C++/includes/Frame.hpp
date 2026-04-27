@@ -41,18 +41,6 @@ struct BoundingBox3D
 class Frame
 {
 public:
-    // Signal center descriptor used by ImageHandler's signal-center
-    // localization (`localizeSignalCentersInStack`). Defined here as a
-    // public nested type so ImageHandler.cpp can compile without coupling
-    // to the rest of the signal-guided perturbation feature (which is
-    // currently unused in our pipeline). Kept for future re-enablement.
-    struct SignalCenter {
-        cv::Point3f position{0.0f, 0.0f, 0.0f};
-        float brightness = 0.0f;
-        float sigmaScale = 1.0f;
-        int boxes = 0;
-    };
-
     // Single-pipeline constructor — the analysis-frame / dual-pipeline
     // variant was removed on 2026-04-11 when the new ImageHandler preprocessing
     // replaced the sigmoid-first / raw-analysis split.
@@ -86,8 +74,7 @@ public:
     // Cost and optimization
     Cost calculateCost(const std::vector<cv::Mat> &synthFrame);
     size_t length() const;
-    CostCallbackPair perturbCell(size_t index, float overlapWeight = 1000.0f,
-                                 bool useSignalGuidance = false);
+    CostCallbackPair perturbCell(size_t index, float overlapWeight = 1000.0f);
     double computeOverlapPenalty(float weight) const;
     double computeOverlapForCell(size_t cellIdx, float weight) const;
 
@@ -178,6 +165,27 @@ public:
         const ClaimSet &otherCellsClaimSets,
         bool useSnapshotDirection,
         const ProbabilityConfig &probConfig);
+
+    // 2026-04-25 (Round 3 Stage C-1): bright local-maxima detector.
+    // Returns voxels in [center ± window] whose brightness exceeds:
+    //   (a) `min_brightness` (absolute floor, post-preprocessing scale),
+    //   (b) all 6-connected neighbors' brightness (strict local max),
+    // sorted descending by brightness, with non-max suppression: when two
+    // maxima are within `min_separation` voxels (Euclidean), the dimmer
+    // is dropped. The result is the image-derived list of "where biology
+    // says cells live" inside the window — a single biological cell
+    // produces one local max; a dividing cell produces two; a cell
+    // surrounded by 2-3 distinct neighbors produces 3-4. Used by Stage C-2
+    // (split seeding) and Stage C-3 (position snap correction).
+    struct LocalMax {
+        cv::Point3f position{0.0f, 0.0f, 0.0f};
+        float brightness = 0.0f;
+    };
+    std::vector<LocalMax> findLocalMaxima(
+        const cv::Point3f &center,
+        float window_radius,
+        float min_brightness,
+        int min_separation = 3) const;
 
     // Frame-start pre-pass helper. For a pre-classified cell, gathers
     // bright pixels in a snapshot-centered bounding box, Voronoi-filters
@@ -272,10 +280,6 @@ public:
     }
     void setBackgroundColor(float backgroundColor) { _backgroundValue = backgroundColor; }
     float getBackgroundValue() const { return _backgroundValue; }
-    // Signal centers for signal-guided perturbation (yp ffc1917). Populated
-    // once per frame from CellUniverse::optimize via localizeSignalCentersForFrame.
-    void setSignalCenters(std::vector<SignalCenter> centers) { _signalCenters = std::move(centers); }
-    const std::vector<SignalCenter>& getSignalCenters() const { return _signalCenters; }
     void setMeanCellBrightness(float mean) { _meanCellBrightness = mean; }
     // Bbox-cost mode: perturb/split use a per-cell bbox with Voronoi
     // neighbor exclusion instead of full-image L2. Set at frame start
@@ -348,9 +352,6 @@ private:
     std::string imageName;
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
-    // Signal centers (yp ffc1917) — bright clusters in the real image that
-    // signal-guided perturbation snaps cells onto.
-    std::vector<SignalCenter> _signalCenters;
     double _currentCost = -1.0; // cached L2 image cost of _synthFrame
     // Per-slice L2 contribution of _synthFrame to the total image cost. Kept
     // in sync with _synthFrame / _currentCost so that a perturbation touching

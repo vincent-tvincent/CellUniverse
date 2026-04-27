@@ -403,6 +403,103 @@ std::size_t Frame::computeVoronoiBleedVoxels(const Ellipsoid &cell,
     return static_cast<std::size_t>(bleed);
 }
 
+// 2026-04-25 (Round 3 Stage C-1). Bright local-maxima detection in a 3D
+// window. Voxel is a local max if its brightness > all 6 neighbors' (strict)
+// AND > min_brightness floor. Output: maxima sorted descending by
+// brightness, with NMS suppressing dimmer maxima within min_separation
+// of a brighter one. Image-grounded: number of distinct local maxima ≈
+// number of biological cells visible in the window.
+std::vector<Frame::LocalMax> Frame::findLocalMaxima(
+    const cv::Point3f &center,
+    float window_radius,
+    float min_brightness,
+    int min_separation) const
+{
+    std::vector<LocalMax> result;
+    if (_realFrame.empty() || window_radius <= 0.0f) return result;
+
+    const int Z = static_cast<int>(_realFrame.size());
+    const int H = _realFrame[0].rows;
+    const int W = _realFrame[0].cols;
+    if (H <= 2 || W <= 2 || Z <= 2) return result;
+
+    const int xMin = std::max(1, static_cast<int>(std::floor(center.x - window_radius)));
+    const int xMax = std::min(W - 2, static_cast<int>(std::ceil(center.x + window_radius)));
+    const int yMin = std::max(1, static_cast<int>(std::floor(center.y - window_radius)));
+    const int yMax = std::min(H - 2, static_cast<int>(std::ceil(center.y + window_radius)));
+    const int zMin = std::max(1, static_cast<int>(std::floor(center.z - window_radius)));
+    const int zMax = std::min(Z - 2, static_cast<int>(std::ceil(center.z + window_radius)));
+    if (xMin > xMax || yMin > yMax || zMin > zMax) return result;
+
+    const float windowSq = window_radius * window_radius;
+
+    // Gather candidate maxima.
+    std::vector<LocalMax> candidates;
+    for (int z = zMin; z <= zMax; ++z) {
+        const cv::Mat &slice  = _realFrame[z];
+        const cv::Mat &sliceN = _realFrame[z - 1];
+        const cv::Mat &sliceP = _realFrame[z + 1];
+        if (slice.type() != CV_32F || slice.empty()) continue;
+        for (int y = yMin; y <= yMax; ++y) {
+            const float *row  = slice.ptr<float>(y);
+            const float *rowN = slice.ptr<float>(y - 1);
+            const float *rowP = slice.ptr<float>(y + 1);
+            const float *rowZN = sliceN.ptr<float>(y);
+            const float *rowZP = sliceP.ptr<float>(y);
+            for (int x = xMin; x <= xMax; ++x) {
+                const float v = row[x];
+                if (v <= min_brightness) continue;
+                const float dx = static_cast<float>(x) - center.x;
+                const float dy = static_cast<float>(y) - center.y;
+                const float dz = static_cast<float>(z) - center.z;
+                if (dx*dx + dy*dy + dz*dz > windowSq) continue;
+                // Local max in 6-connected neighborhood. Use >= to admit
+                // plateau peaks (post-preprocessing blur often produces
+                // flat-topped maxima where adjacent voxels are equal).
+                // Plateaus reduce to a single peak via the NMS pass below
+                // (min_separation suppresses dimmer plateau voxels).
+                if (v < row[x - 1] || v < row[x + 1]) continue;
+                if (v < rowN[x]    || v < rowP[x])    continue;
+                if (v < rowZN[x]   || v < rowZP[x])   continue;
+                // Reject true flats: at least ONE neighbor strictly less.
+                const float nMin = std::min({row[x - 1], row[x + 1],
+                                              rowN[x], rowP[x],
+                                              rowZN[x], rowZP[x]});
+                if (v <= nMin) continue;
+                candidates.push_back({cv::Point3f(static_cast<float>(x),
+                                                  static_cast<float>(y),
+                                                  static_cast<float>(z)),
+                                       v});
+            }
+        }
+    }
+
+    // Sort descending by brightness.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const LocalMax &a, const LocalMax &b) {
+                  return a.brightness > b.brightness;
+              });
+
+    // Non-max suppression by Euclidean distance.
+    const float minSepSq = static_cast<float>(min_separation) *
+                            static_cast<float>(min_separation);
+    result.reserve(candidates.size());
+    for (const auto &cand : candidates) {
+        bool suppress = false;
+        for (const auto &kept : result) {
+            const float ddx = cand.position.x - kept.position.x;
+            const float ddy = cand.position.y - kept.position.y;
+            const float ddz = cand.position.z - kept.position.z;
+            if (ddx*ddx + ddy*ddy + ddz*ddz < minSepSq) {
+                suppress = true;
+                break;
+            }
+        }
+        if (!suppress) result.push_back(cand);
+    }
+    return result;
+}
+
 void Frame::rebuildVoronoiMap()
 {
     if (!_voronoiEnabled || _realFrame.empty() || cells.empty()) {
@@ -722,7 +819,7 @@ size_t Frame::length() const
     return cells.size();
 }
 
-CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight, bool useSignalGuidance)
+CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight)
 {
     if (index >= cells.size()) {
         return {0.0, [](bool) {}};
@@ -757,50 +854,6 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight, bool useS
         posScale = maxR / refR;
     }
     cells[index] = cells[index].getPerturbedCell(&perturbDirections, posScale);
-
-    // Signal-guided perturbation (yp ffc1917): when enabled, override the
-    // standard random perturbation with a teleport toward the nearest
-    // bright signal center in the real image. Used to escape local optima
-    // where the cell is stuck on a wrong location (cells that should be on
-    // bright cluster A but settled on dimmer cluster B). Sigma scales with
-    // the center's brightness via signal_guided_min_sigma_scale +
-    // signal_guided_sigma_range_multiplier.
-    if (useSignalGuidance && !_signalCenters.empty() && !_realFrame.empty()) {
-        const cv::Point3f oldPos(oldCell.getX(), oldCell.getY(), oldCell.getZ());
-        const SignalCenter *nearestCenter = nullptr;
-        float bestDist = std::numeric_limits<float>::max();
-        for (const auto &center : _signalCenters) {
-            const float dist = static_cast<float>(cv::norm(center.position - oldPos));
-            if (dist < bestDist) {
-                bestDist = dist;
-                nearestCenter = &center;
-            }
-        }
-        if (nearestCenter != nullptr) {
-            thread_local std::mt19937 gen{std::random_device{}()};
-            const float sigmaScale = std::max(
-                simulationConfig.signal_guided_min_sigma_scale,
-                nearestCenter->sigmaScale);
-            const float sigmaRangeMultiplier = std::max(
-                1e-3f, simulationConfig.signal_guided_sigma_range_multiplier);
-            std::normal_distribution<float> dx(
-                nearestCenter->position.x,
-                std::max(1e-3f, Ellipsoid::cellConfig.x.sigma * sigmaScale * sigmaRangeMultiplier));
-            std::normal_distribution<float> dy(
-                nearestCenter->position.y,
-                std::max(1e-3f, Ellipsoid::cellConfig.y.sigma * sigmaScale * sigmaRangeMultiplier));
-            std::normal_distribution<float> dz(
-                nearestCenter->position.z,
-                std::max(1e-3f, Ellipsoid::cellConfig.z.sigma * sigmaScale * sigmaRangeMultiplier));
-            const float maxX = static_cast<float>(_realFrame[0].cols - 1);
-            const float maxY = static_cast<float>(_realFrame[0].rows - 1);
-            const float maxZ = static_cast<float>(_realFrame.size() - 1);
-            cells[index].setPosition(
-                std::clamp(dx(gen), 0.0f, maxX),
-                std::clamp(dy(gen), 0.0f, maxY),
-                std::clamp(dz(gen), 0.0f, maxZ));
-        }
-    }
 
     // Per-frame velocity cap: reject any perturbation that moves the cell
     // further than _maxPerturbDrift{XY,Z} from its snap position. Guards
@@ -1627,26 +1680,39 @@ bool bioCheckDaughters(
     }
 
     // 4. Neighbor-bridging check: reject if either daughter's center is
-    // closer to an existing neighbor than to its sibling. This catches
-    // false splits where the cell stretches to a neighbor's bright blob
-    // and the bridge gate sees a valley between them — the "split" is
+    // closer to an existing neighbor than `factor × sibling_distance`.
+    // Catches false splits where the cell stretches to a neighbor's bright
+    // blob and the bridge gate sees a valley between them — the "split" is
     // really the cell covering two separate cells, not dividing.
+    //
+    // 2026-04-25 (Round 2 Stage B): factor 0.5 → 0.6 (configurable). Audit
+    // of e3d03 f28 false split in linux_failed: d2 at (76.97,220.71,87.23)
+    // was 31.7 vx from 12345:11 at (79.33,239.29,112.86) vs 60.7 vx from
+    // sibling. At factor 0.5 the threshold was 30.4 vx → 31.7 just barely
+    // passed. Bumping to 0.6 makes threshold 36.4 → catches this case.
+    // Legitimate splits observed in run-7 had daughters >0.7×sibling from
+    // any neighbor, so 0.6 leaves margin without rejecting valid divisions.
     const cv::Point3f d1Pos(daughter1.getX(), daughter1.getY(), daughter1.getZ());
     const cv::Point3f d2Pos(daughter2.getX(), daughter2.getY(), daughter2.getZ());
     const float siblingDist = static_cast<float>(cv::norm(d2Pos - d1Pos));
-    for (size_t i = 0; i < allCells.size(); ++i) {
-        if (i == d1Idx || i == d2Idx) continue;
-        const Ellipsoid &other = allCells[i];
-        const cv::Point3f oPos(other.getX(), other.getY(), other.getZ());
-        const float d1ToOther = static_cast<float>(cv::norm(oPos - d1Pos));
-        const float d2ToOther = static_cast<float>(cv::norm(oPos - d2Pos));
-        if (d1ToOther < siblingDist * 0.5f) {
-            reasonOut = "d1_bridging_to_" + other.getName();
-            return false;
-        }
-        if (d2ToOther < siblingDist * 0.5f) {
-            reasonOut = "d2_bridging_to_" + other.getName();
-            return false;
+    const float bridgingFactor =
+        std::max(0.0f, probConfig.bio_neighbor_bridging_factor);
+    if (bridgingFactor > 0.0f) {
+        const float bridgingThresh = siblingDist * bridgingFactor;
+        for (size_t i = 0; i < allCells.size(); ++i) {
+            if (i == d1Idx || i == d2Idx) continue;
+            const Ellipsoid &other = allCells[i];
+            const cv::Point3f oPos(other.getX(), other.getY(), other.getZ());
+            const float d1ToOther = static_cast<float>(cv::norm(oPos - d1Pos));
+            const float d2ToOther = static_cast<float>(cv::norm(oPos - d2Pos));
+            if (d1ToOther < bridgingThresh) {
+                reasonOut = "d1_bridging_to_" + other.getName();
+                return false;
+            }
+            if (d2ToOther < bridgingThresh) {
+                reasonOut = "d2_bridging_to_" + other.getName();
+                return false;
+            }
         }
     }
 
@@ -2705,6 +2771,105 @@ CostCallbackPair Frame::trySplitCellPhased(
     std::vector<cv::Point3f> primaryDirs{axes3[shortIdx]};
     std::vector<std::string> primaryNames{names3[shortIdx]};
 
+    // 2026-04-25 (Round 3 Stage C-2): local-maxima split seeding.
+    // Find bright local maxima in a window around the parent's snapshot
+    // position. If ≥2 maxima are found, the brightest two ARE the daughter
+    // seeds — no PCA, no projection, no statistics. The image itself says
+    // "there are two cells here, and they're at these locations." This
+    // catches the case-1 / case-2 failure mode (parent's single ellipsoid
+    // spans two biological blobs) topologically: two separate brightness
+    // peaks = two cells, full stop.
+    //
+    // The "lmaxima" axis is inserted at the FRONT of primaryDirs so it
+    // gets candidate-cap priority. Its centroids are stored in
+    // `lmaximaD1`/`lmaximaD2` and consumed in the AxisPlacement loop
+    // below (override path: skip centroidsAlongAxis projection, use the
+    // maxima as direct daughter centroids).
+    //
+    // Window radius: 1.5× snapshot's largest semi-axis (covers the
+    // expected daughter span: each daughter sits ~0.5×srcMajor from
+    // the parent center, so 1.5× covers the full split + small margin).
+    // Threshold: probConfig.local_maxima_brightness_threshold (typical
+    // 0.15 — same as the post-preprocessing background+0.1 standard).
+    // Min separation: 0.4 × min(srcMinor, srcB) — biological cells in
+    // the embryo are at least ~0.4 of a small radius apart at division.
+    bool lmaximaValid = false;
+    cv::Point3f lmaximaD1{0,0,0};
+    cv::Point3f lmaximaD2{0,0,0};
+    if (probConfig.local_maxima_split_seeding_enabled) {
+        const float wRadius =
+            std::max(probConfig.local_maxima_split_window_radius_factor, 0.5f) *
+            std::max({srcMajor, srcB, srcMinor});
+        const float minBright = probConfig.local_maxima_brightness_threshold;
+        const int minSep = std::max(2, static_cast<int>(
+            std::round(0.4f * std::min(srcMinor, srcB))));
+        auto maxima = findLocalMaxima(
+            snapshot.position, wRadius, minBright, minSep);
+        std::cout << "  [Split LMaxima] " << parentName
+                  << " window=" << wRadius
+                  << " minBright=" << minBright
+                  << " minSep=" << minSep
+                  << " found=" << maxima.size();
+        if (!maxima.empty()) {
+            std::cout << " top=("
+                      << maxima[0].position.x << ","
+                      << maxima[0].position.y << ","
+                      << maxima[0].position.z << "@"
+                      << maxima[0].brightness << ")";
+            if (maxima.size() >= 2) {
+                std::cout << " 2nd=("
+                          << maxima[1].position.x << ","
+                          << maxima[1].position.y << ","
+                          << maxima[1].position.z << "@"
+                          << maxima[1].brightness << ")";
+            }
+        }
+        std::cout << std::endl;
+        if (maxima.size() >= 2) {
+            // Constrain: both maxima must be within the parent's birth
+            // ellipsoid envelope. Otherwise the candidate seed is on a
+            // neighbor's biology — exactly what we want to avoid (the
+            // e3d03 f28 false-positive class). Use snapshot maxR as the
+            // envelope (it's ~the parent's radius).
+            const float envelopeR =
+                std::max({srcMajor, srcB, srcMinor}) *
+                std::max(0.5f, probConfig.local_maxima_split_envelope_factor);
+            const float envSq = envelopeR * envelopeR;
+            const cv::Point3f &m0 = maxima[0].position;
+            const cv::Point3f &m1 = maxima[1].position;
+            const float d0sq = (m0.x - snapshot.position.x) * (m0.x - snapshot.position.x)
+                              + (m0.y - snapshot.position.y) * (m0.y - snapshot.position.y)
+                              + (m0.z - snapshot.position.z) * (m0.z - snapshot.position.z);
+            const float d1sq = (m1.x - snapshot.position.x) * (m1.x - snapshot.position.x)
+                              + (m1.y - snapshot.position.y) * (m1.y - snapshot.position.y)
+                              + (m1.z - snapshot.position.z) * (m1.z - snapshot.position.z);
+            if (d0sq <= envSq && d1sq <= envSq) {
+                const cv::Point3f diff = m1 - m0;
+                const double diffNorm = cv::norm(diff);
+                if (diffNorm > 1e-3) {
+                    const cv::Point3f lmaxDir(
+                        static_cast<float>(diff.x / diffNorm),
+                        static_cast<float>(diff.y / diffNorm),
+                        static_cast<float>(diff.z / diffNorm));
+                    lmaximaValid = true;
+                    lmaximaD1 = m0;
+                    lmaximaD2 = m1;
+                    primaryDirs.insert(primaryDirs.begin(), lmaxDir);
+                    primaryNames.insert(primaryNames.begin(), "lmaxima");
+                    std::cout << "  [Split LMaxima Accepted] " << parentName
+                              << " sep=" << diffNorm
+                              << " envelope=" << envelopeR
+                              << std::endl;
+                }
+            } else {
+                std::cout << "  [Split LMaxima Reject] " << parentName
+                          << " maxima outside birth envelope (envR=" << envelopeR
+                          << " d0=" << std::sqrt(d0sq)
+                          << " d1=" << std::sqrt(d1sq) << ")" << std::endl;
+            }
+        }
+    }
+
     // Add the image-PCA direction (from pre-pass, supplied via
     // snapshot.splitAxisDir) as an additional primary axis. For near-round
     // snap cells, parent-rotation axes are arbitrary — pre-pass finds the
@@ -2795,15 +2960,28 @@ CostCallbackPair Frame::trySplitCellPhased(
     // Fallback separation: use the minimum radius as a conservative default.
     const float fallbackSep = std::min({rA, rB, rC});
     for (size_t i = 0; i < nDirs; ++i) {
-        axisPlace[i].valid = centroidsAlongAxis(
-            pixels, primaryDirs[i], axisPlace[i].d1, axisPlace[i].d2);
-        if (axisPlace[i].valid) {
+        // 2026-04-25 (Round 3 Stage C-2): for the "lmaxima" axis, use the
+        // pre-computed local-maxima positions directly as daughter centroids
+        // instead of projecting pixels onto the axis. The image already
+        // told us where the daughters are; no projection needed.
+        if (lmaximaValid && primaryNames[i] == "lmaxima") {
+            axisPlace[i].d1 = lmaximaD1;
+            axisPlace[i].d2 = lmaximaD2;
             axisPlace[i].separation = static_cast<float>(
-                cv::norm(axisPlace[i].d1 - axisPlace[i].d2));
-            axisPlace[i].midpoint = 0.5f * (axisPlace[i].d1 + axisPlace[i].d2);
+                cv::norm(lmaximaD1 - lmaximaD2));
+            axisPlace[i].midpoint = 0.5f * (lmaximaD1 + lmaximaD2);
+            axisPlace[i].valid = true;
         } else {
-            axisPlace[i].separation = fallbackSep;
-            axisPlace[i].midpoint = parentCenter;
+            axisPlace[i].valid = centroidsAlongAxis(
+                pixels, primaryDirs[i], axisPlace[i].d1, axisPlace[i].d2);
+            if (axisPlace[i].valid) {
+                axisPlace[i].separation = static_cast<float>(
+                    cv::norm(axisPlace[i].d1 - axisPlace[i].d2));
+                axisPlace[i].midpoint = 0.5f * (axisPlace[i].d1 + axisPlace[i].d2);
+            } else {
+                axisPlace[i].separation = fallbackSep;
+                axisPlace[i].midpoint = parentCenter;
+            }
         }
         std::cout << "  [Split AxisPlace] " << parentName
                   << " axis=" << primaryNames[i]
@@ -3278,6 +3456,11 @@ CostCallbackPair Frame::trySplitCellPhased(
     // daughters can settle before bio/cost gates fire. This runs on the
     // best candidate's state (reinstalled), and the post-refine state is
     // re-captured as bestCells / bestSynth / etc.
+    // Captured for the post-cost-gate bridge-strength override (2026-04-26).
+    // Initialized to "no refinement happened" sentinel values that the
+    // override treats conservatively (large drifts → override won't fire).
+    float refineDrift1Captured = std::numeric_limits<float>::infinity();
+    float refineDrift2Captured = std::numeric_limits<float>::infinity();
     const int refineIters = std::max(0, probConfig.split_final_refine_iterations);
     if (refineIters > 0) {
         // Reinstall the winning candidate's state.
@@ -3458,14 +3641,16 @@ CostCallbackPair Frame::trySplitCellPhased(
         const float builtMajor = volumeScale * srcMajor;
         const float builtB     = volumeScale * srcB;
         const float builtMinor = volumeScale * srcMinor;
+        refineDrift1Captured = static_cast<float>(cv::norm(postRefineD1 - preRefineD1));
+        refineDrift2Captured = static_cast<float>(cv::norm(postRefineD2 - preRefineD2));
         std::cout << "  [Split Refine] " << parentName
                   << " iters=" << refineIters
                   << " accepts=" << refineAccepts
                   << " preTotal=" << preRefineTotal
                   << " postTotal=" << bestTotal
                   << " delta=" << (bestTotal - preRefineTotal)
-                  << " refineDrift1=" << cv::norm(postRefineD1 - preRefineD1)
-                  << " refineDrift2=" << cv::norm(postRefineD2 - preRefineD2)
+                  << " refineDrift1=" << refineDrift1Captured
+                  << " refineDrift2=" << refineDrift2Captured
                   << " d1=(" << postRefineD1.x << "," << postRefineD1.y << "," << postRefineD1.z << ")"
                   << " d2=(" << postRefineD2.x << "," << postRefineD2.y << "," << postRefineD2.z << ")"
                   << " builtR=(" << builtMajor << "," << builtB << "," << builtMinor << ")"
@@ -3499,11 +3684,47 @@ CostCallbackPair Frame::trySplitCellPhased(
     const Ellipsoid &bestD1 = bestCells[d1IdxBest];
     const Ellipsoid &bestD2 = bestCells[d2IdxBest];
 
-    // Drift from seed (diagnostic only, no rejection gate).
+    // Drift from seed.
     const float drift1 = static_cast<float>(cv::norm(
         cv::Point3f(bestD1.getX(), bestD1.getY(), bestD1.getZ()) - bestSeedD1));
     const float drift2 = static_cast<float>(cv::norm(
         cv::Point3f(bestD2.getX(), bestD2.getY(), bestD2.getZ()) - bestSeedD2));
+
+    // 2026-04-25 (Round 2 Stage A): daughter-runaway gate. Reject if a
+    // daughter walked further from its seed than the parent's largest
+    // semi-axis during refit/refine. A legitimate daughter cannot land
+    // more than ~one parent radius away from its seed — it would be
+    // outside the parent's biological volume entirely. The classic
+    // false-positive pattern (e3d03 f28 in linux_failed: d2 drift=44 vx
+    // from seed at (95,251,61) ending at (77,221,87)) is the daughter's
+    // PCA refit grabbing a NEIGHBOR cell's bright mass and centroiding
+    // there. Cap = max(srcMajor, srcB) — typically ~30-45 vx for the
+    // embryo cells; legitimate drifts observed up to ~25 vx, false
+    // positives observed at 35-50 vx, so this cap separates them
+    // cleanly. Configurable via probConfig.split_daughter_max_drift_radius_factor
+    // (default 1.0; set to 0 to disable the gate).
+    {
+        const float driftCapRadii = std::max(srcMajor, srcB);
+        const float driftCapFactor =
+            std::max(0.0f, probConfig.split_daughter_max_drift_radius_factor);
+        const float driftCap = driftCapRadii * driftCapFactor;
+        if (driftCapFactor > 0.0f && driftCap > 1e-3f &&
+            (drift1 > driftCap || drift2 > driftCap)) {
+            std::cout << "[Split Reject runaway] " << parentName
+                      << " drift1=" << drift1
+                      << " drift2=" << drift2
+                      << " driftCap=" << driftCap
+                      << " (radii=" << driftCapRadii
+                      << " × factor=" << driftCapFactor << ")"
+                      << " bestSeedD1=(" << bestSeedD1.x << "," << bestSeedD1.y << "," << bestSeedD1.z << ")"
+                      << " bestSeedD2=(" << bestSeedD2.x << "," << bestSeedD2.y << "," << bestSeedD2.z << ")"
+                      << " bestD1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
+                      << " bestD2=(" << bestD2.getX() << "," << bestD2.getY() << "," << bestD2.getZ() << ")"
+                      << std::endl;
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+    }
 
     // Daughter midpoint (shared by the bridge gate below for axis
     // projection and diagnostic logging). Previously also used by a
@@ -3518,6 +3739,12 @@ CostCallbackPair Frame::trySplitCellPhased(
         0.5f * (bestD1.getX() + bestD2.getX()),
         0.5f * (bestD1.getY() + bestD2.getY()),
         0.5f * (bestD1.getZ() + bestD2.getZ()));
+
+    // Captured for the post-cost-gate bridge-strength override (2026-04-26).
+    // Default 1.0 → "no valley" → override stays inert when the bridge gate
+    // didn't run (insufficient bright pixels along the axis).
+    float valleyFromBrightCaptured = 1.0f;
+    bool bridgeGateRan = false;
 
     // 5a''. Bridge brightness gate — project the Voronoi-filtered bright
     // pixels (the same set PCA used) onto the daughter split axis. Real
@@ -3753,6 +3980,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             const float valleyFromBright = (brighterEdge > 1e-6f)
                 ? (gapBright / brighterEdge)
                 : 1.0f;
+            valleyFromBrightCaptured = valleyFromBright;
+            bridgeGateRan = (edgeCount > 0);
 
             std::cout << "  [Split Bridge] " << parentName
                       << " axisLen=" << axisLen
@@ -3870,23 +4099,68 @@ CostCallbackPair Frame::trySplitCellPhased(
         static_cast<double>(probConfig.split_cost_fraction) * baselineImageCost);
 
     if (costDiff >= -adaptiveThreshold) {
-        std::cout << "[Split Reject cost] " << parentName
-                  << " diff=" << costDiff
-                  << " mode=" << (_useBboxCost ? "bbox" : "full")
-                  << " threshold=" << -adaptiveThreshold
-                  << " (fixed=" << probConfig.split_cost
-                  << " frac=" << probConfig.split_cost_fraction << "×" << baselineImageCost << ")"
-                  << " bestIdx=" << bestIdx
-                  << " bestLabel=" << bestLabel
-                  << " d1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
-                  << " r1=(" << bestD1.getARadius() << "," << bestD1.getBRadius() << "," << bestD1.getCRadius() << ")"
-                  << " drift1=" << drift1
-                  << " d2=(" << bestD2.getX() << "," << bestD2.getY() << "," << bestD2.getZ() << ")"
-                  << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
-                  << " drift2=" << drift2
-                  << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        // Bridge-strength cost override (2026-04-26):
+        // The proportional cost threshold (split_cost_fraction × baseline)
+        // grows with parent volume and can exceed the cost reduction that a
+        // legitimate split achieves on a large/bloated cell. When the bridge
+        // gate has clear evidence of a real valley AND the daughter refit
+        // converged tightly AND there's a meaningful absolute cost win,
+        // accept the split despite missing the proportional threshold.
+        //
+        // All three signals together: bridge says "two distinct biology
+        // bodies", refit says "the daughters settle on stable positions",
+        // cost says "the candidate is better than parent by a real margin".
+        const float vrLimit =
+            probConfig.split_bridge_strong_cost_override_valley_max;
+        const float driftSumLimit =
+            probConfig.split_bridge_strong_cost_override_max_refine_drift_sum;
+        const double absCostMin = static_cast<double>(
+            probConfig.split_bridge_strong_cost_override_min_abs_cost_diff);
+        const float refineDriftSum = refineDrift1Captured + refineDrift2Captured;
+        const bool overrideEnabled = (vrLimit > 0.0f) && (driftSumLimit > 0.0f) &&
+                                     (absCostMin > 0.0);
+        const bool bridgeStrong = bridgeGateRan &&
+                                  (valleyFromBrightCaptured < vrLimit);
+        const bool refitTight = (refineDriftSum < driftSumLimit);
+        const bool costMeaningful = (costDiff < -absCostMin);
+        if (overrideEnabled && bridgeStrong && refitTight && costMeaningful) {
+            std::cout << "[Split Override cost] " << parentName
+                      << " diff=" << costDiff
+                      << " threshold=" << -adaptiveThreshold
+                      << " valleyFromBright=" << valleyFromBrightCaptured
+                      << " (limit<" << vrLimit << ")"
+                      << " refineDriftSum=" << refineDriftSum
+                      << " (limit<" << driftSumLimit << ")"
+                      << " absCostMin=" << absCostMin
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << std::endl;
+            // Fall through to accept path below.
+        } else {
+            std::cout << "[Split Reject cost] " << parentName
+                      << " diff=" << costDiff
+                      << " mode=" << (_useBboxCost ? "bbox" : "full")
+                      << " threshold=" << -adaptiveThreshold
+                      << " (fixed=" << probConfig.split_cost
+                      << " frac=" << probConfig.split_cost_fraction << "×" << baselineImageCost << ")"
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << " d1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
+                      << " r1=(" << bestD1.getARadius() << "," << bestD1.getBRadius() << "," << bestD1.getCRadius() << ")"
+                      << " drift1=" << drift1
+                      << " d2=(" << bestD2.getX() << "," << bestD2.getY() << "," << bestD2.getZ() << ")"
+                      << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
+                      << " drift2=" << drift2
+                      << " override=" << (overrideEnabled ? "enabled" : "disabled")
+                      << " bridgeStrong=" << bridgeStrong
+                      << " refitTight=" << refitTight
+                      << " costMeaningful=" << costMeaningful
+                      << " valleyFromBright=" << valleyFromBrightCaptured
+                      << " refineDriftSum=" << refineDriftSum
+                      << std::endl;
+            restoreLiveParent();
+            return {0.0, noop};
+        }
     }
 
     // Accept: install the best candidate state. The callback applies on

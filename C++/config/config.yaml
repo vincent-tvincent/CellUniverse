@@ -233,17 +233,14 @@ cell:
 # Image preprocessing pipeline — iterative contrast enhancer ported from
 # scripts/image_processor_clean.py. No sigmoid.
 simulation:
-  # 2026-04-19: 500 → 150. With yp's stronger preprocessing + signal-guided
-  # perturbation, fewer iterations are needed to converge. Halves run time.
-  # NOTE: iterations_per_cell is the FALLBACK when both iter buckets below
-  # are < 0. With signal-guided design (yp ffc1917), per-frame iter count
-  # is signal_guided_iterations_per_cell or random_iterations_per_cell.
+  # Per-cell Monte Carlo iteration budget. Total per-frame iterations =
+  # iterations_per_cell × cell_count. Set random_iterations_per_cell to
+  # override (legacy field; -1 falls back to iterations_per_cell).
   iterations_per_cell: 500
-  # Signal-guided perturbation iter buckets (yp ffc1917). Each frame uses
-  # ONE of these depending on whether signal-guided was activated for that
-  # frame (centers >= prevCellCount). Set to -1 to fall back to
-  # iterations_per_cell. yp default 100 each.
-  signal_guided_iterations_per_cell: 100
+  # 2026-04-25 (Round 1b cleanup): signal_guided_iterations_per_cell removed
+  # along with the signal-guided perturbation feature. Only random/standard
+  # iter count remains; field kept in code for backward-compat parsing but
+  # no longer affects the perturb path.
   random_iterations_per_cell: 150
   z_scaling: 7
   blur_sigma: 0.0
@@ -383,28 +380,24 @@ simulation:
   # 0.03 = just above typical background noise (~0.01-0.02).
   asymmetric_cost_threshold: 0.03
 
-  # Signal-guided perturbation (yp ffc1917). Detects bright clusters in the
-  # real image and uses them as teleport targets in perturbCell — helps cells
-  # stuck on local optima jump to the right bright signal. Sigma scales with
-  # cluster brightness via signal_guided_min_sigma_scale +
-  # signal_guided_sigma_range_multiplier.
-  # 2026-04-19: temporarily disabled to isolate PCA shape revert effect.
-  # When false, useSignalGuidanceThisFrame is always false → all frames use
-  # random_iterations_per_cell + pure-random perturbation.
-  signal_guided_position_enabled: false
-  # Box size (relative to max cell diameter / 3). Smaller = more boxes,
-  # finer-grain clusters. yp default 0.4.
-  signal_guided_box_size_scale: 0.4
-  # Minimum brightness (above background) for a box to be considered. Filters
-  # out background noise. yp default 0.4.
-  signal_guided_min_box_brightness_delta: 0.4
-  # Floor on the per-cluster sigma scale. Brighter clusters get smaller sigma
-  # (tighter teleport); dimmer clusters get sigma toward 1.0 (looser).
-  # 0.35 = brightest cluster's sigma is 35% of cellConfig.x/y/z.sigma.
-  signal_guided_min_sigma_scale: 0.35
-  # Sigma range multiplier on top of cellConfig.x/y/z.sigma. yp tuned 10.0
-  # which gives wide-jump teleports.
-  signal_guided_sigma_range_multiplier: 10.0
+  # FUNDAMENTAL 2026-04-23: Voronoi bleed penalty weight — the structural
+  # "stay in your own territory" force. Default 0.5 (ConfigTypes.hpp) was
+  # effectively inert: moving 1000 voxels into a neighbor territory cost
+  # only 500, versus image-cost swings of 1k-10k per perturb. Result: cells
+  # in dense clusters freely migrate toward the cluster's bright mass
+  # (visible as "drift-to-center clumping" at f65 of T2/T2b runs). The
+  # overlap penalty alone is insufficient because it fires only at IoU > 0
+  # (physical ellipsoid coincidence), allowing territorial migration without
+  # pushback until cells actually overlap.
+  #
+  # Raised to 5.0 (10×) to make bleed penalty comparable to image-cost
+  # shifts during perturbation. This enforces the Voronoi partition as the
+  # implicit "one cell per bright blob" constraint, rather than leaving it
+  # as a whisper that cells ignore. Testing: if this prevents f65 clumping
+  # without blocking legit cell motion, this is the right structural fix
+  # (rather than adding Fix A centroid pull or T3 persistence gates on top
+  # of a broken force balance).
+  voronoi_bleed_penalty_weight: 2.0
 
 # Triaxial split detection pipeline.
 prob:
@@ -529,7 +522,56 @@ prob:
   bio_daughter_size_ratio_max: 1.5
   bio_combined_volume_min_fraction: 0.6
   bio_combined_volume_max_fraction: 1.3
+
+  # 2026-04-25 (Round 2 Stage A): daughter-runaway gate. Reject the split
+  # candidate if either daughter walked more than `factor × max(srcMajor,
+  # srcB)` voxels from its seed during refit/refine. Catches the
+  # false-positive pattern where a daughter's PCA refit grabs a NEIGHBOR
+  # cell's bright mass and centroids on it (e3d03 f28 in linux_failed:
+  # d2 walked 44 vx from seed (95,251,61) onto 12345:01's blob at
+  # (77,221,87), passed bridge + cost gates, false split accepted).
+  # 0.0 disables. 1.0 = one-radius cap. Legitimate drifts max ~25 vx
+  # for srcMajor~30; false positives at 35-50 vx. 1.0 separates them.
+  split_daughter_max_drift_radius_factor: 1.0
+
+  # 2026-04-25 (Round 2 Stage B): neighbor-bridging gate factor. Reject if
+  # either daughter's center is closer than `factor × siblingDistance` to
+  # any non-sibling cell. 0.5 was the legacy hardcoded threshold; tightened
+  # to 0.6 after audit of e3d03 f28 (d2 at 31.7 vx from 12345:11 vs 60.7 vx
+  # sibling — 0.5×60.7=30.4 just barely passed; 0.6×60.7=36.4 catches it).
+  # 0.0 disables.
+  bio_neighbor_bridging_factor: 0.6
+
+  # 2026-04-26: bridge-strength cost-gate override. The adaptive cost gate
+  # (max(split_cost, split_cost_fraction × baseline)) rejects legitimate splits
+  # on bloated parents whose cost reduction is real but smaller than 3% of
+  # baseline. e9077:10 f40 missed: diff=-14473, threshold=-30792, but
+  # valleyFromBright=0.71 (clear valley) and refit converged tightly. Override
+  # accepts when bridge AND refit AND absolute cost evidence are all strong.
+  # Set any to 0 to disable.
+  split_bridge_strong_cost_override_valley_max: 0.75
+  split_bridge_strong_cost_override_max_refine_drift_sum: 15.0
+  split_bridge_strong_cost_override_min_abs_cost_diff: 5000.0
+
+  # 2026-04-25 (Round 3 Stage C): local-maxima split seeding + snap-position
+  # correction. Both DISABLED by default in production — see Change 30 in
+  # changelogv8.md for the regression analysis. f1-f65 validation showed
+  # the strict-> findLocalMaxima never fired (zero maxima found everywhere
+  # — post-blur plateau peaks defeat strict comparison); the relaxed
+  # `>= ... && nMin<v` version fires hundreds of maxima per cell window
+  # (305-616 per call for elongated cells) and pulls snap positions onto
+  # neighbor biology, causing e9077:10 to miss its f40 split. Round 1+2
+  # alone (clean baseline + drift cap + neighbor-bridging) get f1-f45
+  # GT-perfect including the f40 e9077:10 split via existing imgPca pre-pass.
+  # Re-enable only after window/envelope tuning makes lmaxima reliable.
+  local_maxima_split_seeding_enabled: false
+  local_maxima_brightness_threshold: 0.15
+  local_maxima_split_window_radius_factor: 1.5
+  local_maxima_split_envelope_factor: 1.2
+  local_maxima_snap_correction_enabled: false
+  local_maxima_snap_correction_cap_factor: 0.5
   bio_max_single_daughter_volume_fraction: 0.65
+
   # Primary bridge threshold. The bright-pixel profile along the split axis
   # must show a drop from the brighter daughter's edge into the midpoint
   # gap by at least this factor: gap / max(edge1, edge2) < this limit.

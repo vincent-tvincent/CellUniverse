@@ -73,11 +73,6 @@ public:
     float adaptive_cube_pooling_isolated_bright_cube_threshold = 0.08f;
     float adaptive_background_expand_factor = 1.1f;
     float adaptive_background_top_fraction = 0.4f;
-    bool signal_guided_position_enabled = false;
-    float signal_guided_box_size_scale = 1.0f;
-    float signal_guided_min_box_brightness_delta = 0.0f;
-    float signal_guided_min_sigma_scale = 0.35f;
-    float signal_guided_sigma_range_multiplier = 1.0f;
 
     // Asymmetric L2 cost weight (Fix E). Per-voxel squared error is
     // multiplied by this factor when synth > real (cell covers darker
@@ -212,11 +207,6 @@ public:
         if (node["adaptive_cube_pooling_isolated_bright_cube_threshold"]) adaptive_cube_pooling_isolated_bright_cube_threshold = node["adaptive_cube_pooling_isolated_bright_cube_threshold"].as<float>();
         if (node["adaptive_background_expand_factor"]) adaptive_background_expand_factor = node["adaptive_background_expand_factor"].as<float>();
         if (node["adaptive_background_top_fraction"]) adaptive_background_top_fraction = node["adaptive_background_top_fraction"].as<float>();
-        if (node["signal_guided_position_enabled"]) signal_guided_position_enabled = node["signal_guided_position_enabled"].as<bool>();
-        if (node["signal_guided_box_size_scale"]) signal_guided_box_size_scale = node["signal_guided_box_size_scale"].as<float>();
-        if (node["signal_guided_min_box_brightness_delta"]) signal_guided_min_box_brightness_delta = node["signal_guided_min_box_brightness_delta"].as<float>();
-        if (node["signal_guided_min_sigma_scale"]) signal_guided_min_sigma_scale = node["signal_guided_min_sigma_scale"].as<float>();
-        if (node["signal_guided_sigma_range_multiplier"]) signal_guided_sigma_range_multiplier = node["signal_guided_sigma_range_multiplier"].as<float>();
         if (node["asymmetric_cost_weight"]) asymmetric_cost_weight = node["asymmetric_cost_weight"].as<float>();
         if (node["asymmetric_cost_threshold"]) asymmetric_cost_threshold = node["asymmetric_cost_threshold"].as<float>();
         if (node["voronoi_cost_enabled"]) voronoi_cost_enabled = node["voronoi_cost_enabled"].as<bool>();
@@ -278,11 +268,6 @@ public:
         std::cout << "adaptive_cube_pooling_isolated_bright_cube_threshold: " << adaptive_cube_pooling_isolated_bright_cube_threshold << '\n';
         std::cout << "adaptive_background_expand_factor: " << adaptive_background_expand_factor << '\n';
         std::cout << "adaptive_background_top_fraction: " << adaptive_background_top_fraction << '\n';
-        std::cout << "signal_guided_position_enabled: " << signal_guided_position_enabled << '\n';
-        std::cout << "signal_guided_box_size_scale: " << signal_guided_box_size_scale << '\n';
-        std::cout << "signal_guided_min_box_brightness_delta: " << signal_guided_min_box_brightness_delta << '\n';
-        std::cout << "signal_guided_min_sigma_scale: " << signal_guided_min_sigma_scale << '\n';
-        std::cout << "signal_guided_sigma_range_multiplier: " << signal_guided_sigma_range_multiplier << '\n';
         std::cout << "z_slices: " << z_slices << std::endl;
     }
 };
@@ -380,6 +365,71 @@ public:
     float bio_daughter_size_ratio_max = 1.5f;
     float bio_combined_volume_min_fraction = 0.6f;
     float bio_combined_volume_max_fraction = 1.3f;
+
+    // 2026-04-25 (Round 2 Stage A): daughter-runaway gate. Reject the
+    // split candidate if any daughter's final position is more than
+    // `factor × max(srcMajor, srcB)` voxels from its seed. Catches the
+    // false-positive pattern where a daughter's PCA refit grabs a
+    // neighbor cell's bright mass and centroids on it (e3d03 f28 from
+    // linux_failed: d2 walked 44 vx from seed onto 12345:01's blob).
+    // 0.0 disables the gate. 1.0 = one-radius cap (legitimate drifts
+    // observed up to ~25 vx for srcMajor~30, false positives at 35-50 vx).
+    float split_daughter_max_drift_radius_factor = 1.0f;
+
+    // 2026-04-25 (Round 2 Stage B): neighbor-bridging factor. In bioCheckDaughters,
+    // reject the candidate if either daughter's center is closer than
+    // `factor × siblingDistance` to any non-sibling neighbor cell. Catches
+    // false splits where one daughter has actually landed on a NEIGHBOR's
+    // biology (e3d03 f28 in linux_failed: d2 was 31.7 vx from 12345:11
+    // vs 60.7 vx from sibling — at the previous factor 0.5 the threshold
+    // was 30.4 → just barely passed). 0.6 (current default) makes the
+    // threshold 36.4 → caught. 0.0 disables the gate entirely.
+    float bio_neighbor_bridging_factor = 0.6f;
+
+    // 2026-04-26: bridge-strength cost-gate override. The adaptive cost gate
+    // uses max(split_cost, split_cost_fraction × baseline). On large/bloated
+    // parents the proportional term grows huge and rejects legitimate splits
+    // whose cost reduction is real but smaller than 3% of baseline (e9077:10
+    // f40: diff=-14473 vs threshold=-30792). Override accepts the split when
+    // ALL THREE conditions hold:
+    //   (1) bridge gate ran AND valleyFromBright < valley_max  (clear valley)
+    //   (2) refineDrift1 + refineDrift2 < max_refine_drift_sum (refit converged)
+    //   (3) costDiff < -min_abs_cost_diff                       (real cost win)
+    // Set any to 0 to disable the override entirely.
+    float split_bridge_strong_cost_override_valley_max = 0.75f;
+    float split_bridge_strong_cost_override_max_refine_drift_sum = 15.0f;
+    float split_bridge_strong_cost_override_min_abs_cost_diff = 5000.0f;
+
+    // 2026-04-25 (Round 3 Stage C): local-maxima split seeding. Find bright
+    // local maxima (strict local max in 6-connected neighborhood, above
+    // brightness threshold) in a window around the parent's snapshot
+    // position. ≥2 maxima = topological evidence of two distinct
+    // biological cells inside the window — use them as direct daughter
+    // seeds (no PCA, no projection). This catches the case-1 / case-2
+    // failure mode (parent stretched across two daughter blobs) by image
+    // topology rather than statistical bimodality.
+    bool  local_maxima_split_seeding_enabled = true;
+    float local_maxima_brightness_threshold = 0.15f;
+    // Window radius for the local-maxima search, as a multiple of the
+    // parent's largest snapshot semi-axis. 1.5 covers the full expected
+    // daughter span (each daughter ~0.5 × srcMajor from parent center)
+    // with margin.
+    float local_maxima_split_window_radius_factor = 1.5f;
+    // Birth-envelope check: both top-2 maxima must be within
+    // `factor × parent.maxR` of the snapshot center. Rejects maxima that
+    // fell on a neighbor's blob (essentially the same constraint Round 2
+    // Stage A enforces post-refit, applied here at seed-time).
+    float local_maxima_split_envelope_factor = 1.2f;
+
+    // 2026-04-25 (Round 3 Stage C-3): per-frame snap-position correction.
+    // At frame start, before installing each cell's snap, pull it toward
+    // the nearest bright local maximum within a small cap. This corrects
+    // one-frame drift before it cascades. Cap radius =
+    // `cap_factor × min(birth_a, birth_b, birth_c)` — small enough to
+    // prevent teleporting onto a neighbor's blob, large enough to absorb
+    // typical inter-frame drift (5-10 vx).
+    bool  local_maxima_snap_correction_enabled = true;
+    float local_maxima_snap_correction_cap_factor = 0.5f;
 
     // Single-daughter volume gate. Reject when either daughter's volume
     // exceeds `bio_max_single_daughter_volume_fraction * refParentVolume`.
@@ -498,6 +548,17 @@ public:
         if (node["split_candidate_translation_delta_fraction"]) split_candidate_translation_delta_fraction = node["split_candidate_translation_delta_fraction"].as<float>();
         if (node["bio_daughter_size_ratio_max"]) bio_daughter_size_ratio_max = node["bio_daughter_size_ratio_max"].as<float>();
         if (node["bio_combined_volume_min_fraction"]) bio_combined_volume_min_fraction = node["bio_combined_volume_min_fraction"].as<float>();
+        if (node["split_daughter_max_drift_radius_factor"]) split_daughter_max_drift_radius_factor = node["split_daughter_max_drift_radius_factor"].as<float>();
+        if (node["bio_neighbor_bridging_factor"]) bio_neighbor_bridging_factor = node["bio_neighbor_bridging_factor"].as<float>();
+        if (node["split_bridge_strong_cost_override_valley_max"]) split_bridge_strong_cost_override_valley_max = node["split_bridge_strong_cost_override_valley_max"].as<float>();
+        if (node["split_bridge_strong_cost_override_max_refine_drift_sum"]) split_bridge_strong_cost_override_max_refine_drift_sum = node["split_bridge_strong_cost_override_max_refine_drift_sum"].as<float>();
+        if (node["split_bridge_strong_cost_override_min_abs_cost_diff"]) split_bridge_strong_cost_override_min_abs_cost_diff = node["split_bridge_strong_cost_override_min_abs_cost_diff"].as<float>();
+        if (node["local_maxima_split_seeding_enabled"]) local_maxima_split_seeding_enabled = node["local_maxima_split_seeding_enabled"].as<bool>();
+        if (node["local_maxima_brightness_threshold"]) local_maxima_brightness_threshold = node["local_maxima_brightness_threshold"].as<float>();
+        if (node["local_maxima_split_window_radius_factor"]) local_maxima_split_window_radius_factor = node["local_maxima_split_window_radius_factor"].as<float>();
+        if (node["local_maxima_split_envelope_factor"]) local_maxima_split_envelope_factor = node["local_maxima_split_envelope_factor"].as<float>();
+        if (node["local_maxima_snap_correction_enabled"]) local_maxima_snap_correction_enabled = node["local_maxima_snap_correction_enabled"].as<bool>();
+        if (node["local_maxima_snap_correction_cap_factor"]) local_maxima_snap_correction_cap_factor = node["local_maxima_snap_correction_cap_factor"].as<float>();
         if (node["bio_combined_volume_max_fraction"]) bio_combined_volume_max_fraction = node["bio_combined_volume_max_fraction"].as<float>();
         if (node["bio_max_single_daughter_volume_fraction"]) bio_max_single_daughter_volume_fraction = node["bio_max_single_daughter_volume_fraction"].as<float>();
         if (node["bio_bridge_max_gap_density"]) bio_bridge_max_gap_density = node["bio_bridge_max_gap_density"].as<float>();

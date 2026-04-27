@@ -184,191 +184,6 @@ static void exportPreprocessedStack(const std::vector<cv::Mat> &stack,
     }
 }
 
-// === Signal-guided perturbation helpers (yp ffc1917) ===
-//
-// Detect bright clusters in the real frame and use them as teleport
-// targets for cells that get stuck on local optima. Per-frame init only;
-// the actual cell teleport happens in Frame::perturbCell when
-// useSignalGuidance=true.
-
-struct BrightBox {
-    int ix = 0;
-    int iy = 0;
-    int iz = 0;
-    cv::Point3f center{0.0f, 0.0f, 0.0f};
-    float brightness = 0.0f;
-    int voxels = 0;
-};
-
-static int chooseNearestDivisorSize(int axisLength, float targetSize)
-{
-    if (axisLength <= 1) return 1;
-    const float clampedTarget = std::clamp(targetSize, 1.0f, static_cast<float>(axisLength));
-    int bestDivisor = 1;
-    float bestDistance = std::abs(static_cast<float>(bestDivisor) - clampedTarget);
-    for (int d = 1; d <= axisLength; ++d) {
-        if (axisLength % d != 0) continue;
-        const float distance = std::abs(static_cast<float>(d) - clampedTarget);
-        if (distance < bestDistance ||
-            (std::abs(distance - bestDistance) <= 1e-6f && d > bestDivisor)) {
-            bestDivisor = d;
-            bestDistance = distance;
-        }
-    }
-    return bestDivisor;
-}
-
-static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
-    const Frame &frame,
-    const BaseConfig &config,
-    int displayFrame)
-{
-    std::vector<Frame::SignalCenter> centers;
-    const auto &realFrame = frame.getRealFrame();
-    if (realFrame.empty() || !config.cell) return centers;
-
-    const int sizeX = realFrame[0].cols;
-    const int sizeY = realFrame[0].rows;
-    const int sizeZ = static_cast<int>(realFrame.size());
-    if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) return centers;
-
-    const float boxScale = std::max(0.1f, config.simulation.signal_guided_box_size_scale);
-    const float maxDiamX = 2.0f * static_cast<float>(config.cell->maxARadius);
-    const float maxDiamY = 2.0f * static_cast<float>(
-        config.cell->maxBRadius > 0.0 ? config.cell->maxBRadius : config.cell->maxARadius);
-    const float maxDiamZ = 2.0f * static_cast<float>(config.cell->maxCRadius);
-    const float targetBoxX = std::max(1.0f, (maxDiamX / 3.0f) * boxScale);
-    const float targetBoxY = std::max(1.0f, (maxDiamY / 3.0f) * boxScale);
-    const float targetBoxZ = std::max(1.0f, (maxDiamZ / 3.0f) * boxScale);
-
-    const int boxSizeX = chooseNearestDivisorSize(sizeX, targetBoxX);
-    const int boxSizeY = chooseNearestDivisorSize(sizeY, targetBoxY);
-    const int boxSizeZ = chooseNearestDivisorSize(sizeZ, targetBoxZ);
-    const int gridX = std::max(1, sizeX / boxSizeX);
-    const int gridY = std::max(1, sizeY / boxSizeY);
-    const int gridZ = std::max(1, sizeZ / boxSizeZ);
-
-    const float backgroundValue = frame.getBackgroundValue();
-    const float minDelta = std::max(0.0f, config.simulation.signal_guided_min_box_brightness_delta);
-
-    std::vector<BrightBox> boxes;
-    boxes.reserve(static_cast<size_t>(gridX) * gridY * gridZ);
-    for (int iz = 0; iz < gridZ; ++iz) {
-        const int z0 = iz * boxSizeZ;
-        const int z1 = z0 + boxSizeZ;
-        for (int iy = 0; iy < gridY; ++iy) {
-            const int y0 = iy * boxSizeY;
-            const int y1 = y0 + boxSizeY;
-            for (int ix = 0; ix < gridX; ++ix) {
-                const int x0 = ix * boxSizeX;
-                const int x1 = x0 + boxSizeX;
-                double sum = 0.0;
-                int voxels = 0;
-                for (int z = z0; z < z1; ++z) {
-                    for (int y = y0; y < y1; ++y) {
-                        const float *row = realFrame[z].ptr<float>(y);
-                        for (int x = x0; x < x1; ++x) {
-                            sum += row[x];
-                            ++voxels;
-                        }
-                    }
-                }
-                if (voxels <= 0) continue;
-                const float meanBrightness = static_cast<float>(sum / static_cast<double>(voxels));
-                if (meanBrightness <= backgroundValue + minDelta) continue;
-                boxes.push_back({
-                    ix, iy, iz,
-                    cv::Point3f(
-                        static_cast<float>(x0 + x1 - 1) * 0.5f,
-                        static_cast<float>(y0 + y1 - 1) * 0.5f,
-                        static_cast<float>(z0 + z1 - 1) * 0.5f),
-                    meanBrightness, voxels
-                });
-            }
-        }
-    }
-
-    std::sort(boxes.begin(), boxes.end(),
-              [](const BrightBox &a, const BrightBox &b) { return a.brightness > b.brightness; });
-
-    std::map<std::tuple<int, int, int>, size_t> boxIndex;
-    for (size_t i = 0; i < boxes.size(); ++i) boxIndex[{boxes[i].ix, boxes[i].iy, boxes[i].iz}] = i;
-
-    std::vector<char> visited(boxes.size(), 0);
-    float maxCenterBrightness = backgroundValue;
-    for (size_t seed = 0; seed < boxes.size(); ++seed) {
-        if (visited[seed]) continue;
-        std::vector<size_t> stack{seed};
-        visited[seed] = 1;
-        double weightSum = 0.0, xSum = 0.0, ySum = 0.0, zSum = 0.0, brightnessSum = 0.0;
-        int clusterBoxes = 0;
-        while (!stack.empty()) {
-            const size_t current = stack.back();
-            stack.pop_back();
-            const BrightBox &box = boxes[current];
-            const float weight = std::max(1e-6f, box.brightness - backgroundValue);
-            weightSum += weight;
-            xSum += weight * static_cast<double>(box.center.x);
-            ySum += weight * static_cast<double>(box.center.y);
-            zSum += weight * static_cast<double>(box.center.z);
-            brightnessSum += static_cast<double>(box.brightness);
-            ++clusterBoxes;
-            for (int dz = -1; dz <= 1; ++dz)
-                for (int dy = -1; dy <= 1; ++dy)
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        if (dx == 0 && dy == 0 && dz == 0) continue;
-                        auto it = boxIndex.find({box.ix + dx, box.iy + dy, box.iz + dz});
-                        if (it == boxIndex.end()) continue;
-                        const size_t neighbor = it->second;
-                        if (visited[neighbor]) continue;
-                        visited[neighbor] = 1;
-                        stack.push_back(neighbor);
-                    }
-        }
-        if (clusterBoxes <= 0 || weightSum <= 0.0) continue;
-        Frame::SignalCenter center;
-        center.position = cv::Point3f(
-            static_cast<float>(xSum / weightSum),
-            static_cast<float>(ySum / weightSum),
-            static_cast<float>(zSum / weightSum));
-        center.brightness = static_cast<float>(brightnessSum / static_cast<double>(clusterBoxes));
-        center.boxes = clusterBoxes;
-        centers.push_back(center);
-        maxCenterBrightness = std::max(maxCenterBrightness, center.brightness);
-    }
-
-    for (auto &center : centers) {
-        const float normalized = (maxCenterBrightness > backgroundValue + 1e-6f)
-            ? std::clamp((center.brightness - backgroundValue) /
-                         (maxCenterBrightness - backgroundValue), 0.0f, 1.0f)
-            : 0.0f;
-        center.sigmaScale = std::max(
-            config.simulation.signal_guided_min_sigma_scale,
-            1.0f - normalized * (1.0f - config.simulation.signal_guided_min_sigma_scale));
-    }
-
-    std::sort(centers.begin(), centers.end(),
-              [](const Frame::SignalCenter &a, const Frame::SignalCenter &b) {
-                  return a.brightness > b.brightness;
-              });
-
-    std::cout << "[Signal Centers] frame " << displayFrame
-              << " enabled=" << config.simulation.signal_guided_position_enabled
-              << " boxSize=(" << boxSizeX << "," << boxSizeY << "," << boxSizeZ << ")"
-              << " grid=(" << gridX << "," << gridY << "," << gridZ << ")"
-              << " background=" << backgroundValue
-              << " keptBoxes=" << boxes.size()
-              << " clusters=" << centers.size() << '\n';
-    for (size_t i = 0; i < centers.size(); ++i) {
-        const auto &c = centers[i];
-        std::cout << "  [Signal Center] idx=" << i
-                  << " pos=(" << c.position.x << "," << c.position.y << "," << c.position.z << ")"
-                  << " brightness=" << c.brightness
-                  << " sigmaScale=" << c.sigmaScale
-                  << " boxes=" << c.boxes << '\n';
-    }
-    return centers;
-}
 
 static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
                                                  const SimulationConfig &simulationConfig)
@@ -652,49 +467,21 @@ void CellUniverse::optimize(int frameIndex)
 
     frame.regenerateSynthFrame();
 
-    // Signal-guided perturbation init (yp ffc1917 — full per-frame design).
-    // When enabled and enough signal centers are detected (>= previous frame
-    // cell count), the entire frame uses signal-guided perturbation with
-    // signal_guided_iterations_per_cell. When disabled or not enough centers,
-    // fall back to random perturbation with random_iterations_per_cell.
-    bool useSignalGuidanceThisFrame = false;
-    if (config.simulation.signal_guided_position_enabled) {
-        std::vector<Frame::SignalCenter> centers =
-            localizeSignalCentersForFrame(frame, config, firstFrame + frameIndex);
-        frame.setSignalCenters(centers);
-        useSignalGuidanceThisFrame = true;
-        if (frameIndex > 0) {
-            const size_t previousCellCount = frames[frameIndex - 1].cells.size();
-            if (centers.size() < previousCellCount) {
-                useSignalGuidanceThisFrame = false;
-                std::cout << "[Signal Guidance Fallback] frame " << (firstFrame + frameIndex)
-                          << " centers=" << centers.size()
-                          << " previousCells=" << previousCellCount
-                          << " mode=random\n";
-            }
-        }
-    } else {
-        frame.setSignalCenters({});
-    }
-
-    const int guidedPerCellIters =
-        (config.simulation.signal_guided_iterations_per_cell >= 0)
-            ? config.simulation.signal_guided_iterations_per_cell
-            : config.simulation.iterations_per_cell;
+    // 2026-04-25 (Round 1b cleanup): signal-guided perturbation removed.
+    // Iteration budget is iterations_per_cell (with random_iterations_per_cell
+    // override kept for backward-compat).
     const int randomPerCellIters =
         (config.simulation.random_iterations_per_cell >= 0)
             ? config.simulation.random_iterations_per_cell
             : config.simulation.iterations_per_cell;
-    const size_t activePerCellIters = static_cast<size_t>(std::max(
-        0, useSignalGuidanceThisFrame ? guidedPerCellIters : randomPerCellIters));
+    const size_t activePerCellIters =
+        static_cast<size_t>(std::max(0, randomPerCellIters));
     size_t totalIterations = frame.length() * activePerCellIters;
     int displayFrame = firstFrame + frameIndex;
 
     std::cout << "[Optimize] frame " << displayFrame
               << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)"
-              << " perturbMode=" << (useSignalGuidanceThisFrame ? "signal_guided" : "random")
-              << " guidedItersPerCell=" << guidedPerCellIters
-              << " randomItersPerCell=" << randomPerCellIters
+              << " itersPerCell=" << randomPerCellIters
               << " useBboxCost=" << (bboxActiveThisFrame ? 1 : 0)
               << " bboxMarginScale=" << config.prob.bbox_margin_scale
               << (config.prob.use_bbox_cost && frameIndex == 0
@@ -888,7 +675,7 @@ void CellUniverse::optimize(int frameIndex)
             int calAccepts = 0;
             for (int it = 0; it < calibrationIters; ++it) {
                 auto calResult = frame.perturbCell(
-                    ci, overlapWeight, useSignalGuidanceThisFrame);
+                    ci, overlapWeight);
                 const bool calAccept = calResult.first < 0.0;
                 if (calAccept) ++calAccepts;
                 calResult.second(calAccept);
@@ -1215,6 +1002,21 @@ void CellUniverse::optimize(int frameIndex)
             : 0.0f);
     if (bboxActiveThisFrame) {
         int installed = 0;
+        // 2026-04-25 (Round 3 Stage C-3): snap position correction.
+        // Before installing each cell's snap, pull it toward the nearest
+        // bright local maximum within a small cap (so the snap stays
+        // anchored to biology even if last frame's perturbation drifted
+        // it). Cap = factor × min(birthA, birthB, birthC) — small enough
+        // that we can't teleport into a neighbor cell, large enough to
+        // correct one-frame drift.
+        const bool snapCorrectionEnabled =
+            config.prob.local_maxima_snap_correction_enabled;
+        const float snapCorrectionCapFactor =
+            std::max(0.0f, config.prob.local_maxima_snap_correction_cap_factor);
+        const float snapCorrectionThreshold =
+            config.prob.local_maxima_brightness_threshold;
+        int snapCorrected = 0;
+        int snapNoMax = 0;
         for (const auto &cell : frame.cells) {
             const std::string &name = cell.getName();
             auto snapIt = previousSnapshots.find(name);
@@ -1222,17 +1024,60 @@ void CellUniverse::optimize(int frameIndex)
             const auto &snap = snapIt->second;
             const float snapMaxR = std::max({snap.aRadius, snap.bRadius, snap.cRadius});
             if (snapMaxR <= 1e-3f) continue;
+            cv::Point3f effectiveSnapPos = snap.position;
+            if (snapCorrectionEnabled && snapCorrectionCapFactor > 0.0f) {
+                // Cap radius from BIRTH radii when available, else live snap radii.
+                float capR = 0.0f;
+                auto birthIt = cellShapeBirth.find(name);
+                if (birthIt != cellShapeBirth.end()) {
+                    const auto &b = birthIt->second;
+                    const float bMin = std::min({b[0], b[1], b[2]});
+                    if (bMin > 1e-3f) capR = snapCorrectionCapFactor * bMin;
+                }
+                if (capR <= 0.0f) {
+                    const float sMin = std::min({snap.aRadius, snap.bRadius, snap.cRadius});
+                    if (sMin > 1e-3f) capR = snapCorrectionCapFactor * sMin;
+                }
+                if (capR > 1.0f) {
+                    auto maxima = frame.findLocalMaxima(
+                        snap.position, capR, snapCorrectionThreshold, 3);
+                    if (!maxima.empty()) {
+                        // Snap to the BRIGHTEST max in the cap window.
+                        // Capped to stay within capR of snap.position.
+                        const cv::Point3f &target = maxima[0].position;
+                        const cv::Point3f delta = target - snap.position;
+                        const float dist = static_cast<float>(cv::norm(delta));
+                        if (dist > 0.5f) {
+                            const float step = std::min(dist, capR);
+                            effectiveSnapPos = snap.position + delta * (step / dist);
+                            ++snapCorrected;
+                            std::cout << "  [Snap Correct] " << name
+                                      << " snap=(" << snap.position.x << "," << snap.position.y << "," << snap.position.z << ")"
+                                      << " → (" << effectiveSnapPos.x << "," << effectiveSnapPos.y << "," << effectiveSnapPos.z << ")"
+                                      << " target=(" << target.x << "," << target.y << "," << target.z << ")"
+                                      << " brightness=" << maxima[0].brightness
+                                      << " dist=" << dist
+                                      << " capR=" << capR
+                                      << std::endl;
+                        }
+                    } else {
+                        ++snapNoMax;
+                    }
+                }
+            }
             BoundingBox3D snapBbox = frame.computeBboxAtPoint(
-                snap.position, snapMaxR, config.prob.bbox_margin_scale);
+                effectiveSnapPos, snapMaxR, config.prob.bbox_margin_scale);
             if (!snapBbox.isValid()) continue;
             frame.setSnapBbox(name, snapBbox);
-            frame.setSnapPosition(name, snap.position);
+            frame.setSnapPosition(name, effectiveSnapPos);
             ++installed;
         }
         std::cout << "[Snap Bbox] frame " << displayFrame
                   << " installed=" << installed
                   << " total=" << frame.cells.size()
                   << " priorWeight=" << config.prob.position_prior_weight
+                  << " snapCorrected=" << snapCorrected
+                  << " snapNoMax=" << snapNoMax
                   << std::endl;
     }
 
@@ -1603,7 +1448,7 @@ void CellUniverse::optimize(int frameIndex)
                     // Compensation perturb. The revert left cells[cellIdx]
                     // as the parent (in place), so no find_if needed.
                     auto compResult = frame.perturbCell(
-                        cellIdx, overlapWeight, useSignalGuidanceThisFrame);
+                        cellIdx, overlapWeight);
                     const bool compAccept = compResult.first < 0.0;
                     compResult.second(compAccept);
                     if (compAccept) {
@@ -1616,7 +1461,7 @@ void CellUniverse::optimize(int frameIndex)
             } else {
                 // --- Perturbation ---
                 auto result = frame.perturbCell(
-                    cellIdx, overlapWeight, useSignalGuidanceThisFrame);
+                    cellIdx, overlapWeight);
                 double costDiff = result.first;
                 auto callback = result.second;
                 if (costDiff < 0) {

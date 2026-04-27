@@ -261,19 +261,30 @@ cell:
   dualLayerCoreInitialRadiusScale: 0.8
   # a: inner brightness step in [0, 1]. Each candidate raises the inner core
   # brightness by this much until it reaches maxBrightness.
-  dualLayerCoreBrightnessStep: 0.05
+  dualLayerCoreBrightnessStep: 0.1
   # b: outer brightness decreases by a * b each candidate.
-  dualLayerOuterBrightnessStepScale: 0.5
+  dualLayerOuterBrightnessStepScale: 0.4
   dualLayerCoreMaxSteps: 20
   dualLayerCoreNoImprovePatience: 5
-  dualLayerCoreMinCostImprovement: 0.0
+  dualLayerCoreMinCostImprovement: 400.0
   # <=0 means reuse pcaShapeMaxIters / pcaShapeMaskScale.
   dualLayerCoreShapeFitMaxIters: 10
   dualLayerCoreShapeFitMaskScale: 0.75
+  # Whether inner-core PCA is allowed to move away from the outer cell center.
+  # false keeps the inner core centered with the parent during dual-layer fit.
+  dualLayerCoreUpdatePosition: false
   dualLayerCoreMinRadiusFraction: 0.1
   # Clamp fitted inner-core radii to this fraction of the original cell so
   # PCA cannot grow the core back into the full outer shell.
   dualLayerCoreMaxRadiusFraction: 0.6
+  # Before trying dual-layer shrinking, compare a half-radius inner ellipsoid
+  # against the surrounding outer shell. Skip cells without a clear bright
+  # core inside a dimmer shell.
+  dualLayerCoreContrastWindowEnabled: true
+  dualLayerCoreContrastInnerRadiusScale: 0.5
+  dualLayerCoreMinContrastDelta: 0.05
+  dualLayerCoreMinContrastRatio: 1.2
+  dualLayerCoreContrastMinVoxels: 20
   # Skip dual-layer core refinement when brightness inside the cell is too
   # even. Uses coefficient of variation = stddev / mean; 0 disables guard.
   dualLayerCoreMinBrightnessCv: 0.2

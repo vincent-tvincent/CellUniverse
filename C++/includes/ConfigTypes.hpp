@@ -825,8 +825,16 @@ public:
     float dualLayerCoreMinCostImprovement{0.0f};
     int dualLayerCoreShapeFitMaxIters{0}; // <=0 uses pcaShapeMaxIters
     float dualLayerCoreShapeFitMaskScale{0.0f}; // <=0 uses pcaShapeMaskScale
+    bool dualLayerCoreUpdatePosition{false};
     float dualLayerCoreMinRadiusFraction{0.1f};
     float dualLayerCoreMaxRadiusFraction{0.6f};
+    // Pre-gate for dual-layer refinement: compare mean brightness of a
+    // half-size inner ellipsoid against the surrounding outer shell.
+    bool dualLayerCoreContrastWindowEnabled{false};
+    float dualLayerCoreContrastInnerRadiusScale{0.5f};
+    float dualLayerCoreMinContrastDelta{0.0f};
+    float dualLayerCoreMinContrastRatio{1.0f};
+    int dualLayerCoreContrastMinVoxels{20};
     // Skip dual-layer core refinement when brightness inside the current
     // ellipsoid is too even. Uses coefficient of variation = stddev / mean.
     // <=0 disables this guard.
@@ -916,8 +924,14 @@ public:
         if (node["dualLayerCoreMinCostImprovement"]) dualLayerCoreMinCostImprovement = node["dualLayerCoreMinCostImprovement"].as<float>();
         if (node["dualLayerCoreShapeFitMaxIters"]) dualLayerCoreShapeFitMaxIters = node["dualLayerCoreShapeFitMaxIters"].as<int>();
         if (node["dualLayerCoreShapeFitMaskScale"]) dualLayerCoreShapeFitMaskScale = node["dualLayerCoreShapeFitMaskScale"].as<float>();
+        if (node["dualLayerCoreUpdatePosition"]) dualLayerCoreUpdatePosition = node["dualLayerCoreUpdatePosition"].as<bool>();
         if (node["dualLayerCoreMinRadiusFraction"]) dualLayerCoreMinRadiusFraction = node["dualLayerCoreMinRadiusFraction"].as<float>();
         if (node["dualLayerCoreMaxRadiusFraction"]) dualLayerCoreMaxRadiusFraction = node["dualLayerCoreMaxRadiusFraction"].as<float>();
+        if (node["dualLayerCoreContrastWindowEnabled"]) dualLayerCoreContrastWindowEnabled = node["dualLayerCoreContrastWindowEnabled"].as<bool>();
+        if (node["dualLayerCoreContrastInnerRadiusScale"]) dualLayerCoreContrastInnerRadiusScale = node["dualLayerCoreContrastInnerRadiusScale"].as<float>();
+        if (node["dualLayerCoreMinContrastDelta"]) dualLayerCoreMinContrastDelta = node["dualLayerCoreMinContrastDelta"].as<float>();
+        if (node["dualLayerCoreMinContrastRatio"]) dualLayerCoreMinContrastRatio = node["dualLayerCoreMinContrastRatio"].as<float>();
+        if (node["dualLayerCoreContrastMinVoxels"]) dualLayerCoreContrastMinVoxels = node["dualLayerCoreContrastMinVoxels"].as<int>();
         if (node["dualLayerCoreMinBrightnessCv"]) dualLayerCoreMinBrightnessCv = node["dualLayerCoreMinBrightnessCv"].as<float>();
         if (node["dualLayerCoreRequireInstalledCostImprovement"]) dualLayerCoreRequireInstalledCostImprovement = node["dualLayerCoreRequireInstalledCostImprovement"].as<bool>();
     }

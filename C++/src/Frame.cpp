@@ -49,6 +49,69 @@ static double asymmetricL2Slice(const cv::Mat &real, const cv::Mat &synth, float
     return std::sqrt(std::max(0.0, asymSumSq));
 }
 
+struct DualLayerContrastWindowStats {
+    double innerMean = 0.0;
+    double outerMean = 0.0;
+    double delta = 0.0;
+    double ratio = 1.0;
+    int innerCount = 0;
+    int outerCount = 0;
+};
+
+static DualLayerContrastWindowStats measureDualLayerContrastWindow(
+    const std::vector<cv::Mat> &image,
+    const Ellipsoid &cell,
+    float innerRadiusScale)
+{
+    DualLayerContrastWindowStats stats;
+    if (image.empty() || image[0].empty()) {
+        return stats;
+    }
+
+    const float maxR = std::max({cell.getARadius(), cell.getBRadius(), cell.getCRadius()});
+    const int maxZIndex = static_cast<int>(image.size()) - 1;
+    const int minX = std::max(0, static_cast<int>(std::floor(cell.getX() - maxR)));
+    const int maxX = std::min(image[0].cols - 1, static_cast<int>(std::ceil(cell.getX() + maxR)));
+    const int minY = std::max(0, static_cast<int>(std::floor(cell.getY() - maxR)));
+    const int maxY = std::min(image[0].rows - 1, static_cast<int>(std::ceil(cell.getY() + maxR)));
+    const int minZ = std::max(0, static_cast<int>(std::floor(cell.getZ() - maxR)));
+    const int maxZ = std::min(maxZIndex, static_cast<int>(std::ceil(cell.getZ() + maxR)));
+    const float clampedInnerScale = std::clamp(innerRadiusScale, 1e-3f, 1.0f);
+
+    double innerSum = 0.0;
+    double outerSum = 0.0;
+    for (int z = minZ; z <= maxZ; ++z) {
+        for (int y = minY; y <= maxY; ++y) {
+            const float *row = image[z].ptr<float>(y);
+            for (int x = minX; x <= maxX; ++x) {
+                const cv::Point3f p(static_cast<float>(x),
+                                    static_cast<float>(y),
+                                    static_cast<float>(z));
+                if (!cell.isPointInsideEllipsoid(p)) {
+                    continue;
+                }
+                if (cell.isPointInsideEllipsoid(p, clampedInnerScale)) {
+                    innerSum += row[x];
+                    ++stats.innerCount;
+                } else {
+                    outerSum += row[x];
+                    ++stats.outerCount;
+                }
+            }
+        }
+    }
+
+    if (stats.innerCount > 0) {
+        stats.innerMean = innerSum / static_cast<double>(stats.innerCount);
+    }
+    if (stats.outerCount > 0) {
+        stats.outerMean = outerSum / static_cast<double>(stats.outerCount);
+    }
+    stats.delta = stats.innerMean - stats.outerMean;
+    stats.ratio = stats.innerMean / std::max(stats.outerMean, 1e-6);
+    return stats;
+}
+
 static float sampleSignalProbability(const std::vector<cv::Mat> &probability,
                                      float x,
                                      float y,
@@ -2563,6 +2626,37 @@ bool Frame::refineCellWithDualLayerCore(size_t cellIndex,
     const Cost savedCost = _currentCost;
 
     const Ellipsoid original = savedCells[cellIndex];
+    if (cfg.dualLayerCoreContrastWindowEnabled) {
+        const DualLayerContrastWindowStats contrastStats =
+            measureDualLayerContrastWindow(
+                _realFrame,
+                original,
+                cfg.dualLayerCoreContrastInnerRadiusScale);
+        const int minVoxels = std::max(1, cfg.dualLayerCoreContrastMinVoxels);
+        const float minDelta = std::max(0.0f, cfg.dualLayerCoreMinContrastDelta);
+        const float minRatio = std::max(1.0f, cfg.dualLayerCoreMinContrastRatio);
+        const bool enoughSamples =
+            contrastStats.innerCount >= minVoxels &&
+            contrastStats.outerCount >= minVoxels;
+        const bool deltaOk = minDelta <= 0.0f || contrastStats.delta >= minDelta;
+        const bool ratioOk = minRatio <= 1.0f || contrastStats.ratio >= minRatio;
+        if (!enoughSamples || !deltaOk || !ratioOk) {
+            log << "[DualLayer Core] cell=" << original.getName()
+                << " skipped=weak_core_contrast"
+                << " innerMean=" << contrastStats.innerMean
+                << " outerMean=" << contrastStats.outerMean
+                << " delta=" << contrastStats.delta
+                << " ratio=" << contrastStats.ratio
+                << " innerCount=" << contrastStats.innerCount
+                << " outerCount=" << contrastStats.outerCount
+                << " minDelta=" << minDelta
+                << " minRatio=" << minRatio
+                << " minVoxels=" << minVoxels
+                << std::endl;
+            return false;
+        }
+    }
+
     const float minBrightnessCv = std::max(0.0f, cfg.dualLayerCoreMinBrightnessCv);
     if (minBrightnessCv > 0.0f) {
         const auto [meanBrightness, stddevBrightness] =
@@ -2649,7 +2743,7 @@ bool Frame::refineCellWithDualLayerCore(size_t cellIndex,
                                  shapeMaskScale,
                                  cfg.pcaShapeConvergeRadius,
                                  cfg.pcaShapeConvergeAngleDeg,
-                                 cfg.pcaShapeUpdatePosition,
+                                 cfg.dualLayerCoreUpdatePosition,
                                  cfg.pcaShapeMaxPosShiftFraction,
                                  innerParams.aRadius,
                                  innerParams.bRadius,

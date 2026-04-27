@@ -254,6 +254,12 @@ public:
         // deterministic cell-index order after the parallel region.
         std::ostream *logSink = nullptr);
 
+    bool refineCellWithDualLayerCore(
+        size_t cellIndex,
+        const ClaimSet &otherCellsClaimSets,
+        float overlapWeight,
+        std::ostream *logSink = nullptr);
+
     std::vector<cv::Mat> getSynthFrame();
     const std::vector<cv::Mat>& getRealFrame() const { return _realFrame; }
 

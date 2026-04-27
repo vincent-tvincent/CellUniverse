@@ -812,6 +812,26 @@ public:
     // Multiplier on the capped push toward the bright core. 0 disables the
     // added push but still allows damping movement away from the bright core.
     float randomPerturbBrightCoreGuideStrength{0.75f};
+    // Optional post-optimization refinement that temporarily scores a
+    // two-layer cell: dim outer shell + bright fitted inner core. If the
+    // temporary dual-layer render lowers cost, the real cell is replaced by
+    // the fitted inner core shape/brightness.
+    bool dualLayerCoreRefinementEnabled{false};
+    float dualLayerCoreInitialRadiusScale{0.5f};
+    float dualLayerCoreBrightnessStep{0.1f};
+    float dualLayerOuterBrightnessStepScale{0.5f};
+    int dualLayerCoreMaxSteps{10};
+    int dualLayerCoreNoImprovePatience{3};
+    float dualLayerCoreMinCostImprovement{0.0f};
+    int dualLayerCoreShapeFitMaxIters{0}; // <=0 uses pcaShapeMaxIters
+    float dualLayerCoreShapeFitMaskScale{0.0f}; // <=0 uses pcaShapeMaskScale
+    float dualLayerCoreMinRadiusFraction{0.1f};
+    float dualLayerCoreMaxRadiusFraction{0.6f};
+    // Skip dual-layer core refinement when brightness inside the current
+    // ellipsoid is too even. Uses coefficient of variation = stddev / mean.
+    // <=0 disables this guard.
+    float dualLayerCoreMinBrightnessCv{0.0f};
+    bool dualLayerCoreRequireInstalledCostImprovement{true};
     // Maximum valid z position (interpolated z-space). Used to clamp Ellipsoid
     // center z in the constructor, preventing cells from drifting off the z-stack.
     // Default 224 = (z_slices=225) - 1. Runtime-updated by CellUniverse::loadFrame
@@ -887,6 +907,19 @@ public:
         if (node["randomPerturbBrightCoreBlackTrust"]) randomPerturbBrightCoreBlackTrust = node["randomPerturbBrightCoreBlackTrust"].as<float>();
         if (node["randomPerturbBrightCoreBrightnessTrust"]) randomPerturbBrightCoreBrightnessTrust = node["randomPerturbBrightCoreBrightnessTrust"].as<float>();
         if (node["randomPerturbBrightCoreGuideStrength"]) randomPerturbBrightCoreGuideStrength = node["randomPerturbBrightCoreGuideStrength"].as<float>();
+        if (node["dualLayerCoreRefinementEnabled"]) dualLayerCoreRefinementEnabled = node["dualLayerCoreRefinementEnabled"].as<bool>();
+        if (node["dualLayerCoreInitialRadiusScale"]) dualLayerCoreInitialRadiusScale = node["dualLayerCoreInitialRadiusScale"].as<float>();
+        if (node["dualLayerCoreBrightnessStep"]) dualLayerCoreBrightnessStep = node["dualLayerCoreBrightnessStep"].as<float>();
+        if (node["dualLayerOuterBrightnessStepScale"]) dualLayerOuterBrightnessStepScale = node["dualLayerOuterBrightnessStepScale"].as<float>();
+        if (node["dualLayerCoreMaxSteps"]) dualLayerCoreMaxSteps = node["dualLayerCoreMaxSteps"].as<int>();
+        if (node["dualLayerCoreNoImprovePatience"]) dualLayerCoreNoImprovePatience = node["dualLayerCoreNoImprovePatience"].as<int>();
+        if (node["dualLayerCoreMinCostImprovement"]) dualLayerCoreMinCostImprovement = node["dualLayerCoreMinCostImprovement"].as<float>();
+        if (node["dualLayerCoreShapeFitMaxIters"]) dualLayerCoreShapeFitMaxIters = node["dualLayerCoreShapeFitMaxIters"].as<int>();
+        if (node["dualLayerCoreShapeFitMaskScale"]) dualLayerCoreShapeFitMaskScale = node["dualLayerCoreShapeFitMaskScale"].as<float>();
+        if (node["dualLayerCoreMinRadiusFraction"]) dualLayerCoreMinRadiusFraction = node["dualLayerCoreMinRadiusFraction"].as<float>();
+        if (node["dualLayerCoreMaxRadiusFraction"]) dualLayerCoreMaxRadiusFraction = node["dualLayerCoreMaxRadiusFraction"].as<float>();
+        if (node["dualLayerCoreMinBrightnessCv"]) dualLayerCoreMinBrightnessCv = node["dualLayerCoreMinBrightnessCv"].as<float>();
+        if (node["dualLayerCoreRequireInstalledCostImprovement"]) dualLayerCoreRequireInstalledCostImprovement = node["dualLayerCoreRequireInstalledCostImprovement"].as<bool>();
     }
 };
 

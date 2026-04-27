@@ -2536,6 +2536,222 @@ bool Frame::calibrateCellShapeViaPca(
     return anyUpdate;
 }
 
+bool Frame::refineCellWithDualLayerCore(size_t cellIndex,
+                                        const ClaimSet &otherCellsClaimSets,
+                                        float overlapWeight,
+                                        std::ostream *logSink)
+{
+    if (cellIndex >= cells.size() || _realFrame.empty()) {
+        return false;
+    }
+
+    const EllipsoidConfig &cfg = Ellipsoid::cellConfig;
+    if (!cfg.dualLayerCoreRefinementEnabled) {
+        return false;
+    }
+
+    const float brightnessStep = std::clamp(cfg.dualLayerCoreBrightnessStep, 0.0f, 1.0f);
+    const int maxSteps = std::max(0, cfg.dualLayerCoreMaxSteps);
+    if (brightnessStep <= 1e-6f || maxSteps <= 0) {
+        return false;
+    }
+
+    std::ostream &log = logSink ? *logSink : std::cout;
+    const std::vector<Ellipsoid> savedCells = cells;
+    const std::vector<cv::Mat> savedSynth = _synthFrame;
+    const std::vector<double> savedPerSlice = _currentCostPerSlice;
+    const Cost savedCost = _currentCost;
+
+    const Ellipsoid original = savedCells[cellIndex];
+    const float minBrightnessCv = std::max(0.0f, cfg.dualLayerCoreMinBrightnessCv);
+    if (minBrightnessCv > 0.0f) {
+        const auto [meanBrightness, stddevBrightness] =
+            original.measureBrightnessStats(_realFrame);
+        const float brightnessCv = stddevBrightness /
+            std::max(meanBrightness, 1e-6f);
+        if (brightnessCv < minBrightnessCv) {
+            std::ostream &log = logSink ? *logSink : std::cout;
+            log << "[DualLayer Core] cell=" << original.getName()
+                << " skipped=even_brightness"
+                << " mean=" << meanBrightness
+                << " stddev=" << stddevBrightness
+                << " cv=" << brightnessCv
+                << " minCv=" << minBrightnessCv
+                << std::endl;
+            return false;
+        }
+    }
+
+    const float minBrightness = static_cast<float>(cfg.minBrightness);
+    const float maxBrightness = static_cast<float>(cfg.maxBrightness);
+    const float baselineImageCost = calculateCost(savedSynth);
+    const double baselineOverlap = computeOverlapPenalty(overlapWeight);
+    const double baselineTotal = baselineImageCost + baselineOverlap;
+
+    const float innerScale = std::clamp(cfg.dualLayerCoreInitialRadiusScale, 1e-3f, 1.0f);
+    const float outerStepScale = std::clamp(cfg.dualLayerOuterBrightnessStepScale, 0.0f, 1.0f);
+    const int shapeIters = cfg.dualLayerCoreShapeFitMaxIters > 0
+        ? cfg.dualLayerCoreShapeFitMaxIters
+        : cfg.pcaShapeMaxIters;
+    const float shapeMaskScale = cfg.dualLayerCoreShapeFitMaskScale > 0.0f
+        ? cfg.dualLayerCoreShapeFitMaskScale
+        : cfg.pcaShapeMaskScale;
+    const int patienceLimit = std::max(0, cfg.dualLayerCoreNoImprovePatience);
+    const double minImprovement = std::max(0.0f, cfg.dualLayerCoreMinCostImprovement);
+    const float minRadiusFraction = std::clamp(cfg.dualLayerCoreMinRadiusFraction, 0.0f, 1.0f);
+    const float maxRadiusFraction = std::clamp(
+        cfg.dualLayerCoreMaxRadiusFraction, minRadiusFraction, 1.0f);
+
+    double bestTotal = baselineTotal;
+    double bestDualTotal = baselineTotal;
+    double bestInstalledTotal = baselineTotal;
+    Ellipsoid bestInner;
+    int bestStep = -1;
+    int noImproveCount = 0;
+
+    const float originalBrightness = original.getBrightness();
+    for (int step = 1; step <= maxSteps; ++step) {
+        const float innerBrightness = std::min(
+            maxBrightness, originalBrightness + brightnessStep * static_cast<float>(step));
+        const float outerBrightness = std::max(
+            minBrightness,
+            originalBrightness - brightnessStep * outerStepScale * static_cast<float>(step));
+        if (innerBrightness <= originalBrightness + 1e-6f) {
+            break;
+        }
+
+        cells = savedCells;
+        _synthFrame = savedSynth;
+        _currentCost = savedCost;
+        _currentCostPerSlice = savedPerSlice;
+
+        cells[cellIndex].setBrightness(outerBrightness);
+
+        EllipsoidParams innerParams = original.getCellParams();
+        innerParams.name = original.getName() + "__dual_core_tmp";
+        innerParams.aRadius = std::max(static_cast<float>(cfg.minARadius),
+                                       original.getARadius() * innerScale);
+        innerParams.bRadius = std::max(
+            static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.minBRadius : cfg.minARadius),
+            original.getBRadius() * innerScale);
+        innerParams.cRadius = std::max(static_cast<float>(cfg.minCRadius),
+                                       original.getCRadius() * innerScale);
+        innerParams.brightness = innerBrightness;
+        cells.emplace_back(innerParams);
+        const size_t innerIdx = cells.size() - 1;
+
+        std::ostringstream fitLog;
+        calibrateCellShapeViaPca(innerIdx,
+                                 otherCellsClaimSets,
+                                 shapeIters,
+                                 cfg.pcaShapeRadiusScale,
+                                 cfg.pcaShapeMinPixels,
+                                 shapeMaskScale,
+                                 cfg.pcaShapeConvergeRadius,
+                                 cfg.pcaShapeConvergeAngleDeg,
+                                 cfg.pcaShapeUpdatePosition,
+                                 cfg.pcaShapeMaxPosShiftFraction,
+                                 innerParams.aRadius,
+                                 innerParams.bRadius,
+                                 innerParams.cRadius,
+                                 &fitLog);
+
+        Ellipsoid inner = cells[innerIdx];
+        inner.setBrightness(innerBrightness);
+        const float minAllowedA = std::max(static_cast<float>(cfg.minARadius),
+                                           original.getARadius() * minRadiusFraction);
+        const float minAllowedB = std::max(
+            static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.minBRadius : cfg.minARadius),
+            original.getBRadius() * minRadiusFraction);
+        const float minAllowedC = std::max(static_cast<float>(cfg.minCRadius),
+                                           original.getCRadius() * minRadiusFraction);
+        const float maxAllowedA = std::max(minAllowedA, original.getARadius() * maxRadiusFraction);
+        const float maxAllowedB = std::max(minAllowedB, original.getBRadius() * maxRadiusFraction);
+        const float maxAllowedC = std::max(minAllowedC, original.getCRadius() * maxRadiusFraction);
+        inner.setRadii(std::clamp(inner.getARadius(), minAllowedA, maxAllowedA),
+                       std::clamp(inner.getBRadius(), minAllowedB, maxAllowedB),
+                       std::clamp(inner.getCRadius(), minAllowedC, maxAllowedC));
+        const bool radiusOk =
+            inner.getARadius() >= minAllowedA &&
+            inner.getBRadius() >= minAllowedB &&
+            inner.getCRadius() >= minAllowedC;
+        if (!radiusOk) {
+            ++noImproveCount;
+            if (patienceLimit > 0 && noImproveCount >= patienceLimit) break;
+            continue;
+        }
+
+        _synthFrame = generateSynthFrame();
+        // The inner core intentionally overlaps its temporary outer shell, so
+        // do not score that artificial self-overlap. Keep the baseline overlap
+        // from the real cells and let the image term decide whether the
+        // dual-layer intensity model explains the data better.
+        const double dualTotal = calculateCost(_synthFrame) + baselineOverlap;
+
+        double installedTotal = dualTotal;
+        if (cfg.dualLayerCoreRequireInstalledCostImprovement) {
+            cells = savedCells;
+            EllipsoidParams installedParams = inner.getCellParams();
+            installedParams.name = original.getName();
+            inner = Ellipsoid(installedParams);
+            cells[cellIndex] = inner;
+            _synthFrame = generateSynthFrame();
+            installedTotal = calculateCost(_synthFrame) +
+                             computeOverlapPenalty(overlapWeight);
+        }
+
+        const double decisionTotal = cfg.dualLayerCoreRequireInstalledCostImprovement
+            ? installedTotal
+            : dualTotal;
+        if (decisionTotal + minImprovement < bestTotal) {
+            bestTotal = decisionTotal;
+            bestDualTotal = dualTotal;
+            bestInstalledTotal = installedTotal;
+            bestInner = inner;
+            bestStep = step;
+            noImproveCount = 0;
+        } else {
+            ++noImproveCount;
+        }
+
+        if (innerBrightness >= maxBrightness - 1e-6f) {
+            break;
+        }
+        if (patienceLimit > 0 && noImproveCount >= patienceLimit) {
+            break;
+        }
+    }
+
+    cells = savedCells;
+    _synthFrame = savedSynth;
+    _currentCost = savedCost;
+    _currentCostPerSlice = savedPerSlice;
+
+    if (bestStep < 0) {
+        return false;
+    }
+
+    cells[cellIndex] = bestInner;
+    {
+        EllipsoidParams installedParams = cells[cellIndex].getCellParams();
+        installedParams.name = original.getName();
+        cells[cellIndex] = Ellipsoid(installedParams);
+    }
+    regenerateSynthFrame();
+    log << "[DualLayer Core] cell=" << original.getName()
+        << " accepted=1"
+        << " step=" << bestStep
+        << " baseline=" << baselineTotal
+        << " dualTotal=" << bestDualTotal
+        << " installedTotal=" << bestInstalledTotal
+        << " installedR=(" << bestInner.getARadius()
+        << "," << bestInner.getBRadius()
+        << "," << bestInner.getCRadius() << ")"
+        << " brightness=" << bestInner.getBrightness()
+        << std::endl;
+    return true;
+}
+
 // Triaxial split attempt with candidate refinement + bio/cost gates.
 // Implements the Phase A/B split-attempt flow from the plan. Caller supplies
 // the Voronoi claim-sets for all OTHER cells (not this one) and whether to

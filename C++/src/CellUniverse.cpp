@@ -2875,6 +2875,34 @@ void CellUniverse::optimize(int frameIndex)
     std::set<std::string> splitRejectedInLoop;
     runPhase(allNames, /* phaseB */ true, splitAcceptedInLoop, splitRejectedInLoop);
 
+    if (config.cell && config.cell->dualLayerCoreRefinementEnabled) {
+        int dualLayerAccepted = 0;
+        std::cout << "[DualLayer Core] frame " << displayFrame
+                  << " cells=" << frame.cells.size()
+                  << " innerScale=" << config.cell->dualLayerCoreInitialRadiusScale
+                  << " brightnessStep=" << config.cell->dualLayerCoreBrightnessStep
+                  << " outerStepScale=" << config.cell->dualLayerOuterBrightnessStepScale
+                  << " maxSteps=" << config.cell->dualLayerCoreMaxSteps
+                  << std::endl;
+        for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+            const std::string cellName = frame.cells[ci].getName();
+            Frame::ClaimSet others;
+            for (const auto &other : frame.cells) {
+                if (other.getName() == cellName) continue;
+                others[other.getName()].push_back(cv::Point3f(
+                    other.getX(), other.getY(), other.getZ()));
+            }
+            if (frame.refineCellWithDualLayerCore(ci, others, overlapWeight)) {
+                ++dualLayerAccepted;
+            }
+        }
+        if (dualLayerAccepted > 0 && voronoiMapNeeded) {
+            frame.rebuildVoronoiMap();
+        }
+        std::cout << "[DualLayer Core] frame " << displayFrame
+                  << " accepted=" << dualLayerAccepted << std::endl;
+    }
+
     // End of frame: build PreviousFrameSnapshot for each cell, combining the
     // in-frame running max (from the periodic sampling above) with the
     // end-of-frame PCA measurement. The snapshot is the authoritative source

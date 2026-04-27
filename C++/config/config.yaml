@@ -253,6 +253,33 @@ cell:
   # Main strength knob for the added push toward the bright core. 0 disables
   # the push, while still damping random movement away from the bright core.
   randomPerturbBrightCoreGuideStrength: 0.75
+  # Post-optimization bright-core refinement. Temporarily scores each cell as
+  # a dim outer shell plus a fitted bright inner core. If any temporary
+  # dual-layer candidate reduces cost, the real cell is replaced by that
+  # fitted inner core shape and brightness.
+  dualLayerCoreRefinementEnabled: true
+  dualLayerCoreInitialRadiusScale: 0.8
+  # a: inner brightness step in [0, 1]. Each candidate raises the inner core
+  # brightness by this much until it reaches maxBrightness.
+  dualLayerCoreBrightnessStep: 0.05
+  # b: outer brightness decreases by a * b each candidate.
+  dualLayerOuterBrightnessStepScale: 0.5
+  dualLayerCoreMaxSteps: 20
+  dualLayerCoreNoImprovePatience: 5
+  dualLayerCoreMinCostImprovement: 0.0
+  # <=0 means reuse pcaShapeMaxIters / pcaShapeMaskScale.
+  dualLayerCoreShapeFitMaxIters: 10
+  dualLayerCoreShapeFitMaskScale: 0.75
+  dualLayerCoreMinRadiusFraction: 0.1
+  # Clamp fitted inner-core radii to this fraction of the original cell so
+  # PCA cannot grow the core back into the full outer shell.
+  dualLayerCoreMaxRadiusFraction: 0.6
+  # Skip dual-layer core refinement when brightness inside the cell is too
+  # even. Uses coefficient of variation = stddev / mean; 0 disables guard.
+  dualLayerCoreMinBrightnessCv: 0.2
+  # When true, also require the final installed single inner-core cell to
+  # reduce cost by itself, not only the temporary dual-layer render.
+  dualLayerCoreRequireInstalledCostImprovement: true
 
 # Image preprocessing pipeline — iterative contrast enhancer ported from
 # scripts/image_processor_clean.py. No sigmoid.

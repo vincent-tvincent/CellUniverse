@@ -1,0 +1,5 @@
+threading:
+  # Upper limit for OpenMP logical cores across the whole application.
+  # This machine has 224 logical CPUs; 112 uses the physical cores first.
+  # Set to 224 to allow every logical CPU, or 0 to use the OpenMP default.
+  max_logical_cores: 112

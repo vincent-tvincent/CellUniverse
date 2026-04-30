@@ -138,6 +138,17 @@ static void loadConfig(const std::string& path, BaseConfig& config)
 {
     const YAML::Node node = YAML::LoadFile(path);
     config.explodeConfig(node);
+
+    const fs::path configPath(path);
+    const fs::path threadingPath = configPath.parent_path() / "threading.yaml";
+    if (fs::exists(threadingPath)) {
+        const YAML::Node threadingNode = YAML::LoadFile(threadingPath.string());
+        config.explodeThreadingConfig(threadingNode);
+        std::cout << "Threading config file: " << threadingPath.string() << '\n';
+    } else {
+        config.threading.applyToOpenMpRuntime();
+        std::cout << "Threading config file not found; using OpenMP defaults.\n";
+    }
 }
 
 static void updateTiffConfigIfNeeded(const fs::path& file, BaseConfig& config)

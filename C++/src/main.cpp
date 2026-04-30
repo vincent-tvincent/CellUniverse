@@ -13,6 +13,7 @@
 #include "ImageHandler.hpp"
 #include <chrono>
 #include <algorithm>
+#include <filesystem>
 
 
 class Args
@@ -38,6 +39,17 @@ void loadConfig(const std::string &path, BaseConfig &config)
 {
     YAML::Node node = YAML::LoadFile(path);
     config.explodeConfig(node);
+
+    const std::filesystem::path configPath(path);
+    const std::filesystem::path threadingPath = configPath.parent_path() / "threading.yaml";
+    if (std::filesystem::exists(threadingPath)) {
+        YAML::Node threadingNode = YAML::LoadFile(threadingPath.string());
+        config.explodeThreadingConfig(threadingNode);
+        std::cout << "Threading config file: " << threadingPath.string() << '\n';
+    } else {
+        config.threading.applyToOpenMpRuntime();
+        std::cout << "Threading config file not found; using OpenMP defaults.\n";
+    }
 }
 
 Args initArgs(int argc, char *argv[]) {

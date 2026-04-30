@@ -9,6 +9,51 @@
 #include <cmath>
 #include "yaml-cpp/yaml.h"
 #include <iostream>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+class ThreadingConfig {
+public:
+    // 0 means "use the OpenMP runtime default". Positive values cap every
+    // OpenMP region that does not already have a smaller work-specific limit.
+    int max_logical_cores = 0;
+
+    void explodeConfig(const YAML::Node& node) {
+        if (!node) {
+            return;
+        }
+        const YAML::Node threadingNode = node["threading"] ? node["threading"] : node;
+        if (threadingNode["max_logical_cores"]) {
+            max_logical_cores = threadingNode["max_logical_cores"].as<int>();
+        }
+    }
+
+    int effectiveMaxLogicalCores() const {
+#ifdef _OPENMP
+        if (max_logical_cores <= 0) {
+            return std::max(1, omp_get_max_threads());
+        }
+        return std::min(std::max(1, max_logical_cores), std::max(1, omp_get_num_procs()));
+#else
+        return 1;
+#endif
+    }
+
+    void applyToOpenMpRuntime() const {
+#ifdef _OPENMP
+        if (max_logical_cores > 0) {
+            omp_set_num_threads(effectiveMaxLogicalCores());
+        }
+#endif
+    }
+
+    void printConfig() const {
+        std::cout << "Threading Config\n";
+        std::cout << "max_logical_cores: " << max_logical_cores << '\n';
+        std::cout << "effective_max_logical_cores: " << effectiveMaxLogicalCores() << '\n';
+    }
+};
 
 class SimulationConfig {
 public:
@@ -254,9 +299,7 @@ public:
         if (node["post_alignment_chunk_max_percentile"]) post_alignment_chunk_max_percentile = node["post_alignment_chunk_max_percentile"].as<float>();
         if (node["post_alignment_chunk_non_improvement_patience"]) post_alignment_chunk_non_improvement_patience = node["post_alignment_chunk_non_improvement_patience"].as<int>();
         if (node["post_alignment_chunk_disable_below_count"]) post_alignment_chunk_disable_below_count = node["post_alignment_chunk_disable_below_count"].as<int>();
-        if (node["post_alignment_chunk_detector_threads"]) post_alignment_chunk_detector_threads = node["post_alignment_chunk_detector_threads"].as<int>();
         if (node["post_alignment_tiny_particle_removal_enabled"]) post_alignment_tiny_particle_removal_enabled = node["post_alignment_tiny_particle_removal_enabled"].as<bool>();
-        if (node["preprocess_radius_batch_size"]) preprocess_radius_batch_size = node["preprocess_radius_batch_size"].as<int>();
         if (node["post_process_blur_sigma"]) post_process_blur_sigma = node["post_process_blur_sigma"].as<float>();
         if (node["post_process_final_blur_sigma"]) post_process_final_blur_sigma = node["post_process_final_blur_sigma"].as<float>();
         if (node["post_process_final_direct_weight"]) post_process_final_direct_weight = node["post_process_final_direct_weight"].as<float>();
@@ -365,9 +408,7 @@ public:
         std::cout << "post_alignment_chunk_max_percentile: " << post_alignment_chunk_max_percentile << '\n';
         std::cout << "post_alignment_chunk_non_improvement_patience: " << post_alignment_chunk_non_improvement_patience << '\n';
         std::cout << "post_alignment_chunk_disable_below_count: " << post_alignment_chunk_disable_below_count << '\n';
-        std::cout << "post_alignment_chunk_detector_threads: " << post_alignment_chunk_detector_threads << '\n';
         std::cout << "post_alignment_tiny_particle_removal_enabled: " << post_alignment_tiny_particle_removal_enabled << '\n';
-        std::cout << "preprocess_radius_batch_size: " << preprocess_radius_batch_size << '\n';
         std::cout << "post_process_blur_sigma: " << post_process_blur_sigma << '\n';
         std::cout << "post_process_final_blur_sigma: " << post_process_final_blur_sigma << '\n';
         std::cout << "post_process_final_direct_weight: " << post_process_final_direct_weight << '\n';
@@ -1034,6 +1075,7 @@ class BaseConfig {
 public:
     std::string cellType;
     std::unique_ptr<EllipsoidConfig> cell;
+    ThreadingConfig threading;
     SimulationConfig simulation;
     ProbabilityConfig prob;
 
@@ -1044,6 +1086,7 @@ public:
     BaseConfig(const BaseConfig& other)
         : cellType(other.cellType),
           cell(other.cell ? std::make_unique<EllipsoidConfig>(*other.cell) : nullptr),
+          threading(other.threading),
           simulation(other.simulation),
           prob(other.prob) {}
 
@@ -1051,6 +1094,7 @@ public:
         if (this != &other) {
             cellType = other.cellType;
             cell = other.cell ? std::make_unique<EllipsoidConfig>(*other.cell) : nullptr;
+            threading = other.threading;
             simulation = other.simulation;
             prob = other.prob;
         }
@@ -1069,7 +1113,16 @@ public:
         prob.explodeConfig(node["prob"]);
     }
 
+    void explodeThreadingConfig(const YAML::Node& node) {
+        threading.explodeConfig(node);
+        const int limit = threading.effectiveMaxLogicalCores();
+        simulation.post_alignment_chunk_detector_threads = limit;
+        simulation.preprocess_radius_batch_size = limit;
+        threading.applyToOpenMpRuntime();
+    }
+
     void printConfig() const {
+        threading.printConfig();
         simulation.printConfig();
         prob.printConfig();
     }

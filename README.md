@@ -1,5 +1,13 @@
 # CellUniverse
 
+## 04302026 Update: Cold Spring Harbor Labortory Conference Demo
+
+![CellUniverse embryo demo](Demo_Gif/embryo_demo_1_84_3panel_2fps_oblique.gif)
+
+*Cell challenge embryo dataset CellUniverse demo result. The top row shows the real microscopy volume projection and the fitted synthetic reconstruction. The bottom panel overlays the synthetic result on the real data so the spatial agreement between the real data and the fitted model can be viewed directly over time.*
+
+CellUniverse models each cell as a 3D geometric object, renders a synthetic volume from the current cell states, and compares that synthetic result against the real microscopy data. A stochastic optimization loop then updates cell position, size, orientation, and split state frame by frame so the synthetic reconstruction stays aligned with the real embryo while preserving lineage continuity across time.
+
 CellUniverse is a cell tracking system that fits geometric cell models to time-lapse microscopy images using Monte Carlo stochastic optimization. Given an initial guess of cell positions, sizes, and orientations, it iteratively perturbs a synthetic rendering to match the real image, detecting cell divisions along the way to produce a complete lineage map across all frames.
 
 Published paper: [Cell Universe - MDPI Algorithms 2022](https://www.mdpi.com/1999-4893/15/2/51) (also available as [PDF](docs/Cell-Universe-published.pdf))

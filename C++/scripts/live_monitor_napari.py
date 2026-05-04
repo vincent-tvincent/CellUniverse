@@ -142,6 +142,7 @@ class LiveMonitor:
         self.z_offset = z_offset
         self.viewer = napari.Viewer(title=f"CellUniverse live monitor: {output_dir.name}")
         self.loaded_frame_ids: tuple[int, ...] = ()
+        self.last_wait_reason = ""
         self.timer = QTimer()
         self.timer.setInterval(int(max(0.01, interval_minutes) * 60_000))
         self.timer.timeout.connect(self.poll)
@@ -152,8 +153,16 @@ class LiveMonitor:
         napari.run()
 
     def poll(self) -> None:
+        wait_reason = self.wait_reason()
+        if wait_reason:
+            self.report_wait(wait_reason)
+            return
+
         frame_ids = complete_frame_ids(self.output_dir)
-        if not frame_ids or frame_ids == self.loaded_frame_ids:
+        if not frame_ids:
+            self.report_wait("waiting for complete matching frame files in all layer folders")
+            return
+        if frame_ids == self.loaded_frame_ids:
             return
 
         try:
@@ -187,6 +196,26 @@ class LiveMonitor:
             f"({frame_ids[0]}..{frame_ids[-1]})"
         )
 
+    def wait_reason(self) -> str:
+        if not self.output_dir.is_dir():
+            return f"waiting for output directory to be created: {self.output_dir}"
+
+        missing = [
+            str(spec.relative_dir)
+            for spec in LAYER_SPECS
+            if not (self.output_dir / spec.relative_dir).is_dir()
+        ]
+        if missing:
+            return f"waiting for required layer folders: {', '.join(missing)}"
+
+        return ""
+
+    def report_wait(self, reason: str) -> None:
+        if reason == self.last_wait_reason:
+            return
+        self.last_wait_reason = reason
+        print(f"[live-monitor] {reason}", file=sys.stderr)
+
     def load_all_layers(self, frame_ids: tuple[int, ...]) -> list[tuple[LayerSpec, np.ndarray]]:
         loaded = []
         for spec in LAYER_SPECS:
@@ -199,15 +228,6 @@ class LiveMonitor:
 def main() -> int:
     args = parse_args()
     output_dir = args.output_dir.expanduser().resolve()
-    if not output_dir.is_dir():
-        print(f"Output directory does not exist: {output_dir}", file=sys.stderr)
-        return 2
-
-    missing = [str(spec.relative_dir) for spec in LAYER_SPECS if not (output_dir / spec.relative_dir).is_dir()]
-    if missing:
-        print(f"Output directory is missing required layer folders: {', '.join(missing)}", file=sys.stderr)
-        return 2
-
     LiveMonitor(output_dir, args.interval, args.z_offset).start()
     return 0
 

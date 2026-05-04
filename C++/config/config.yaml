@@ -140,7 +140,7 @@ simulation:
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
   z_scaling: 7
-  blur_sigma: 1.1 # 0.0
+  blur_sigma: 0.0 # 1.1
 
   iterative_penalty: 0.1
   iterative_penalty_range: 1.0
@@ -204,7 +204,7 @@ simulation:
   # using 26-neighbor connectivity. A chunk is counted when each z/y/x
   # bounding-box dimension is in [min_size, max_size]. If too many chunks
   # remain, raise the percentile and reapply blackoff until count <= target.
-  post_alignment_chunk_blackoff_enabled: true # no need for good data
+  post_alignment_chunk_blackoff_enabled: false # no need for good data
   post_alignment_chunk_target_count: 15 # 15 
   post_alignment_chunk_min_size: 5
   post_alignment_chunk_max_size: 10
@@ -228,7 +228,7 @@ simulation:
   post_process_final_blurred_amplification: 0.5
   post_alignment_final_blur_sigma: 1.25
 
-  export_preprocessed_images: false
+  export_preprocessed_images: true
   # Debug signal-guidance localization. When true, exports two stacks per
   # frame under signal_debug/: center cubes on black background and a
   # grayscale perturb-probability field on black background.

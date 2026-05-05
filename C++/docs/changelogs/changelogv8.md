@@ -995,3 +995,8 @@ The log tag is `[PCA Bridge Propose]` (consistent with the discover-only naming 
 ### Open follow-ups
 
 - Tune `pca_bridge_min_long_mid_ratio` and `pca_bridge_max_mid_short_ratio` against fluo runs. 1.35/1.35 may be too tight for asymmetric divisions where one daughter remains larger.
+
+---
+
+**Status: CLOSED 2026-05-04** at Change 13b (PCA-bridge prolate-shape gate port).
+Continued in [`changelogv9.md`](./changelogv9.md), opening with Change 14 (auto-calibration from frame zero).

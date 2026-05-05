@@ -18,6 +18,11 @@ public:
     float z_scaling;
     float blur_sigma;
     int z_slices;
+    // ---- DEPRECATED 2026-05-04: superseded by auto_calibrate_brightness ----
+    // Still parsed for backward compatibility; ignored when
+    // auto_calibrate_brightness_enabled is true. Slated for removal once the
+    // calibrated preprocessing path is the only path. See
+    // docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
     float iterative_penalty = 0.1f;
     float iterative_penalty_range = 0.9f;
     float iterative_reward_gate = 1.0f;
@@ -36,6 +41,11 @@ public:
     int iterative_max_count = 300;
     float iterative_improvement_tolerance = 0.01f;
     float iterative_score_percentile = 0.05f;
+    // ---- DEPRECATED 2026-05-04: superseded by auto_calibrate_brightness ----
+    // Still parsed for backward compatibility; ignored when
+    // auto_calibrate_brightness_enabled is true. Slated for removal once the
+    // calibrated preprocessing path is the only path. See
+    // docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
     float contrast_structure_threshold = 0.02f;
     float contrast_background_floor = 0.02f;
     float contrast_bright_fraction = 0.02f;
@@ -47,9 +57,32 @@ public:
     float contrast_eps = 1e-6f;
     bool frame_intensity_normalization_enabled = true;
     bool frame_intensity_percentile_exclude_zeros = false;
+    // ---- DEPRECATED 2026-05-04: superseded by auto_calibrate_brightness ----
+    // Still parsed for backward compatibility; ignored when
+    // auto_calibrate_brightness_enabled is true. Slated for removal once the
+    // calibrated preprocessing path is the only path. See
+    // docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
     float frame_intensity_scale_low_percentile = 0.01f;
     float frame_intensity_scale_high_percentile = 0.995f;
     float frame_intensity_hard_max = 0.0f;
+    // ---- Auto-calibration from frame 0 (2026-05-04) ----
+    // Replaces the dataset-specific iterative_*/contrast_*/frame_intensity_scale_*
+    // pipeline. When enabled, the system measures median brightness inside vs
+    // outside the initial CSV cell ellipsoids on frame 0, then linearly maps
+    // (bg, cell) -> (0, 1) for every frame. All bio thresholds (bridge edge
+    // brightness, valley ratio, etc.) become portable as fractions of cell
+    // brightness instead of absolute values calibrated to one dataset.
+    bool auto_calibrate_brightness_enabled = true;
+    // Manual override of the auto-detected anchors. Both must be > 0 to take
+    // effect, otherwise auto-detection runs.
+    float manual_background_intensity = -1.0f;
+    float manual_cell_intensity = -1.0f;
+    // Sample only pixels within (cell_inner_fraction × radii) of the cell
+    // center to avoid halo + boundary contamination. 0.7 = 70% of each radius.
+    float calibration_cell_inner_fraction = 0.7f;
+    // Drop the brightest and dimmest pixel_trim_percent of each cell's pixels
+    // before computing the median. Defends against saturation + edge halo.
+    float calibration_pixel_trim_percent = 0.10f;
     bool edge_brightness_alignment_enabled = false;
     int edge_brightness_alignment_xy_margin = 24;
     int edge_brightness_alignment_left_offset = 0;
@@ -234,6 +267,11 @@ public:
         if (node["iterative_score_max"]) iterative_score_max = node["iterative_score_max"].as<float>();
         if (node["iterative_score_target_tolerance"]) iterative_score_target_tolerance = node["iterative_score_target_tolerance"].as<float>();
         if (node["iterative_max_count"]) iterative_max_count = node["iterative_max_count"].as<int>();
+        if (node["auto_calibrate_brightness_enabled"]) auto_calibrate_brightness_enabled = node["auto_calibrate_brightness_enabled"].as<bool>();
+        if (node["manual_background_intensity"]) manual_background_intensity = node["manual_background_intensity"].as<float>();
+        if (node["manual_cell_intensity"]) manual_cell_intensity = node["manual_cell_intensity"].as<float>();
+        if (node["calibration_cell_inner_fraction"]) calibration_cell_inner_fraction = node["calibration_cell_inner_fraction"].as<float>();
+        if (node["calibration_pixel_trim_percent"]) calibration_pixel_trim_percent = node["calibration_pixel_trim_percent"].as<float>();
         if (node["iterative_improvement_tolerance"]) iterative_improvement_tolerance = node["iterative_improvement_tolerance"].as<float>();
         if (node["iterative_score_percentile"]) iterative_score_percentile = node["iterative_score_percentile"].as<float>();
         if (node["contrast_structure_threshold"]) contrast_structure_threshold = node["contrast_structure_threshold"].as<float>();
@@ -358,6 +396,11 @@ public:
         std::cout << "iterative_score_max: " << iterative_score_max << '\n';
         std::cout << "iterative_score_target_tolerance: " << iterative_score_target_tolerance << '\n';
         std::cout << "iterative_max_count: " << iterative_max_count << '\n';
+        std::cout << "auto_calibrate_brightness_enabled: " << auto_calibrate_brightness_enabled << '\n';
+        std::cout << "manual_background_intensity: " << manual_background_intensity << '\n';
+        std::cout << "manual_cell_intensity: " << manual_cell_intensity << '\n';
+        std::cout << "calibration_cell_inner_fraction: " << calibration_cell_inner_fraction << '\n';
+        std::cout << "calibration_pixel_trim_percent: " << calibration_pixel_trim_percent << '\n';
         std::cout << "iterative_improvement_tolerance: " << iterative_improvement_tolerance << '\n';
         std::cout << "iterative_score_percentile: " << iterative_score_percentile << '\n';
         std::cout << "contrast_structure_threshold: " << contrast_structure_threshold << '\n';

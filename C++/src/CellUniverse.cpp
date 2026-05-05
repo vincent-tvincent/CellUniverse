@@ -1882,7 +1882,7 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
             normalizeStackToFrameIntensity(probe, config.simulation);
         }
         probe = ImageHandler::preprocessLoadedFrame(
-            probe, imagePaths.front().string(), config, &probePre);
+            probe, imagePaths.front().string(), config, &brightnessCalibration, &probePre);
         config.simulation.z_slices = static_cast<int>(probe.size());
         Ellipsoid::cellConfig.maxZ = static_cast<float>(probe.size()) - 1.0f;
         std::cout << "[M2 Probe] post-preprocess z_slices=" << probe.size()
@@ -1930,7 +1930,16 @@ void CellUniverse::prepareFrame(int frameIndex)
                                    config, &rawLog);
     std::cout << rawLog.str();
 
-    if (config.simulation.frame_intensity_normalization_enabled) {
+    // Skip the percentile-based intensity normalization when auto-calibration
+    // is active and valid — calibration anchors were measured against the
+    // RAW frame, so the calibrated preprocess path expects raw input. Running
+    // normalize first would map raw->normalized, then the calibration anchors
+    // would mismatch and clip everything to 0. Constructor's M2 probe runs
+    // before calibration is installed (Uninitialized), so legacy normalize
+    // still runs there.
+    const bool calibratedActive = config.simulation.auto_calibrate_brightness_enabled
+        && brightnessCalibration.isValid();
+    if (config.simulation.frame_intensity_normalization_enabled && !calibratedActive) {
         const auto [lowReference, highReference] =
             normalizeStackToFrameIntensity(real_frame, config.simulation);
         std::cout << "[Frame Intensity Scale] frame="
@@ -1942,7 +1951,7 @@ void CellUniverse::prepareFrame(int frameIndex)
     } else {
         std::cout << "[Frame Intensity Scale] frame="
                   << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " enabled=0"
+                  << " enabled=" << (calibratedActive ? "skipped_for_calibration" : "0")
                   << " mean=" << computeStackMean(real_frame)
                   << '\n';
     }
@@ -1950,7 +1959,7 @@ void CellUniverse::prepareFrame(int frameIndex)
     real_frame = ImageHandler::preprocessLoadedFrame(
         real_frame,
         imagePaths[static_cast<size_t>(frameIndex)].string(),
-        config, &preprocessLog);
+        config, &brightnessCalibration, &preprocessLog);
     std::cout << preprocessLog.str();
     if (config.simulation.edge_brightness_alignment_enabled &&
         !edgeBrightnessAlignmentTargetInitialized) {
@@ -2048,6 +2057,114 @@ void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
     }
 }
 
+namespace {
+
+float trimmedMedian(std::vector<float> &values, float trim_percent) {
+    if (values.empty()) return 0.0f;
+    std::sort(values.begin(), values.end());
+    const std::size_t n = values.size();
+    const std::size_t lo = static_cast<std::size_t>(trim_percent * n);
+    const std::size_t hi = n - lo;
+    if (hi <= lo) return values[n / 2];
+    const std::size_t midIdx = lo + (hi - lo) / 2;
+    return values[midIdx];
+}
+
+bool pointInsideScaledEllipsoid(const Ellipsoid &cell, float scale,
+                                int x, int y, int z, float zScale) {
+    // Cell positions and radii are in interpolated z-space (CellFactory
+    // multiplies the initial CSV z by config.simulation.z_scaling). When we
+    // scan a RAW frame's z slices (which are NOT interpolated), we must
+    // multiply the raw z index by zScale to bring it into the cell's
+    // coordinate system. The 2026-05-04 calibration uses raw frame for
+    // efficiency, so this conversion is required. zScale=1 (default) keeps
+    // the helper compatible with synthetic unit tests where cells live in
+    // raw-z space.
+    const float dx = static_cast<float>(x) - cell.getX();
+    const float dy = static_cast<float>(y) - cell.getY();
+    const float dz = static_cast<float>(z) * zScale - cell.getZ();
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    const double lx = R_T[0]*dx + R_T[1]*dy + R_T[2]*dz;
+    const double ly = R_T[3]*dx + R_T[4]*dy + R_T[5]*dz;
+    const double lz = R_T[6]*dx + R_T[7]*dy + R_T[8]*dz;
+    const float ra = std::max(1e-3f, cell.getARadius() * scale);
+    const float rb = std::max(1e-3f, cell.getBRadius() * scale);
+    const float rc = std::max(1e-3f, cell.getCRadius() * scale);
+    const double v = (lx*lx)/(ra*ra) + (ly*ly)/(rb*rb) + (lz*lz)/(rc*rc);
+    return v <= 1.0;
+}
+
+}  // namespace
+
+BrightnessCalibration CellUniverse::computeAutoCalibration(
+    const std::vector<Ellipsoid> &cells,
+    const std::vector<cv::Mat> &rawFrame0,
+    const BaseConfig &config)
+{
+    BrightnessCalibration cal;
+
+    const float manualBg = config.simulation.manual_background_intensity;
+    const float manualCell = config.simulation.manual_cell_intensity;
+    if (manualBg > 0.0f && manualCell > 0.0f && manualCell > manualBg) {
+        cal.background_intensity = manualBg;
+        cal.cell_intensity = manualCell;
+        cal.source = BrightnessCalibrationSource::ManualOverride;
+        return cal;
+    }
+
+    if (cells.empty() || rawFrame0.empty()) return cal;
+
+    const int height = rawFrame0[0].rows;
+    const int width = rawFrame0[0].cols;
+    const int depth = static_cast<int>(rawFrame0.size());
+    const float innerScale = config.simulation.calibration_cell_inner_fraction;
+    const float trim = config.simulation.calibration_pixel_trim_percent;
+    // Map raw z to cell's interpolated z. Cells live in interpolated coords
+    // (CellFactory multiplies CSV z by z_scaling). When z_scaling=1 (unit
+    // tests with synthetic frame in raw-z), this is a no-op.
+    const float zScale = std::max(1.0f, static_cast<float>(config.simulation.z_scaling));
+
+    std::vector<float> cellPixels;
+    std::vector<float> bgPixels;
+    cellPixels.reserve(static_cast<std::size_t>(width) * height * depth / 100);
+    bgPixels.reserve(static_cast<std::size_t>(width) * height * depth);
+
+    // For background sampling: skip any pixel inside ANY cell's full-radius
+    // ellipsoid. For cell sampling: include pixels inside the inner-fraction
+    // ellipsoid of any non-trash cell.
+    for (int z = 0; z < depth; ++z) {
+        const cv::Mat &slice = rawFrame0[z];
+        for (int y = 0; y < height; ++y) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = 0; x < width; ++x) {
+                const float v = row[x];
+                bool insideAny = false;
+                bool insideInnerNonTrash = false;
+                for (const auto &cell : cells) {
+                    if (pointInsideScaledEllipsoid(cell, 1.0f, x, y, z, zScale)) {
+                        insideAny = true;
+                        if (!cell.isTrash() && pointInsideScaledEllipsoid(cell, innerScale, x, y, z, zScale)) {
+                            insideInnerNonTrash = true;
+                        }
+                    }
+                }
+                if (insideInnerNonTrash) cellPixels.push_back(v);
+                if (!insideAny) bgPixels.push_back(v);
+            }
+        }
+    }
+
+    if (cellPixels.empty() || bgPixels.empty()) return cal;
+
+    cal.cell_intensity = trimmedMedian(cellPixels, trim);
+    cal.background_intensity = trimmedMedian(bgPixels, trim);
+    cal.cell_pixel_count = cellPixels.size();
+    cal.background_pixel_count = bgPixels.size();
+    cal.source = BrightnessCalibrationSource::AutoFrameZero;
+    return cal;
+}
+
 void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFrames)
 {
     struct PreprocessedFrame
@@ -2071,7 +2188,11 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                                        &rawLog);
         std::cout << rawLog.str();
 
-        if (config.simulation.frame_intensity_normalization_enabled) {
+        // See "calibratedActive" comment at the prepareFrame call site —
+        // skip percentile-based normalization when calibrated path is active.
+        const bool calibratedActiveLocal = config.simulation.auto_calibrate_brightness_enabled
+            && brightnessCalibration.isValid();
+        if (config.simulation.frame_intensity_normalization_enabled && !calibratedActiveLocal) {
             const auto [lowReference, highReference] =
                 normalizeStackToFrameIntensity(realFrame, config.simulation);
             std::cout << "[Frame Intensity Scale] frame="
@@ -2092,6 +2213,7 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
             realFrame,
             imagePaths[static_cast<size_t>(frameIndex)].string(),
             config,
+            &brightnessCalibration,
             &preprocessLog);
         std::cout << preprocessLog.str();
 

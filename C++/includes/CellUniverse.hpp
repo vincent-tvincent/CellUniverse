@@ -3,6 +3,7 @@
 
 #include <opencv2/opencv.hpp>
 #include "ConfigTypes.hpp"
+#include "CalibrationTypes.hpp"
 #include "Frame.hpp"
 #include "types.hpp"
 #include "Ellipsoid.hpp"
@@ -28,6 +29,27 @@ public:
                  std::string outputPath,
                  int firstFrame = 0,
                  int continueFrom = -1);
+
+    // Compute brightness anchors from frame 0 + initial cells. Pure function,
+    // no member mutation — used by both the production path and the unit
+    // tests. When manual_*_intensity overrides are set, returns those
+    // verbatim. When cells is empty, returns an Uninitialized calibration.
+    static BrightnessCalibration computeAutoCalibration(
+        const std::vector<Ellipsoid> &cells,
+        const std::vector<cv::Mat> &rawFrame0,
+        const BaseConfig &config);
+
+    // Storage accessors for the brightness calibration computed at startup.
+    // Task 4 wiring: main.cpp computes the calibration via
+    // computeAutoCalibration() and installs it here. Downstream consumers
+    // (Task 5+) read it via getBrightnessCalibration() to drive the
+    // calibrated preprocessing path. No behavior change in Task 4 itself.
+    void setBrightnessCalibration(const BrightnessCalibration &cal) {
+        brightnessCalibration = cal;
+    }
+    const BrightnessCalibration &getBrightnessCalibration() const {
+        return brightnessCalibration;
+    }
 
     void optimize(int frameIndex);
     void saveImages(int frameIndex, const std::string &stage = "");
@@ -88,6 +110,11 @@ private:
    // M2 state: per-frame paths retained for lazy load and initial-cells map.
    PathVec imagePaths;
    std::map<std::string, std::vector<Ellipsoid>> initialCells;
+
+   // Brightness calibration anchors (background, cell). Populated by Task 4
+   // wiring via computeAutoCalibration() from frame 0 + initial cells.
+   // Storage only — computeAutoCalibration() is pure and does not mutate it.
+   BrightnessCalibration brightnessCalibration;
    float edgeBrightnessAlignmentTarget = 0.0f;
    bool edgeBrightnessAlignmentTargetInitialized = false;
    int continueFrom = -1;

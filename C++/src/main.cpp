@@ -11,6 +11,7 @@
 #include "Ellipsoid.hpp"
 #include "CellUniverse.hpp"
 #include "ImageHandler.hpp"
+#include "CalibrationTypes.hpp"
 #include <chrono>
 #include <algorithm>
 
@@ -149,8 +150,31 @@ int main(int argc, char *argv[])
     CellFactory cellFactory(config);
     std::map<Path, std::vector<Ellipsoid>> cells = cellFactory.createCells(args.initial, config.simulation.z_slices / 2,
                                                                         config.simulation.z_scaling, firstFrameFile);
+
+    // Auto-calibrate brightness from frame 0 cells. This must run BEFORE the
+    // CellUniverse loads/preprocesses any frame, because the calibrated
+    // preprocessing path needs the (background, cell) anchors to scale every
+    // frame. See docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
+    BrightnessCalibration calibration;
+    if (config.simulation.auto_calibrate_brightness_enabled) {
+        if (cells.empty() || imageFilePaths.empty()) {
+            std::cerr << "[Auto Calibration] cells or imageFilePaths empty; "
+                         "skipping calibration. The calibrated preprocessing path "
+                         "will fall back to legacy iterative preprocessing.\n";
+        } else {
+            const auto &firstFrameCells = cells.begin()->second;
+            std::vector<cv::Mat> rawFrame0 = ImageHandler::loadRawFrame(
+                imageFilePaths.front().string(), config);
+            calibration = CellUniverse::computeAutoCalibration(
+                firstFrameCells, rawFrame0, config);
+            std::cout << "[Auto Calibration] " << calibrationDescribe(calibration)
+                      << std::endl;
+        }
+    }
+
     // create lineage
     CellUniverse lineage = CellUniverse(cells, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
+    lineage.setBrightnessCalibration(calibration);
     const bool prepareAnalyzeOneFrame =
         config.simulation.prepare_analyze_one_frame &&
         !config.simulation.quit_after_preprocessing;

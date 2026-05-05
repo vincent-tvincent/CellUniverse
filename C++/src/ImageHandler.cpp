@@ -1484,6 +1484,97 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
     return interpolatedZSlices;
 }
 
+std::vector<cv::Mat> ImageHandler::applyCalibratedPreprocess(
+    const std::vector<cv::Mat> &normalizedSlices,
+    const BrightnessCalibration &calibration,
+    const BaseConfig &config,
+    std::ostream *logSink)
+{
+    std::ostream &log = logSink ? *logSink : std::cout;
+    if (!calibration.isValid()) {
+        log << "[Calibrated Preprocess] calibration invalid; returning input unchanged\n";
+        return normalizedSlices;
+    }
+
+    // Step 1: linear normalize via calibration anchors -> [0, 1]
+    std::vector<cv::Mat> linearScaled;
+    linearScaled.reserve(normalizedSlices.size());
+    const float bg = calibration.background_intensity;
+    const float span = calibration.cell_intensity - bg;
+    for (const auto &slice : normalizedSlices) {
+        cv::Mat out;
+        slice.convertTo(out, CV_32F, 1.0f / span, -bg / span);
+        cv::min(out, 1.0f, out);
+        cv::max(out, 0.0f, out);
+        linearScaled.push_back(out);
+    }
+
+    // Step 2: final blur (matches the legacy pipeline's final smoothing).
+    // Cheap dataset-agnostic step that smooths cost landscape so MC perturb
+    // doesn't get stuck on per-pixel noise. blur_sigma=0 disables.
+    if (config.simulation.blur_sigma > 0.0f) {
+        const int ksize = std::max(3, 2 * static_cast<int>(std::ceil(3.0f * config.simulation.blur_sigma)) + 1);
+        for (auto &slice : linearScaled) {
+            cv::GaussianBlur(slice, slice, cv::Size(ksize, ksize),
+                             config.simulation.blur_sigma, config.simulation.blur_sigma,
+                             cv::BORDER_REPLICATE);
+        }
+    }
+
+    // Step 3: z-interpolate (mirror the existing preprocessLoadedFrame
+    // interpolation behavior to keep the optimizer's z-axis sample density
+    // consistent with the legacy pipeline).
+    const int expandFactor = static_cast<int>(config.simulation.z_scaling);
+    if (linearScaled.size() <= 1 || expandFactor <= 1) {
+        log << "[Calibrated Preprocess] " << calibrationDescribe(calibration)
+            << " input_slices=" << normalizedSlices.size()
+            << " output_slices=" << linearScaled.size()
+            << " (no z-interp)\n";
+        return linearScaled;
+    }
+
+    const unsigned numSynthSlices =
+        static_cast<unsigned>(expandFactor) * (linearScaled.size() - 1U) + 1U;
+    std::vector<cv::Mat> interpolated(numSynthSlices);
+
+    #pragma omp parallel for schedule(static)
+    for (int idx = 0; idx < static_cast<int>(numSynthSlices); ++idx) {
+        const int loIdx = idx / expandFactor;
+        const int hiIdx = std::min(static_cast<int>(linearScaled.size()) - 1, loIdx + 1);
+        const float t = static_cast<float>(idx % expandFactor) / static_cast<float>(expandFactor);
+        cv::Mat blended = (1.0f - t) * linearScaled[loIdx] + t * linearScaled[hiIdx];
+        interpolated[idx] = blended;
+    }
+
+    log << "[Calibrated Preprocess] " << calibrationDescribe(calibration)
+        << " input_slices=" << normalizedSlices.size()
+        << " output_slices=" << interpolated.size() << "\n";
+    return interpolated;
+}
+
+std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(
+    const std::vector<cv::Mat> &normalizedSlices,
+    const std::string &imageFile,
+    const BaseConfig &config,
+    const BrightnessCalibration *calibration,
+    std::ostream *logSink)
+{
+    std::ostream &log = logSink ? *logSink : std::cout;
+    const bool calibratedPath = config.simulation.auto_calibrate_brightness_enabled
+        && calibration != nullptr
+        && calibration->isValid();
+
+    if (calibratedPath) {
+        log << "[Preprocess Dispatch] file=" << fs::path(imageFile).filename().string()
+            << " path=calibrated\n";
+        return applyCalibratedPreprocess(normalizedSlices, *calibration, config, logSink);
+    }
+
+    log << "[Preprocess Dispatch] file=" << fs::path(imageFile).filename().string()
+        << " path=legacy_iterative\n";
+    return preprocessLoadedFrame(normalizedSlices, imageFile, config, logSink);
+}
+
 std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,
                                              BaseConfig &config,
                                              std::ostream *logSink)

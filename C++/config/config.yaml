@@ -177,6 +177,29 @@ simulation:
   frame_intensity_scale_high_percentile: 0.99
   frame_intensity_hard_max: 512.0
 
+  # Auto-calibration from frame 0 (2026-05-04). See plan
+  # docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
+  # When true, dataset-specific iterative_*/contrast_*/frame_intensity_scale_*
+  # tunables are bypassed in favor of inferring (background, cell) intensity
+  # from the initial CSV cell positions in frame 0.
+  auto_calibrate_brightness_enabled: true
+  # Manual override of frame-0 auto-calibration. Both must be > 0 (raw 16-bit
+  # intensity values, not normalized) to take effect; otherwise auto-detection
+  # runs against the initial CSV cell positions.
+  #
+  # Use this when:
+  #  - Frame 0 cells are mid-division (cell-stat estimate would be biased)
+  #  - The initial CSV is approximate and you've measured (bg, cell) by hand
+  #  - You want to lock the brightness scale across runs for direct comparison
+  #
+  # Workflow: open frame 0 in Fiji/Napari, measure mean intensity in a clean
+  # background ROI -> manual_background_intensity. Mean intensity at the center
+  # of a typical cell -> manual_cell_intensity.
+  manual_background_intensity: -1
+  manual_cell_intensity: -1
+  calibration_cell_inner_fraction: 0.7
+  calibration_pixel_trim_percent: 0.10
+
   # Edge brightness alignment runs after preprocessing and samples a
   # frame-shaped region on each XY slice.
   # left/right are relative to x=0 / x=image_width-1.

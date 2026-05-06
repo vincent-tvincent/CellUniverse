@@ -174,6 +174,7 @@ TEST(ManualOverrideEndToEndTest, ManualValuesPassThroughPreprocessing) {
     cfg.simulation.manual_cell_intensity = 800.0f;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
 
     auto cal = CellUniverse::computeAutoCalibration({}, {}, cfg);
     ASSERT_TRUE(cal.isValid());
@@ -187,4 +188,35 @@ TEST(ManualOverrideEndToEndTest, ManualValuesPassThroughPreprocessing) {
     auto out = ImageHandler::preprocessLoadedFrame(input, "manual.tif", cfg, &cal, nullptr);
     EXPECT_NEAR(out[0].at<float>(0, 0), 0.0f, 1e-3f);
     EXPECT_NEAR(out[0].at<float>(2, 2), 1.0f, 1e-3f);
+}
+
+TEST(BrightnessCalibrationTest, AutoCalibrationStoresFrameZeroMean) {
+    BaseConfig cfg;
+    cfg.simulation.auto_calibrate_brightness_enabled = true;
+    cfg.simulation.calibration_cell_inner_fraction = 0.7f;
+    cfg.simulation.calibration_pixel_trim_percent = 0.10f;
+    cfg.simulation.z_scaling = 1;
+
+    // 100x100x50 frame, mostly background (50.0) with a small cell (radius 10) at value 800.
+    const cv::Point3f center(50.0f, 50.0f, 25.0f);
+    auto frame = makeSyntheticFrame(100, 100, 50, /*bg*/ 50.0f, /*cell*/ 800.0f,
+                                    center, /*radius*/ 10.0f);
+
+    EllipsoidParams p;
+    p.name = "cell_1";
+    p.x = center.x; p.y = center.y; p.z = center.z;
+    p.aRadius = 10.0f; p.bRadius = 10.0f; p.cRadius = 10.0f;
+    p.theta_x = 0; p.theta_y = 0; p.theta_z = 0;
+    p.brightness = 1.0f;
+    std::vector<Ellipsoid> cells{ Ellipsoid(p) };
+
+    BrightnessCalibration cal = CellUniverse::computeAutoCalibration(cells, frame, cfg);
+
+    // Expected: frame mean = (n_cell_voxels * 800 + n_bg_voxels * 50) / total_voxels
+    // Cell sphere radius 10 has volume (4/3)*pi*1000 ~= 4188 voxels at 800.
+    // Total = 100*100*50 = 500,000 voxels.
+    // n_bg = 500000 - 4188 = 495812 at 50.
+    // mean = (4188*800 + 495812*50) / 500000 ~= (3,350,400 + 24,790,600) / 500,000 ~= 56.28
+    EXPECT_GT(cal.frame_0_mean, 50.0f);
+    EXPECT_LT(cal.frame_0_mean, 80.0f);
 }

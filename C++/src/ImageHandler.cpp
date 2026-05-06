@@ -1496,27 +1496,90 @@ std::vector<cv::Mat> ImageHandler::applyCalibratedPreprocess(
         return normalizedSlices;
     }
 
-    // Step 1: linear normalize via calibration anchors -> [0, 1]
+    // Step 1a: compute per-frame brightness ratio for anchor adjustment.
+    // ratio = current_frame_mean / frame_0_mean. Falls back to 1.0 (no
+    // adjustment) when frame_0_mean is zero (sentinel for "not populated"
+    // in older calibrations or manual-override paths that didn't compute it).
+    // Also skipped when simple_preprocess_enabled is true (caller wants
+    // a minimal, dataset-agnostic path: anchor remap + gentle blur only).
+    float ratio = 1.0f;
+    const bool simplePreprocess = config.simulation.simple_preprocess_enabled;
+    if (!simplePreprocess && calibration.frame_0_mean > 1e-6f) {
+        double currentSum = 0.0;
+        std::size_t currentPixels = 0;
+        for (const auto &slice : normalizedSlices) {
+            for (int y = 0; y < slice.rows; ++y) {
+                const float *row = slice.ptr<float>(y);
+                for (int x = 0; x < slice.cols; ++x) {
+                    currentSum += row[x];
+                    ++currentPixels;
+                }
+            }
+        }
+        const float currentMean = currentPixels > 0
+            ? static_cast<float>(currentSum / currentPixels)
+            : calibration.frame_0_mean;
+        ratio = currentMean / calibration.frame_0_mean;
+        // Clamp to a sane range — extreme values usually mean the input
+        // frame is corrupted or otherwise abnormal. 0.3..3.0 covers
+        // ±3× brightness shift which is well past any normal photobleaching.
+        ratio = std::clamp(ratio, 0.3f, 3.0f);
+    }
+
+    const float bg_n = calibration.background_intensity * ratio;
+    const float cell_n = calibration.cell_intensity * ratio;
+    const float span_n = std::max(1e-3f, cell_n - bg_n);
+
+    log << "[Calibrated Preprocess Ratio] frame_0_mean=" << calibration.frame_0_mean
+        << " ratio=" << ratio
+        << " bg_0=" << calibration.background_intensity
+        << " cell_0=" << calibration.cell_intensity
+        << " bg_n=" << bg_n
+        << " cell_n=" << cell_n
+        << "\n";
+
+    // Step 1b: linear normalize via bg/cell anchors → [0, 1].
+    // bg → 0, cell → 1. Mandatory for the L2 cost (synth cells render with
+    // `_brightness` clamped to [0.1, 0.98]) and for the bio gates that
+    // expect cell-edge brightness in absolute terms (e.g., 0.07 floor).
+    //
+    // Default path: clip to [0, 1] (cells saturate to pure white, bg to
+    // pure black). Aggressive but stable.
+    //
+    // Simple path (simple_preprocess on): skip the clipping. Pixel values
+    // can go above 1 (bright chromatin within a cell) or below 0 (sub-bg
+    // noise). Preserves intra-cell texture and bg gradient — essential for
+    // not "erasing particles" inside cells. Combined with the post-processing-
+    // chain skip in CellUniverse.cpp (blackThreshold, blackPercentile,
+    // tinyParticleRemoval, finalBlur), the optimizer sees a near-raw
+    // remapped frame: cells at ~1.0 with chromatin variation, bg at ~0
+    // with raw noise pattern.
     std::vector<cv::Mat> linearScaled;
     linearScaled.reserve(normalizedSlices.size());
-    const float bg = calibration.background_intensity;
-    const float span = calibration.cell_intensity - bg;
     for (const auto &slice : normalizedSlices) {
         cv::Mat out;
-        slice.convertTo(out, CV_32F, 1.0f / span, -bg / span);
-        cv::min(out, 1.0f, out);
-        cv::max(out, 0.0f, out);
+        slice.convertTo(out, CV_32F, 1.0f / span_n, -bg_n / span_n);
+        if (!simplePreprocess) {
+            cv::min(out, 1.0f, out);
+            cv::max(out, 0.0f, out);
+        }
         linearScaled.push_back(out);
     }
 
-    // Step 2: final blur (matches the legacy pipeline's final smoothing).
-    // Cheap dataset-agnostic step that smooths cost landscape so MC perturb
-    // doesn't get stuck on per-pixel noise. blur_sigma=0 disables.
-    if (config.simulation.blur_sigma > 0.0f) {
-        const int ksize = std::max(3, 2 * static_cast<int>(std::ceil(3.0f * config.simulation.blur_sigma)) + 1);
+    // Step 2: dataset-agnostic Gaussian blur. The default `calibrated_preprocess_blur_sigma=3.0`
+    // smooths intra-cell chromatin patterns (5-10 px scale) into uniform-
+    // looking cells while preserving cell edges (30-40 px scale). When the
+    // simple_preprocess toggle is on, use `simple_preprocess_blur_sigma`
+    // instead (default 1.0 — gentle noise removal that does not soften
+    // cell edges).
+    const float blurSigma = simplePreprocess
+        ? config.simulation.simple_preprocess_blur_sigma
+        : config.simulation.calibrated_preprocess_blur_sigma;
+    if (blurSigma > 0.0f) {
+        const int ksize = std::max(3, 2 * static_cast<int>(std::ceil(3.0f * blurSigma)) + 1);
         for (auto &slice : linearScaled) {
             cv::GaussianBlur(slice, slice, cv::Size(ksize, ksize),
-                             config.simulation.blur_sigma, config.simulation.blur_sigma,
+                             blurSigma, blurSigma,
                              cv::BORDER_REPLICATE);
         }
     }

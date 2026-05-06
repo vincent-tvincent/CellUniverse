@@ -314,3 +314,238 @@ Mean cell radii at f50 are ~7–15% smaller in the calibrated run (mean aR 31.3 
 - Smoke test artifacts:
   - Fluo: `outputs/output_calibrated_smoke3_20260504_235756/`
   - Embryo: `outputs/output_calibrated_orig_smoke_20260505_001230/`
+
+---
+
+## 2026-05-05 — 2026-05-06
+
+## Change 15: Auto-derive geometry from initial CSV (Phase 1) **ACTIVE**
+
+After auto-calibration (Change 14) freed brightness anchors, this change collapses the dataset-specific *geometry* knobs by deriving them from initial-CSV statistics. After this lands, a new dataset only needs (1) initial CSV with cell positions and radii, (2) `z_scaling` in `simulation:`. Per-field manual override via `simulation.geometry_force_*` for the rare case where auto-derive picks the wrong value.
+
+### Files changed
+- New: `C++/includes/GeometryDerivation.hpp` (`ImageSize3D` + `DerivedGeometry` POD + `derivedGeometryDescribe`)
+- `C++/includes/CellUniverse.hpp` — added `static computeDerivedGeometry()` and `static applyDerivedGeometry()`
+- `C++/src/CellUniverse.cpp` — pure `computeDerivedGeometry()` and mutating `applyDerivedGeometry()`
+- `C++/src/main.cpp` — wired between `cellFactory.createCells` and the auto-calibration block
+- `C++/includes/ConfigTypes.hpp` — `auto_derive_geometry_enabled` (default true) + 12 `geometry_force_*` overrides
+- `C++/config/config.yaml` — defaults
+- New: `C++/tests/geometry_derivation_test.cc` — 9 tests; `ensureEllipsoidConfigDefaults()` helper
+
+### Formulas
+For non-trash cells in the initial CSV (post oblate `c≤a` clamp from `Ellipsoid` ctor):
+
+| Output | Formula |
+|---|---|
+| `max_a/b/c_radius` | `max(axis) × 2.0` |
+| `min_a/b/c_radius` | `mean(axis) × 0.2` |
+| `perturb_reference_radius` | `mean(a)` |
+| `x_sigma`, `y_sigma` | `mean(a) × 0.15` |
+| `z_sigma` | `mean(c) × 0.30` |
+| `position_prior_threshold` | `mean(a) × 0.8` |
+| `iterations_per_cell` | `clamp(n_cells × 30, 150, 500)` |
+| `pca_bridge_min_side_voxels` | `clamp(mean_volume × 0.05, 20, 200)` |
+
+### Effect on each dataset
+```
+[Auto-Derive Geometry] Fluo (4 cells):     max_a=80 min_a=7.8  ref_r=39   xy_sigma=5.85 z_sigma=11.7 mean_a=39
+[Auto-Derive Geometry] Embryo (6 cells):   max_a=62 min_a=5.06 ref_r=25.3 xy_sigma=3.79 z_sigma=7.59 mean_a=25.3
+```
+Same formulas, dataset-appropriate numbers.
+
+### Tests
+50/50 pass. Test floats use `static_cast<double>(7.8f)` to handle float-to-double precision mismatch.
+
+---
+
+## Change 16: `simple_preprocess` toggle — preserve intra-cell texture for shape fit **ACTIVE**
+
+Diagnosed via 2026-05-05 f0-5 fluo smoke. The original `calibrated_preprocess_blur_sigma=3.0` over-smoothed cell edges, the PCA shape fit picked up halos as cell support, fitted radii went near-spherical (max/min 1.2-1.3), `worldSplitAxis` returned random directions, and the bio gate `daughter_short_axis_misaligned` rejected splits. Fix: a toggle that drops aggressive blur + per-frame ratio + post-anchor clipping; keeps the bg/cell anchor remap (mandatory for L2 cost) + z-interpolation.
+
+### Files changed
+- `C++/includes/ConfigTypes.hpp` — `simple_preprocess_enabled` (default true), `simple_preprocess_blur_sigma` (default 1.5)
+- `C++/src/ImageHandler.cpp::applyCalibratedPreprocess` — when toggle on:
+  - Skip per-frame photobleaching ratio (`ratio` stays 1.0)
+  - Use `simple_preprocess_blur_sigma` instead of `calibrated_preprocess_blur_sigma`
+  - Skip the `cv::min/max` clipping to `[0,1]` (intra-cell chromatin > 1.0 and bg variation < 0.0 preserved)
+- `C++/config/config.yaml` — `simple_preprocess_enabled: true`, `simple_preprocess_blur_sigma: 1.5`
+
+### Effect
+Daughter PCA-fit elongation max/min went from 1.23 (round, unstable axis) to 1.5-1.81 (properly elongated, stable axis). Both f4 fluo splits succeed.
+
+### Limitation acknowledged
+PNG-write still clips to [0,255] so saved frames look the same. The improvement is in the cost-surface input only. Earlier attempts to drop the bg/cell remap entirely (raw/255 + blur only) broke the bio gates because they assume cell brightness ~1.0; reverted. Adaptive gates (Changes 18 + 19) are the path forward for raw-mode visuals.
+
+---
+
+## Change 17: Pre-filter candidates at SEED before burn-in **ACTIVE — perf-critical**
+
+Profiling revealed `trySplitCellPhased` consumed 78% of total runtime. Root cause: the candidate "pre-filter" described in `gotchas.md` item I was implemented as a *post-filter* — running brightness + valley checks at the FINAL daughter positions AFTER 50-iteration burn-in, then logging `[Split Cand PreFilter] NO_VALLEY` to discard the result. All burn-in cycles on rejected candidates were wasted (at f1 fluo: 4 cells × 20 candidates × 50 iters × ~30ms = 120s of pure waste with zero successful splits).
+
+This change moves the brightness + valley check to BEFORE the burn-in loop, computed at SEED positions. Candidates failing the pre-filter `continue` past the entire burn-in body.
+
+### Files changed
+- `C++/src/Frame.cpp::trySplitCellPhased` — hoisted `measureLocalBrightnessAt` + `computeCandValleyFromBright` helpers; added a seed-position pre-filter before `buildDaughter`/`cells.erase`/burn-in. Logs `[Split Cand SeedFilter]` per skipped candidate.
+
+### Validation (fluo f0-5)
+| Run | Time | f4 splits |
+|---|---|---|
+| Baseline (no pre-filter) | 776s | 2 ✓ |
+| **Seed pre-filter** | **259s** | **2 ✓** |
+
+Per-frame breakdown:
+| frame | baseline | seed-pre-filter | speedup |
+|---|---|---|---|
+| f0 | 25.8s | 30.0s | -16% (no splits, small overhead) |
+| f1 | 145.5s | 30.7s | **4.7×** |
+| f2 | 166.9s | 47.6s | **3.5×** |
+| f3 | 155.9s | 46.5s | **3.4×** |
+| f4 | 134.4s | 71.7s | **1.9×** (real splits run full burn-in) |
+| f5 | 147.9s | 32.6s | **4.5×** |
+
+GT match preserved.
+
+### Why this is safe
+Burn-in caps daughter drift at ~10-15 voxels (`split_burn_in_pos_sigma_scale: 0.8 × xy_sigma=5.85 × ~3 effective σ`). A candidate with seed in pure background cannot drift far enough to recover. The post-filter at line 4031 is preserved as defense-in-depth.
+
+---
+
+## Change 18: Adaptive bio-bridge edge-brightness gate **ACTIVE**
+
+Replaces the hardcoded `bio_bridge_min_edge_brightness_absolute = 0.07` with a brightness-fraction form that scales with the parent cell's EMA-tracked `_brightness`. Gates remain meaningful across datasets where cells live at different absolute intensity scales (raw fluo cells ~0.34, normalized cells ~1.0, dim/dying cells ~0.15).
+
+### Files changed
+- `C++/includes/ConfigTypes.hpp` — `bio_bridge_min_edge_brightness_fraction = 0.05f` (default; `0` disables adaptive)
+- `C++/src/Frame.cpp` — three consumption sites in `trySplitCellPhased`:
+  1. SEED pre-filter (Change 17) — `kMinDaughterBrightSeed`
+  2. POST burn-in pre-filter (legacy) — `kMinDaughterBright`
+  3. Final `edge_too_dim` bio gate — `kMinEdgeBrightAbsolute`
+
+  All three now compute:
+  ```cpp
+  const float kMin = (fraction > 0.0f)
+      ? std::max(absolute, parent.getBrightness() * fraction)
+      : absolute;
+  ```
+
+### Why fraction = 0.05 (not 0.10)
+First attempt used 0.10. Fluo passed but embryo regressed: 12345 missed split at f3, e3d03 false split at f4 (e3d03 is NOT in GT). Root cause: 0.10 × 1.0 = 0.10 is **2× tighter** than the original absolute 0.07, rejecting legitimate embryo daughter centers whose edges sit at 0.05-0.08. Lowering fraction to 0.05 matches the original behavior at brightness=1.0 while still loosening for dim cells (raw cells at 0.34 → 0.017 effective threshold).
+
+### Validation (cross-dataset)
+| Dataset | Frames | GT match | Time |
+|---|---|---|---|
+| Fluo | f0-5 | cell_1+cell_2 split at f4 ✓ | 265s |
+| Embryo | f1-5 | e9077+12345 split at f3 ✓ | 168s |
+
+Same `config.yaml` across both runs.
+
+---
+
+## Change 19: Adaptive PCA-bridge black threshold + adaptive PCA shape brightness cutoff **ACTIVE**
+
+Two related adaptive replacements for hardcoded thresholds in the split + shape-fit hot path.
+
+### 19a: PCA-bridge black threshold (`Frame.cpp:2933`)
+Bridge "dark gap" pixels are bg by definition. Anchor the threshold to the per-frame `_backgroundValue` (already adaptive via `estimateAdaptiveBackgroundFromFrame`):
+```cpp
+const float blackThreshold = std::max(
+    pca_bridge_black_threshold,                  // absolute floor
+    _backgroundValue + 0.02f * pca_bridge_black_bg_multiplier);
+```
+
+Config: `pca_bridge_black_bg_multiplier = 1.0f` (default; `0` disables adaptive).
+
+### 19b: PCA shape gather brightness cutoff (`Frame.cpp:1725` + `calibrateCellShapeViaPca`)
+Earlier sessions identified that the PCA gather's `max(0.05, _backgroundValue + 0.02)` is too coarse — it cannot distinguish bg from halo when the per-frame estimate misses spatially varying bg (vignetting), photobleaching trends, or dataset-level scale shifts.
+
+This change adds a shell-based local-bg estimator: sample pixels in a thin spherical shell at `[1.2 × maskMaxR, 1.5 × maskMaxR]` from the cell center, Voronoi-filtered to this cell's claim. Take the median (`pca_shape_bg_percentile = 0.5`) plus a 0.02 margin as the per-cell brightness cutoff. Falls back to `_backgroundValue + 0.02` when the shell has too few samples (<8) or when adaptive is disabled.
+
+### Files changed
+- `C++/includes/ConfigTypes.hpp` — `pca_shape_use_local_bg_estimation = true`, shell + percentile knobs, `pca_shape_bg_floor = 0.01` (lowered from 0.05 hard floor)
+- `C++/src/Frame.cpp` — added `LocalBgEstimate` POD + `estimateLocalBgInShell` free function; added `explicitCutoff` parameter to `gatherBrightPixelsVoronoi` (default `-1` preserves legacy behavior); `calibrateCellShapeViaPca` computes per-cell shell-bg and passes it through
+
+### Why median, not p90 + std
+First attempt used `p90 + sigma_k × ((p99-p90)/1.282)`. Failed because post-`blackThreshold` shells are bimodal: ~95% pixels at 0 (zeroed bg), ~5% with halo leak. The Gaussian-std formula then inflated the cutoff into legitimate cell territory (cell_2 cutoff = 0.83 would exclude most cell pixels). The bulk-bg median is robust to leak tails.
+
+### Validation
+Both fluo + embryo passed GT with this change active. Per-cell `[PCA Shape LocalBg]` log line shows shell sample counts and cutoff values for diagnostic visibility.
+
+---
+
+## Change 20: Per-stage runtime instrumentation **ACTIVE — diagnostic only**
+
+Added `[FrameTiming]`, `[PrepareTiming]`, `[OptimizeTiming]` log lines to break down per-frame cost. Used to identify the trySplitCellPhased hot spot that drove Change 17.
+
+### Files changed
+- `C++/src/main.cpp` — `[FrameTiming]` per frame in the main loop (prepare/optimize/save/total)
+- `C++/src/CellUniverse.cpp::prepareFrame` — `[PrepareTiming]` (load/preprocess/postproc/signalMap/loadStacks)
+- `C++/src/CellUniverse.cpp::optimize` — `[OptimizeTiming]` with atomic accumulators around `calibrateCellShapeViaPca`, `perturbCell`, `trySplitCellPhased`
+
+### Profiling result (baseline f0-5 fluo)
+| Phase | Total time | % |
+|---|---|---|
+| `trySplitCellPhased` | 604s | **78%** |
+| `perturbCell` | 68s | 9% |
+| Signal map | ~40s | 5% |
+| Post-processing chain | ~32s | 4% |
+| Save (TIFF) | 2s | <1% |
+| Other | ~30s | 4% |
+
+Drove the prioritization of Change 17 (pre-filter at seed).
+
+---
+
+## Change 21: Misc config tunes **ACTIVE**
+
+Smaller knob adjustments that landed alongside the structural changes:
+
+| File:line | Field | Before | After | Reason |
+|---|---|---|---|---|
+| `config.yaml` | `signal_map_max_iterations` | 15 | 10 | Per-frame Gaussian-blur loop dominated `prepareFrame` (~5-9s); 10 iters keeps convergence margin while saving ~2-3s per frame |
+| `config.yaml` | `post_alignment_black_threshold` | 0.045 | 0.015 | Reduced bg-zeroing aggressiveness so dim chromatin in cells survives; works for both fluo + embryo |
+| `config.yaml` | `post_alignment_final_blur_sigma` | 1.25 | 0.0 | The simple_preprocess single sigma is enough; the extra finalBlur was smoothing chromatin into mush |
+| `config.yaml` | `geometry_force_iterations_per_cell` | -1 | 250 | Override auto-derive's `clamp(n × 30, 150, 500)` floor of 150 for small datasets — match the v2 baseline default of 250 |
+| `config.yaml` | `split_burn_in_pos_sigma_scale` | 0.4 | 0.8 | Late-frame missed-split fix from prior session; daughters need wider burn-in reach |
+| `config.yaml` | `split_candidate_translation_delta_fraction` | 0.2 | 0.5 | Pairs with the burn-in scale bump |
+| `Frame.cpp:1725` | PCA gather hard floor | 0.05 | 0.01 | Defensive only; adaptive `_backgroundValue + 0.02` term dominates; lower floor lets simple_preprocess + raw-mode work |
+
+---
+
+## Cross-cutting summary: A new dataset now needs only 2 inputs
+
+After Changes 14–19, a new dataset works with:
+
+1. **Initial CSV** (cell positions + radii + isTrash flag) — used by auto-derive geometry (Change 15) + auto-calibration (Change 14)
+2. **`z_scaling`** in `simulation:` block
+
+Everything else auto-adapts:
+
+| Quantity | Source | Adaptation |
+|---|---|---|
+| Cell-radius bounds (max/min A/B/C) | Initial CSV stats × 0.2 / × 2 | Change 15 |
+| Perturbation sigmas (x/y/z) | mean radius × {0.15, 0.30} | Change 15 |
+| `perturbSigmaReferenceRadius` | mean(a) | Change 15 |
+| `position_prior_threshold` | mean(a) × 0.8 | Change 15 |
+| `iterations_per_cell` | clamp(n × 30, 150, 500) | Change 15 |
+| `pca_bridge_min_side_voxels` | mean_volume × 0.05 | Change 15 |
+| Bg + cell intensity anchors | Frame-0 ROI | Change 14 |
+| Bio bridge edge-brightness | parent brightness × 0.05 | Change 18 |
+| PCA bridge black threshold | per-frame `_backgroundValue` + 0.02 | Change 19a |
+| PCA shape brightness cutoff | per-cell shell median + 0.02 | Change 19b |
+
+Validated cross-dataset: same `config.yaml` produces correct GT lineage on both fluo (Fluo-N3DH-CE) and embryo (original_data) over the f0-5 / f1-5 windows.
+
+### Open follow-ups
+
+- **Trash cell removal**: trash_2 still sometimes drops out at f5. Doesn't affect real-cell lineage, but worth investigating if a third dataset has more trash markers.
+- **`post_alignment_black_threshold = 0.015`**: still an absolute knob (not adaptive). Could be tied to auto-cal bg statistics.
+- **Visualization fidelity**: saved PNGs still clip to [0,255], so the optimizer's no-clip cost surface isn't visually inspectable. Would need 16-bit PNG or a separate "raw" output channel.
+- **Third-dataset validation**: only fluo + embryo tested. A 3rd dataset (different cell type, different bg-noise profile, vignetting) is the next stress test.
+
+### References
+
+- Validation runs:
+  - Fluo seedfilter f0-5: `outputs/output_v2_seedfilter_f0-5_*` (259s, GT match)
+  - Embryo adaptive v3 f1-5: `outputs/output_pca_v3_embryo_f1-5_*` (168s, GT match)
+  - Fluo adaptive v3 f0-5: `outputs/output_pca_v3_fluo_f0-5_*` (265s, GT match)
+- Profiling baseline: `outputs/output_v2_timing2_f0-5_*` ([OptimizeTiming] breakdown)

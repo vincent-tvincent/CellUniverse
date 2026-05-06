@@ -1066,6 +1066,11 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
 {
     std::vector<cv::Mat> realFrameWithOutlines;
 
+    // The standard [0,1] → [0,255] mapping faithfully shows the optimizer's
+    // input regardless of preprocess mode. Default path: bg ≈ 0 (black),
+    // cells ≈ 1 (white). Simple-preprocess path: bg ≈ 0.09 → ~23 (very
+    // dark gray, retains raw bg noise pattern), cells ≈ 0.34 → ~87 (medium
+    // gray, retains intra-cell texture).
     for (size_t i = 0; i < _realFrame.size(); ++i)
     {
         const cv::Mat &realImage = _realFrame[i];
@@ -1674,6 +1679,110 @@ struct GatherStats
 // only those whose nearest claim point across ALL cells belongs to the
 // splitting cell (`selfClaimPoints`). Returns the kept pixels plus their
 // raw intensities above background.
+// Estimate the local background level from a thin spherical shell just
+// outside the cell. Used by PCA-shape calibration to drive an adaptive
+// brightness cutoff that handles datasets where the global per-frame
+// `_backgroundValue` is misleading (vignetting, halos near other cells,
+// raw-mode pixels with positive bg variance). Returns
+// {p_percentile, p_p99} of pixel values in the shell, Voronoi-filtered
+// to this cell's claim set. Returns {0,0} if not enough samples.
+struct LocalBgEstimate {
+    float percentile{0.0f};
+    float p99{0.0f};
+    int   sampleCount{0};
+};
+LocalBgEstimate estimateLocalBgInShell(
+    const std::vector<cv::Mat> &realFrame,
+    const cv::Point3f &center,
+    float innerR,
+    float outerR,
+    float percentileFraction,
+    const std::vector<cv::Point3f> &selfClaimPoints,
+    const Frame::ClaimSet &otherClaimSets)
+{
+    LocalBgEstimate out;
+    if (realFrame.empty() || outerR <= innerR || innerR <= 0.0f) return out;
+    if (selfClaimPoints.empty()) return out;
+
+    const int rows = realFrame[0].rows;
+    const int cols = realFrame[0].cols;
+    const int slices = static_cast<int>(realFrame.size());
+
+    const int minX = std::max(0, static_cast<int>(std::floor(center.x - outerR)));
+    const int maxX = std::min(cols - 1, static_cast<int>(std::ceil(center.x + outerR)));
+    const int minY = std::max(0, static_cast<int>(std::floor(center.y - outerR)));
+    const int maxY = std::min(rows - 1, static_cast<int>(std::ceil(center.y + outerR)));
+    const int minZ = std::max(0, static_cast<int>(std::floor(center.z - outerR)));
+    const int maxZ = std::min(slices - 1, static_cast<int>(std::ceil(center.z + outerR)));
+
+    const float innerSq = innerR * innerR;
+    const float outerSq = outerR * outerR;
+
+    const auto distSq = [](const cv::Point3f &a, const cv::Point3f &b) {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    std::vector<float> shellValues;
+    shellValues.reserve(static_cast<size_t>((maxX - minX + 1) * (maxY - minY + 1)));
+
+    for (int z = minZ; z <= maxZ; ++z) {
+        const cv::Mat &slice = realFrame[z];
+        if (slice.type() != CV_32F || slice.empty()) continue;
+        const float dz = static_cast<float>(z) - center.z;
+        const float dzSq = dz * dz;
+        for (int y = minY; y <= maxY; ++y) {
+            const float *row = slice.ptr<float>(y);
+            const float dy = static_cast<float>(y) - center.y;
+            const float dySq = dy * dy;
+            for (int x = minX; x <= maxX; ++x) {
+                const float dx = static_cast<float>(x) - center.x;
+                const float r2 = dx * dx + dySq + dzSq;
+                if (r2 < innerSq || r2 > outerSq) continue;
+
+                const cv::Point3f p{
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(z)};
+                // Voronoi: keep only pixels claimed by self
+                float selfBest = std::numeric_limits<float>::infinity();
+                for (const auto &sp : selfClaimPoints) {
+                    const float d2 = distSq(p, sp);
+                    if (d2 < selfBest) selfBest = d2;
+                }
+                float otherBest = std::numeric_limits<float>::infinity();
+                for (const auto &kv : otherClaimSets) {
+                    for (const auto &op : kv.second) {
+                        const float d2 = distSq(p, op);
+                        if (d2 < otherBest) otherBest = d2;
+                    }
+                }
+                if (otherBest < selfBest) continue;
+                shellValues.push_back(row[x]);
+            }
+        }
+    }
+
+    out.sampleCount = static_cast<int>(shellValues.size());
+    if (out.sampleCount < 8) return out;
+
+    const float clampedP = std::clamp(percentileFraction, 0.0f, 1.0f);
+    const size_t pIdx = std::min(
+        shellValues.size() - 1,
+        static_cast<size_t>(std::floor(clampedP * (shellValues.size() - 1))));
+    const size_t p99Idx = std::min(
+        shellValues.size() - 1,
+        static_cast<size_t>(std::floor(0.99f * (shellValues.size() - 1))));
+
+    std::nth_element(shellValues.begin(), shellValues.begin() + p99Idx, shellValues.end());
+    out.p99 = shellValues[p99Idx];
+    std::nth_element(shellValues.begin(), shellValues.begin() + pIdx, shellValues.end());
+    out.percentile = shellValues[pIdx];
+    return out;
+}
+
 std::vector<BrightPixel> gatherBrightPixelsVoronoi(
     const std::vector<cv::Mat> &realFrame,
     float backgroundValue,
@@ -1681,7 +1790,8 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
     float radius,
     const std::vector<cv::Point3f> &selfClaimPoints,
     const Frame::ClaimSet &otherClaimSets,
-    GatherStats *stats = nullptr)
+    GatherStats *stats = nullptr,
+    float explicitCutoff = -1.0f)
 {
     std::vector<BrightPixel> kept;
     if (realFrame.empty() || radius <= 0.0f || selfClaimPoints.empty()) {
@@ -1714,10 +1824,14 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Brightness cutoff: pixels above (background + small margin). The margin
-    // keeps us above sensor noise without being strict enough to lose dim
-    // inter-daughter regions.
-    const float brightnessCutoff = std::max(0.05f, backgroundValue + 0.02f);
+    // Brightness cutoff: pixels above (background + small margin). When
+    // `explicitCutoff >= 0` the caller has computed a per-cell adaptive
+    // cutoff (e.g., from local-bg shell estimation in
+    // calibrateCellShapeViaPca) — use it directly. Otherwise fall back to
+    // the per-frame `_backgroundValue + 0.02`, with a 0.01 noise floor.
+    const float brightnessCutoff = (explicitCutoff >= 0.0f)
+        ? explicitCutoff
+        : std::max(0.01f, backgroundValue + 0.02f);
 
     for (int z = minZ; z <= maxZ; ++z) {
         const cv::Mat &slice = realFrame[z];
@@ -2535,9 +2649,44 @@ bool Frame::calibrateCellShapeViaPca(
         if (!cacheHit) {
             std::vector<cv::Point3f> selfClaim{center};
             GatherStats gstats;
+
+            // Adaptive shell-based local-bg cutoff (2026-05-06). Estimate
+            // the background level from a thin shell just outside the
+            // cell, Voronoi-filtered to this cell's claim. The cutoff is
+            // set to `percentile + small_margin` — using the percentile
+            // value directly (no Gaussian std derivation, which was
+            // broken: post-blackThreshold shells are bimodal "0 + a few
+            // halo leaks", so (p99-p90)/1.282 inflates the cutoff into
+            // legitimate cell territory). The percentile (default 0.5,
+            // median) captures the bulk-bg of the shell; cells whose
+            // shell catches halo or neighbor pixels get a slightly higher
+            // floor, which matches how the PCA gather should adapt.
+            float adaptiveCutoff = -1.0f;
+            const auto &simCfg = simulationConfig;
+            if (simCfg.pca_shape_use_local_bg_estimation) {
+                const float innerR = simCfg.pca_shape_bg_shell_inner_scale * maskMaxR;
+                const float outerR = simCfg.pca_shape_bg_shell_outer_scale * maskMaxR;
+                const LocalBgEstimate bgEst = estimateLocalBgInShell(
+                    _realFrame, center, innerR, outerR,
+                    simCfg.pca_shape_bg_percentile,
+                    selfClaim, otherCellsClaimSets);
+                if (bgEst.sampleCount >= 8) {
+                    const float margin = 0.02f;
+                    adaptiveCutoff = bgEst.percentile + margin;
+                    log << "  [PCA Shape LocalBg] cell=" << cell.getName()
+                        << " innerR=" << innerR << " outerR=" << outerR
+                        << " p" << static_cast<int>(simCfg.pca_shape_bg_percentile * 100)
+                        << "=" << bgEst.percentile
+                        << " p99=" << bgEst.p99
+                        << " adaptiveCutoff=" << adaptiveCutoff
+                        << " samples=" << bgEst.sampleCount
+                        << std::endl;
+                }
+            }
+
             cachedRaw = gatherBrightPixelsVoronoi(
                 _realFrame, _backgroundValue, center, sphereR,
-                selfClaim, otherCellsClaimSets, &gstats);
+                selfClaim, otherCellsClaimSets, &gstats, adaptiveCutoff);
             cachedCenter = center;
             ++cachedMisses;
 
@@ -2920,7 +3069,21 @@ bool Frame::discoverPcaBridgeProposal(size_t cellIndex,
     std::vector<int> binBlack(bins, 0);
     std::vector<std::pair<BrightPixel, float>> nonblackWithProj;
 
-    const float blackThreshold = std::max(0.0f, probConfig.pca_bridge_black_threshold);
+    // Adaptive PCA-bridge black threshold (2026-05-06): bridge "dark gap"
+    // pixels are bg pixels by definition, so anchor the threshold to the
+    // per-frame `_backgroundValue` (already set per frame via
+    // estimateAdaptiveBackgroundFromFrame). When `pca_bridge_black_bg_multiplier > 0`,
+    // the effective threshold becomes
+    //   max(pca_bridge_black_threshold, _backgroundValue + 0.02 × multiplier)
+    // matching the PCA-shape gather's per-frame adaptive cutoff so the same
+    // bg estimate drives both. Absolute value is the noise floor.
+    const float bridgeBgMult = probConfig.pca_bridge_black_bg_multiplier;
+    const float bridgeBgAdaptive = (bridgeBgMult > 0.0f)
+        ? (_backgroundValue + 0.02f * bridgeBgMult)
+        : 0.0f;
+    const float blackThreshold = std::max(
+        std::max(0.0f, probConfig.pca_bridge_black_threshold),
+        bridgeBgAdaptive);
     const int xMin = std::max(0, static_cast<int>(std::floor(parent.getX() - longR)));
     const int xMax = std::min(_realFrame[0].cols - 1, static_cast<int>(std::ceil(parent.getX() + longR)));
     const int yMin = std::max(0, static_cast<int>(std::floor(parent.getY() - longR)));
@@ -3759,8 +3922,149 @@ CostCallbackPair Frame::trySplitCellPhased(
               << " zSigma=" << savedPerturbZ.sigma << "->" << Ellipsoid::cellConfig.z.sigma
               << std::endl;
 
+    // Hoisted brightness-probe helper used by both the pre-filter (seed
+    // positions, runs before burn-in to skip wasted work) and the
+    // post-filter (final daughter positions, runs after burn-in to catch
+    // candidates that drifted into background). Reads `_realFrame` from
+    // the enclosing Frame and never mutates state.
+    // Adaptive edge-brightness threshold: scales with parent's EMA-tracked
+    // brightness so the gate remains meaningful across datasets where cells
+    // sit at different absolute intensities. Absolute value remains as a
+    // noise floor — a dying cell with brightness 0.15 still gets the strict
+    // 0.05 floor so its phantom-daughter splits get rejected.
+    const float kMinEdgeFraction =
+        probConfig.bio_bridge_min_edge_brightness_fraction;
+    const float kMinEdgeAbsolute =
+        probConfig.bio_bridge_min_edge_brightness_absolute;
+    const float kMinDaughterBrightSeed = (kMinEdgeFraction > 0.0f)
+        ? std::max(kMinEdgeAbsolute, parent.getBrightness() * kMinEdgeFraction)
+        : kMinEdgeAbsolute;
+    auto measureLocalBrightnessAt = [this](float cx, float cy, float cz) -> float {
+        const int ix = static_cast<int>(std::round(cx));
+        const int iy = static_cast<int>(std::round(cy));
+        const int iz = static_cast<int>(std::round(cz));
+        float sum = 0.0f;
+        int cnt = 0;
+        for (int dz = -1; dz <= 1; ++dz) {
+            const int zz = iz + dz;
+            if (zz < 0 || zz >= static_cast<int>(_realFrame.size())) continue;
+            const cv::Mat &sl = _realFrame[zz];
+            if (sl.type() != CV_32F) continue;
+            for (int dy = -1; dy <= 1; ++dy) {
+                const int yy = iy + dy;
+                if (yy < 0 || yy >= sl.rows) continue;
+                const float *row = sl.ptr<float>(yy);
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int xx = ix + dx;
+                    if (xx < 0 || xx >= sl.cols) continue;
+                    sum += row[xx];
+                    ++cnt;
+                }
+            }
+        }
+        return (cnt > 0) ? (sum / cnt) : 0.0f;
+    };
+
+    // Hoisted valley probe — same slab-min logic as the post-filter but
+    // operates on the parent's pre-burn-in `pixels` cloud and a candidate-
+    // pair (d1Pos, d2Pos). Returns a value where < bio_bridge_max_valley_ratio
+    // means a candidate has a real dark gap between the two seeds.
+    auto computeCandValleyFromBright = [&pixels](const cv::Point3f &d1Pos,
+                                                 const cv::Point3f &d2Pos) -> float {
+        const cv::Point3f axVec = d2Pos - d1Pos;
+        const float axLen = static_cast<float>(cv::norm(axVec));
+        if (axLen <= 1e-3f) return 1.0f;
+        const cv::Point3f axDir(axVec.x/axLen, axVec.y/axLen, axVec.z/axLen);
+        const cv::Point3f mid(0.5f*(d1Pos.x+d2Pos.x),
+                              0.5f*(d1Pos.y+d2Pos.y),
+                              0.5f*(d1Pos.z+d2Pos.z));
+        const float halfLen = 0.5f * axLen;
+        const float gapHalf = std::max(0.15f * halfLen, 1.0f);
+        static constexpr int kSlabs = 5;
+        std::array<double, kSlabs> slabSum{};
+        std::array<int,    kSlabs> slabCnt{};
+        const float slabW = (2.0f * gapHalf) / static_cast<float>(kSlabs);
+        double gapSum=0, e1Sum=0, e2Sum=0;
+        int gapN=0, e1N=0, e2N=0;
+        for (const auto &bp : pixels) {
+            const float dx = bp.pos.x - mid.x;
+            const float dy = bp.pos.y - mid.y;
+            const float dz = bp.pos.z - mid.z;
+            const float proj = dx*axDir.x + dy*axDir.y + dz*axDir.z;
+            if (std::abs(proj) > 1.5f*halfLen) continue;
+            if (std::abs(proj) < gapHalf) {
+                gapSum += bp.weight; ++gapN;
+                int bin = (slabW > 0.0f)
+                    ? static_cast<int>((proj + gapHalf) / slabW)
+                    : 0;
+                if (bin < 0) bin = 0;
+                if (bin >= kSlabs) bin = kSlabs - 1;
+                slabSum[bin] += bp.weight;
+                slabCnt[bin] += 1;
+            } else if (proj < -gapHalf && proj > -halfLen*1.1f) {
+                e1Sum += bp.weight; ++e1N;
+            } else if (proj > gapHalf && proj < halfLen*1.1f) {
+                e2Sum += bp.weight; ++e2N;
+            }
+        }
+        const float gBMean = (gapN>0) ? static_cast<float>(gapSum/gapN) : 0.0f;
+        const int minPxPerSlab = std::max(3, gapN / (kSlabs * 3));
+        float gBMinSlab = std::numeric_limits<float>::infinity();
+        int winSlab = -1;
+        for (int i = 0; i < kSlabs; ++i) {
+            if (slabCnt[i] >= minPxPerSlab) {
+                const float b = static_cast<float>(slabSum[i])
+                                / static_cast<float>(slabCnt[i]);
+                if (b < gBMinSlab) { gBMinSlab = b; winSlab = i; }
+            }
+        }
+        const float gB = (winSlab >= 0) ? gBMinSlab : gBMean;
+        const float e1B = (e1N>0) ? static_cast<float>(e1Sum/e1N) : 0.0f;
+        const float e2B = (e2N>0) ? static_cast<float>(e2Sum/e2N) : 0.0f;
+        const float maxE = std::max(e1B, e2B);
+        if (maxE > 1e-6f) return gB / maxE;
+        return 1.0f;
+    };
+
+    int seedFiltered = 0;
+
     for (size_t ci = 0; ci < candidates.size(); ++ci) {
         const auto &cand = candidates[ci];
+
+        // ---- SEED PRE-FILTER (runs before burn-in) ----
+        // Earlier the same brightness + valley checks ran AFTER burn-in
+        // (post-filter), wasting 50 burn-in iterations × N rejected
+        // candidates per attempt on candidates that were going to be
+        // excluded anyway. Computing on seed positions skips burn-in for
+        // candidates whose seed is in dim background or whose seed-line
+        // shows no real valley in the parent pixel cloud. Burn-in's drift
+        // cap (~10-15 voxels) means a candidate with bright seed stays
+        // bright after burn-in and vice versa — the seed check is a
+        // sound proxy for the post-filter outcome on the bulk of cases.
+        const float seedD1Bright = measureLocalBrightnessAt(
+            cand.d1Pos.x, cand.d1Pos.y, cand.d1Pos.z);
+        const float seedD2Bright = measureLocalBrightnessAt(
+            cand.d2Pos.x, cand.d2Pos.y, cand.d2Pos.z);
+        const bool seedBothBright = (seedD1Bright >= kMinDaughterBrightSeed)
+            && (seedD2Bright >= kMinDaughterBrightSeed);
+        const float seedValley = computeCandValleyFromBright(cand.d1Pos, cand.d2Pos);
+        const float valleyLimitSeed = probConfig.bio_bridge_max_valley_ratio;
+        const bool seedPassesPreFilter = seedBothBright
+            && (seedValley < valleyLimitSeed);
+
+        if (!seedPassesPreFilter) {
+            std::cout << "  [Split Cand SeedFilter] " << parentName
+                      << " idx=" << ci << " label=" << cand.label
+                      << " d1Bright=" << seedD1Bright
+                      << " d2Bright=" << seedD2Bright
+                      << " valley=" << seedValley
+                      << (seedBothBright ? "" : " EDGE_DIM")
+                      << (seedValley >= valleyLimitSeed ? " NO_VALLEY" : "")
+                      << std::endl;
+            ++seedFiltered;
+            continue;  // skip burn-in for rejected candidates
+        }
+
         Ellipsoid child1 = buildDaughter(parentName + "0", cand.d1Pos, parent,
                                          volumeScale, srcMajor, srcB, srcMinor);
         Ellipsoid child2 = buildDaughter(parentName + "1", cand.d2Pos, parent,
@@ -3887,7 +4191,11 @@ CostCallbackPair Frame::trySplitCellPhased(
         //
         // Measure: average real-image brightness in a small 3D neighborhood
         // around each daughter center (3×3×3 voxels). Cheap and local.
-        const float kMinDaughterBright = probConfig.bio_bridge_min_edge_brightness_absolute;
+        // Same adaptive form as the seed pre-filter above. Reuses the same
+        // fraction-of-parent-brightness with absolute floor.
+        const float kMinDaughterBright = (kMinEdgeFraction > 0.0f)
+            ? std::max(kMinEdgeAbsolute, parent.getBrightness() * kMinEdgeFraction)
+            : kMinEdgeAbsolute;
         auto measureLocalBrightness = [&](float cx, float cy, float cz) -> float {
             const int ix = static_cast<int>(std::round(cx));
             const int iy = static_cast<int>(std::round(cy));
@@ -4707,9 +5015,17 @@ CostCallbackPair Frame::trySplitCellPhased(
             // cost delta. Measured in the same real-image units as the
             // sigmoid-calibrated background (~0.0), so ~0.05 is ~5% above
             // background — well below any real cell body (~0.1-0.3).
-            // Tunable via probConfig.bio_bridge_min_edge_brightness_absolute.
-            const float kMinEdgeBrightAbsolute =
+            // Tunable via probConfig.bio_bridge_min_edge_brightness_absolute
+            // and (adaptive) bio_bridge_min_edge_brightness_fraction. Same
+            // adaptive form as the candidate pre/post filters above.
+            const float kFinalEdgeFraction =
+                probConfig.bio_bridge_min_edge_brightness_fraction;
+            const float kFinalEdgeAbsolute =
                 probConfig.bio_bridge_min_edge_brightness_absolute;
+            const float kMinEdgeBrightAbsolute = (kFinalEdgeFraction > 0.0f)
+                ? std::max(kFinalEdgeAbsolute,
+                           parent.getBrightness() * kFinalEdgeFraction)
+                : kFinalEdgeAbsolute;
             if (edge1Count > 0 && edge2Count > 0 &&
                 std::min(edge1Bright, edge2Bright) < kMinEdgeBrightAbsolute) {
                 std::cout << "[Split Reject bio] " << parentName

@@ -12,6 +12,7 @@
 #include "CellUniverse.hpp"
 #include "ImageHandler.hpp"
 #include "CalibrationTypes.hpp"
+#include "GeometryDerivation.hpp"
 #include <chrono>
 #include <algorithm>
 
@@ -139,17 +140,45 @@ int main(int argc, char *argv[])
         std::cerr << "[WARN] imageFilePaths is empty; cannot determine initial frame filename." << '\n';
     }
 
-    if (config.simulation.quit_after_preprocessing) {
-        CellUniverse preprocessOnlyLineage({}, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
-        preprocessOnlyLineage.preprocessAllFramesAlignedToMinimumBackground(false);
-        std::cout << "[DEBUG] quit_after_preprocessing=true; exiting after preprocessing/load phase." << std::endl;
-        return 0;
-    }
-
     // load cells here
     CellFactory cellFactory(config);
     std::map<Path, std::vector<Ellipsoid>> cells = cellFactory.createCells(args.initial, config.simulation.z_slices / 2,
                                                                         config.simulation.z_scaling, firstFrameFile);
+
+    // Auto-derive geometry from initial CSV statistics + z_scaling. Must run
+    // BEFORE auto-calibration and BEFORE CellUniverse construction so the
+    // M2 probe + optimizer loop see correct radius bounds and perturbation
+    // sigmas. See plan
+    // docs/plans/2026-05-05-auto-derive-geometry-from-initial-csv.md.
+    if (config.simulation.auto_derive_geometry_enabled) {
+        if (cells.empty()) {
+            std::cerr << "[Auto-Derive Geometry] cells empty; skipping derivation\n";
+        } else {
+            const auto &firstFrameCells = cells.begin()->second;
+            ImageSize3D image_size;
+            if (!imageFilePaths.empty()) {
+                std::vector<cv::Mat> firstFrameRaw = ImageHandler::loadRawFrame(
+                    imageFilePaths.front().string(), config);
+                if (!firstFrameRaw.empty()) {
+                    image_size.width = firstFrameRaw[0].cols;
+                    image_size.height = firstFrameRaw[0].rows;
+                    image_size.depth = static_cast<int>(firstFrameRaw.size());
+                }
+            }
+            DerivedGeometry derived = CellUniverse::computeDerivedGeometry(
+                firstFrameCells, image_size, config);
+            std::cout << "[Auto-Derive Geometry] " << derivedGeometryDescribe(derived)
+                      << std::endl;
+            CellUniverse::applyDerivedGeometry(derived, config);
+            // After applyDerivedGeometry, Ellipsoid::cellConfig is updated.
+            // Existing cells from CellFactory keep their initial radii (no
+            // re-clamping); the new bounds take effect from the next
+            // perturbation. The CellFactory's initial cell radii must be
+            // within [min_*_radius, max_*_radius] of the derived bounds —
+            // the formulas (min = mean × 0.2, max = max × 2) guarantee
+            // this for any well-formed initial CSV.
+        }
+    }
 
     // Auto-calibrate brightness from frame 0 cells. This must run BEFORE the
     // CellUniverse loads/preprocesses any frame, because the calibrated
@@ -170,6 +199,14 @@ int main(int argc, char *argv[])
             std::cout << "[Auto Calibration] " << calibrationDescribe(calibration)
                       << std::endl;
         }
+    }
+
+    if (config.simulation.quit_after_preprocessing) {
+        CellUniverse preprocessOnlyLineage(cells, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
+        preprocessOnlyLineage.setBrightnessCalibration(calibration);
+        preprocessOnlyLineage.preprocessAllFramesAlignedToMinimumBackground(false);
+        std::cout << "[DEBUG] quit_after_preprocessing=true; exiting after preprocessing/load phase." << std::endl;
+        return 0;
     }
 
     // create lineage
@@ -220,16 +257,24 @@ int main(int argc, char *argv[])
     auto start = std::chrono::steady_clock::now();
     for (int frame = loopStart; frame < lineage.length(); ++frame)
     {
+        // Per-stage timing breakdown for runtime profiling (2026-05-06).
+        // Logs `[FrameTiming] frame=N prepare=Xs optimize=Ys save=Zs total=Ts`
+        // so we can see where the per-frame budget is going.
+        const auto tFrame0 = std::chrono::steady_clock::now();
+
         // M2 Option A: lazy-load this frame's images (raw TIFF load +
         // percentile normalize + iterative preprocess). Constructor only
         // sampled for percentiles; actual frame data is loaded here.
         lineage.prepareFrame(frame);
+        const auto tPrepareEnd = std::chrono::steady_clock::now();
 
         lineage.optimize(frame);
+        const auto tOptimizeEnd = std::chrono::steady_clock::now();
 
         lineage.copyCellsForward(frame + 1);
 
         lineage.saveImages(frame);
+        const auto tSaveEnd = std::chrono::steady_clock::now();
 
         lineage.saveCells(frame);
 
@@ -241,6 +286,16 @@ int main(int argc, char *argv[])
 
         // Checkpoint for potential future resume.
         lineage.saveCheckpoint(frame);
+
+        const std::chrono::duration<double> dPrepare = tPrepareEnd - tFrame0;
+        const std::chrono::duration<double> dOptimize = tOptimizeEnd - tPrepareEnd;
+        const std::chrono::duration<double> dSave = tSaveEnd - tOptimizeEnd;
+        const std::chrono::duration<double> dTotal = tSaveEnd - tFrame0;
+        std::cout << "[FrameTiming] frame=" << frame
+                  << " prepare=" << dPrepare.count() << "s"
+                  << " optimize=" << dOptimize.count() << "s"
+                  << " save=" << dSave.count() << "s"
+                  << " total=" << dTotal.count() << "s" << std::endl;
     }
     auto end = std::chrono::steady_clock::now(); // timer end
 

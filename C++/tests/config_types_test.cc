@@ -51,3 +51,20 @@ TEST(ConfigTypesTest, AutoCalibrationFieldsHaveExpectedDefaults) {
     EXPECT_FLOAT_EQ(cfg.calibration_cell_inner_fraction, 0.7f);
     EXPECT_FLOAT_EQ(cfg.calibration_pixel_trim_percent, 0.10f);
 }
+
+TEST(ConfigTypesTest, AutoDeriveGeometryFieldsHaveExpectedDefaults) {
+    SimulationConfig cfg;
+    EXPECT_TRUE(cfg.auto_derive_geometry_enabled);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_max_a_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_max_b_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_max_c_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_min_a_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_min_b_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_min_c_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_perturb_reference_radius, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_xy_sigma, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_z_sigma, -1.0f);
+    EXPECT_FLOAT_EQ(cfg.geometry_force_position_prior_threshold, -1.0f);
+    EXPECT_EQ(cfg.geometry_force_iterations_per_cell, -1);
+    EXPECT_EQ(cfg.geometry_force_pca_bridge_min_side_voxels, -1);
+}

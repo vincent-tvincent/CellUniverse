@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <limits>
 #include <numeric>
@@ -16,6 +17,30 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+// Per-frame timing accumulators for the heavy phases inside optimize().
+// Reset at the top of each optimize(frame) call, reported at the end.
+// `std::atomic<long long>` of nanoseconds is thread-safe under the OpenMP
+// parallel for loops without needing per-thread arrays.
+namespace {
+std::atomic<long long> tCalibPcaShapeNs{0};
+std::atomic<long long> tTrySplitPhasedNs{0};
+std::atomic<long long> tPerturbCellNs{0};
+inline void resetOptimizeTimers() {
+    tCalibPcaShapeNs.store(0);
+    tTrySplitPhasedNs.store(0);
+    tPerturbCellNs.store(0);
+}
+inline void addNanos(std::atomic<long long> &accum,
+                     std::chrono::steady_clock::time_point t0,
+                     std::chrono::steady_clock::time_point t1) {
+    accum.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(),
+                    std::memory_order_relaxed);
+}
+inline double nsToSec(long long ns) {
+    return static_cast<double>(ns) * 1e-9;
+}
+}  // namespace
 
 namespace utils
 {
@@ -1922,6 +1947,9 @@ void CellUniverse::prepareFrame(int frameIndex)
         return;  // already loaded
     }
 
+    using TClock = std::chrono::steady_clock;
+    const auto tStart = TClock::now();
+
     // Load + normalize + preprocess just this frame.
     std::ostringstream rawLog;
     std::ostringstream preprocessLog;
@@ -1929,6 +1957,7 @@ void CellUniverse::prepareFrame(int frameIndex)
         ImageHandler::loadRawFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
                                    config, &rawLog);
     std::cout << rawLog.str();
+    const auto tLoadEnd = TClock::now();
 
     // Skip the percentile-based intensity normalization when auto-calibration
     // is active and valid — calibration anchors were measured against the
@@ -1961,6 +1990,7 @@ void CellUniverse::prepareFrame(int frameIndex)
         imagePaths[static_cast<size_t>(frameIndex)].string(),
         config, &brightnessCalibration, &preprocessLog);
     std::cout << preprocessLog.str();
+    const auto tPreprocessEnd = TClock::now();
     if (config.simulation.edge_brightness_alignment_enabled &&
         !edgeBrightnessAlignmentTargetInitialized) {
         edgeBrightnessAlignmentTarget =
@@ -1997,11 +2027,13 @@ void CellUniverse::prepareFrame(int frameIndex)
                                 config.simulation,
                                 imagePaths[static_cast<size_t>(frameIndex)],
                                 std::cout);
+    const auto tPostProcEnd = TClock::now();
     std::vector<cv::Mat> signalMap = buildSignalMapStack(
         real_frame,
         config.simulation,
         imagePaths[static_cast<size_t>(frameIndex)],
         std::cout);
+    const auto tSignalMapEnd = TClock::now();
 
     if (config.simulation.export_preprocessed_images) {
         exportPreprocessedStack(real_frame, fs::path(outputPath),
@@ -2016,6 +2048,18 @@ void CellUniverse::prepareFrame(int frameIndex)
     frames[frameIndex].loadImageStacks(real_frame);
     frames[frameIndex].setSignalMap(std::move(signalMap));
     prepareSignalCentersForFrame(frameIndex, real_frame, true);
+    const auto tEnd = TClock::now();
+
+    const auto fmt = [](const TClock::time_point &a, const TClock::time_point &b) {
+        return std::chrono::duration<double>(b - a).count();
+    };
+    std::cout << "[PrepareTiming] frame=" << frameIndex
+              << " load=" << fmt(tStart, tLoadEnd) << "s"
+              << " preprocess=" << fmt(tLoadEnd, tPreprocessEnd) << "s"
+              << " postproc=" << fmt(tPreprocessEnd, tPostProcEnd) << "s"
+              << " signalMap=" << fmt(tPostProcEnd, tSignalMapEnd) << "s"
+              << " loadStacks=" << fmt(tSignalMapEnd, tEnd) << "s"
+              << " total=" << fmt(tStart, tEnd) << "s" << std::endl;
 }
 
 void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
@@ -2070,6 +2114,22 @@ float trimmedMedian(std::vector<float> &values, float trim_percent) {
     return values[midIdx];
 }
 
+// Lower-percentile bg anchor selector. Used for the bg anchor (which we
+// want at a LOW percentile so dim chromatin gaps inside cells don't clip
+// to 0 in the calibrated output — the median bg anchor erased those,
+// fragmenting cells into "shredded confetti" of bright peaks). Local
+// helper named distinctly from the existing `percentileValue` at
+// CellUniverse.cpp:453 (different signature, used by the signal-map
+// pipeline) to avoid overload ambiguity.
+float bgPercentileAnchor(std::vector<float> &values, float pct) {
+    if (values.empty()) return 0.0f;
+    std::sort(values.begin(), values.end());
+    const float clamped = std::clamp(pct, 0.0f, 1.0f);
+    const std::size_t idx = std::min(values.size() - 1,
+        static_cast<std::size_t>(clamped * static_cast<float>(values.size())));
+    return values[idx];
+}
+
 bool pointInsideScaledEllipsoid(const Ellipsoid &cell, float scale,
                                 int x, int y, int z, float zScale) {
     // Cell positions and radii are in interpolated z-space (CellFactory
@@ -2103,6 +2163,26 @@ BrightnessCalibration CellUniverse::computeAutoCalibration(
     const BaseConfig &config)
 {
     BrightnessCalibration cal;
+
+    // Always compute frame_0_mean if the frame is non-empty (regardless of
+    // auto-detect vs manual override). applyCalibratedPreprocess uses this
+    // for per-frame brightness-ratio adjustment to handle photobleaching.
+    if (!rawFrame0.empty()) {
+        double frameSum = 0.0;
+        std::size_t framePixels = 0;
+        for (const auto &slice : rawFrame0) {
+            for (int y = 0; y < slice.rows; ++y) {
+                const float *row = slice.ptr<float>(y);
+                for (int x = 0; x < slice.cols; ++x) {
+                    frameSum += row[x];
+                    ++framePixels;
+                }
+            }
+        }
+        cal.frame_0_mean = framePixels > 0
+            ? static_cast<float>(frameSum / framePixels)
+            : 0.0f;
+    }
 
     const float manualBg = config.simulation.manual_background_intensity;
     const float manualCell = config.simulation.manual_cell_intensity;
@@ -2157,12 +2237,137 @@ BrightnessCalibration CellUniverse::computeAutoCalibration(
 
     if (cellPixels.empty() || bgPixels.empty()) return cal;
 
+    // Cell anchor: trimmed median of cell-interior pixels (drops top/bottom
+    // trim_percent to handle saturation + edge halo).
     cal.cell_intensity = trimmedMedian(cellPixels, trim);
-    cal.background_intensity = trimmedMedian(bgPixels, trim);
+    // Bg anchor: low percentile (default P10) of bg pixels — NOT the
+    // median. The median bg anchor erased dim chromatin gaps inside cells
+    // (raw values just above the bg distribution's median but well within
+    // a real cell's brightness range mapped to <0 and clipped). Using P10
+    // widens the [0, 1] span so dim cell pixels stay above 0 in the
+    // calibrated output. See screenshot fragmentation in 2026-05-05 plan.
+    const float bgPct = std::clamp(
+        config.simulation.calibration_bg_anchor_percentile, 0.0f, 1.0f);
+    cal.background_intensity = bgPercentileAnchor(bgPixels, bgPct);
     cal.cell_pixel_count = cellPixels.size();
     cal.background_pixel_count = bgPixels.size();
     cal.source = BrightnessCalibrationSource::AutoFrameZero;
     return cal;
+}
+
+DerivedGeometry CellUniverse::computeDerivedGeometry(
+    const std::vector<Ellipsoid> &cells,
+    const ImageSize3D &image_size,
+    const BaseConfig &config)
+{
+    (void)image_size;  // reserved for future image-bound clamping
+    DerivedGeometry g;
+
+    // Filter to non-trash cells
+    std::vector<const Ellipsoid*> realCells;
+    for (const auto &c : cells) {
+        if (!c.isTrash()) realCells.push_back(&c);
+    }
+    if (realCells.empty()) return g;
+
+    g.cell_count = realCells.size();
+
+    float sum_a = 0.0f, sum_b = 0.0f, sum_c = 0.0f;
+    float max_a = 0.0f, max_b = 0.0f, max_c = 0.0f;
+    for (const auto *c : realCells) {
+        sum_a += c->getARadius();
+        sum_b += c->getBRadius();
+        sum_c += c->getCRadius();
+        max_a = std::max(max_a, c->getARadius());
+        max_b = std::max(max_b, c->getBRadius());
+        max_c = std::max(max_c, c->getCRadius());
+    }
+    const float n = static_cast<float>(realCells.size());
+    g.mean_a_radius = sum_a / n;
+    g.mean_b_radius = sum_b / n;
+    g.mean_c_radius = sum_c / n;
+
+    // Formulas
+    g.max_a_radius = max_a * 2.0f;
+    g.max_b_radius = max_b * 2.0f;
+    g.max_c_radius = max_c * 2.0f;
+    g.min_a_radius = g.mean_a_radius * 0.2f;
+    g.min_b_radius = g.mean_b_radius * 0.2f;
+    g.min_c_radius = g.mean_c_radius * 0.2f;
+    g.perturb_reference_radius = g.mean_a_radius;
+    g.x_sigma = g.mean_a_radius * 0.15f;
+    g.y_sigma = g.mean_b_radius * 0.15f;
+    g.z_sigma = g.mean_c_radius * 0.30f;
+    g.position_prior_threshold = g.mean_a_radius * 0.8f;
+
+    const int rawIters = static_cast<int>(g.cell_count) * 30;
+    g.iterations_per_cell = std::clamp(rawIters, 150, 500);
+
+    // pca_bridge_min_side_voxels = clamp(mean_cell_volume * 0.05, 20, 200)
+    const double meanVolume =
+        (4.0 / 3.0) * 3.14159265358979 *
+        static_cast<double>(g.mean_a_radius) *
+        static_cast<double>(g.mean_b_radius) *
+        static_cast<double>(g.mean_c_radius);
+    const int rawMinSide = static_cast<int>(meanVolume * 0.05);
+    g.pca_bridge_min_side_voxels = std::clamp(rawMinSide, 20, 200);
+
+    // Apply per-field manual overrides
+    const auto &sim = config.simulation;
+    if (sim.geometry_force_max_a_radius > 0.0f) g.max_a_radius = sim.geometry_force_max_a_radius;
+    if (sim.geometry_force_max_b_radius > 0.0f) g.max_b_radius = sim.geometry_force_max_b_radius;
+    if (sim.geometry_force_max_c_radius > 0.0f) g.max_c_radius = sim.geometry_force_max_c_radius;
+    if (sim.geometry_force_min_a_radius > 0.0f) g.min_a_radius = sim.geometry_force_min_a_radius;
+    if (sim.geometry_force_min_b_radius > 0.0f) g.min_b_radius = sim.geometry_force_min_b_radius;
+    if (sim.geometry_force_min_c_radius > 0.0f) g.min_c_radius = sim.geometry_force_min_c_radius;
+    if (sim.geometry_force_perturb_reference_radius > 0.0f)
+        g.perturb_reference_radius = sim.geometry_force_perturb_reference_radius;
+    if (sim.geometry_force_xy_sigma > 0.0f) {
+        g.x_sigma = sim.geometry_force_xy_sigma;
+        g.y_sigma = sim.geometry_force_xy_sigma;
+    }
+    if (sim.geometry_force_z_sigma > 0.0f) g.z_sigma = sim.geometry_force_z_sigma;
+    if (sim.geometry_force_position_prior_threshold > 0.0f)
+        g.position_prior_threshold = sim.geometry_force_position_prior_threshold;
+    if (sim.geometry_force_iterations_per_cell > 0)
+        g.iterations_per_cell = sim.geometry_force_iterations_per_cell;
+    if (sim.geometry_force_pca_bridge_min_side_voxels > 0)
+        g.pca_bridge_min_side_voxels = sim.geometry_force_pca_bridge_min_side_voxels;
+
+    return g;
+}
+
+void CellUniverse::applyDerivedGeometry(const DerivedGeometry &g, BaseConfig &config)
+{
+    if (!g.isValid()) {
+        std::cout << "[Auto-Derive Geometry] derived geometry invalid; skipping apply\n";
+        return;
+    }
+
+    if (config.cell) {
+        config.cell->maxARadius = g.max_a_radius;
+        config.cell->maxBRadius = g.max_b_radius;
+        config.cell->maxCRadius = g.max_c_radius;
+        config.cell->minARadius = g.min_a_radius;
+        config.cell->minBRadius = g.min_b_radius;
+        config.cell->minCRadius = g.min_c_radius;
+        config.cell->perturbSigmaReferenceRadius = g.perturb_reference_radius;
+        config.cell->x.sigma = g.x_sigma;
+        config.cell->y.sigma = g.y_sigma;
+        config.cell->z.sigma = g.z_sigma;
+    }
+
+    config.simulation.iterations_per_cell = g.iterations_per_cell;
+    config.prob.position_prior_threshold = g.position_prior_threshold;
+    config.prob.pca_bridge_min_side_voxels = g.pca_bridge_min_side_voxels;
+
+    // Sync the Ellipsoid global static — main.cpp normally does this
+    // line ONCE after parsing config (`Ellipsoid::cellConfig = *config.cell;`).
+    // Doing it here too keeps the pre-CellUniverse-construction code path
+    // consistent for any code that reads cellConfig directly.
+    if (config.cell) {
+        Ellipsoid::cellConfig = *config.cell;
+    }
 }
 
 void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFrames)
@@ -2354,6 +2559,9 @@ void CellUniverse::optimize(int frameIndex)
     {
         throw std::invalid_argument("Invalid frame index");
     }
+
+    resetOptimizeTimers();
+    const auto tOptimizeT0 = std::chrono::steady_clock::now();
 
     Frame &frame = frames[frameIndex];
     const int absoluteFrame = firstFrame + frameIndex;
@@ -2793,12 +3001,14 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
 
+            const auto tPcaT0 = std::chrono::steady_clock::now();
             frame.calibrateCellShapeViaPca(ci, others,
                                            pcaMaxIters, pcaScale, pcaMin,
                                            maskScale, convR, convAng,
                                            updatePos, posShiftCap,
                                            maskA, maskB, maskC,
                                            &shapeLogs[ci]);
+            addNanos(tCalibPcaShapeNs, tPcaT0, std::chrono::steady_clock::now());
             if (isTrashCell) {
                 auto originalIt = cellShapeBirth.find(sname);
                 if (originalIt != cellShapeBirth.end()) {
@@ -3587,12 +3797,14 @@ void CellUniverse::optimize(int frameIndex)
                         bridgeForCell = &bIt->second;
                     }
                 }
+                const auto tSplitT0 = std::chrono::steady_clock::now();
                 auto result = frame.trySplitCellPhased(
                     cellIdx, splitSnapshot, others, useSnapDir, config.prob,
                     exportPerturbDebug ? &splitPerturbDebugPlacements : nullptr,
                     exportPerturbDebug ? &splitPerturbDebugPlacementCount : nullptr,
                     config.simulation.perturb_debug_cell_brightness,
                     bridgeForCell);
+                addNanos(tTrySplitPhasedNs, tSplitT0, std::chrono::steady_clock::now());
 
                 double costDiff = result.first;
                 auto callback = result.second;
@@ -3660,10 +3872,12 @@ void CellUniverse::optimize(int frameIndex)
             } else {
                 // --- Perturbation ---
                 const float effectivePerturbRadiusRatio = perturbRatioFor(cellName);
+                const auto tPertT0 = std::chrono::steady_clock::now();
                 auto result = frame.perturbCell(
                     cellIdx, overlapWeight, useSignalGuidanceThisFrame,
                     effectivePerturbRadiusRatio,
                     /*pcaRefitWellFilledMove=*/true);
+                addNanos(tPerturbCellNs, tPertT0, std::chrono::steady_clock::now());
                 double costDiff = result.first;
                 auto callback = result.second;
                 const bool perturbAccept = costDiff < 0;
@@ -3891,6 +4105,20 @@ void CellUniverse::optimize(int frameIndex)
               << " split_attempts=" << splitAttempted
               << " split_accepted=" << splitAccepted
               << " final_cells=" << frame.cells.size() << std::endl;
+
+    const auto tOptimizeT1 = std::chrono::steady_clock::now();
+    const double tOptimizeTotal =
+        std::chrono::duration<double>(tOptimizeT1 - tOptimizeT0).count();
+    std::cout << "[OptimizeTiming] frame=" << displayFrame
+              << " total=" << tOptimizeTotal << "s"
+              << " calibPcaShape=" << nsToSec(tCalibPcaShapeNs.load()) << "s"
+              << " perturbCell=" << nsToSec(tPerturbCellNs.load()) << "s"
+              << " trySplitPhased=" << nsToSec(tTrySplitPhasedNs.load()) << "s"
+              << " other=" << (tOptimizeTotal
+                               - nsToSec(tCalibPcaShapeNs.load())
+                               - nsToSec(tPerturbCellNs.load())
+                               - nsToSec(tTrySplitPhasedNs.load())) << "s"
+              << std::endl;
 
     // M1/M2 cache per-frame summaries so optimize(frameIndex+1) doesn't need
     // frames[frameIndex]'s image stacks.

@@ -199,6 +199,50 @@ simulation:
   manual_cell_intensity: -1
   calibration_cell_inner_fraction: 0.7
   calibration_pixel_trim_percent: 0.10
+  # Bg anchor percentile (P10 default). Lower = wider [0,1] span = dim
+  # chromatin gaps inside cells stay above 0. Median was breaking cells
+  # into fragments. See plan 2026-05-05-auto-derive-geometry-from-initial-csv.md.
+  calibration_bg_anchor_percentile: 0.10
+  # Gaussian blur in calibrated preprocessing. Smooths chromatin patterns
+  # within cells (5-10 px scale) while preserving cell edges (30-40 px).
+  # 3.0 = dataset-agnostic noise removal; works for fluo + embryo without
+  # tuning. Set to 0 to disable.
+  calibrated_preprocess_blur_sigma: 3.0
+
+  # Simple preprocessing toggle (2026-05-05). When true, the calibrated path
+  # skips per-frame brightness-ratio adjustment (photobleaching compensation)
+  # and applies the gentle `simple_preprocess_blur_sigma` (default 1.0)
+  # instead of the aggressive `calibrated_preprocess_blur_sigma` (3.0).
+  # Bg/cell anchor remap to [0,1] is preserved (mandatory for L2 cost).
+  # Use this when the aggressive blur is over-smoothing cell edges and
+  # PCA fit picks up halos as cell support, making fitted cells rounder
+  # than they should be (diagnosed via 2026-05-05 f0-5 smoke run).
+  simple_preprocess_enabled: true
+  simple_preprocess_blur_sigma: 1.5
+
+  # Auto-derive geometry from initial CSV (2026-05-05). See plan
+  # docs/plans/2026-05-05-auto-derive-geometry-from-initial-csv.md.
+  # When true, cell-radius bounds, perturbation sigmas,
+  # perturbSigmaReferenceRadius, position_prior_threshold, and
+  # iterations_per_cell are computed from initial-CSV statistics +
+  # z_scaling and OVERRIDE the values set in cell:/prob:/simulation:
+  # blocks below.
+  #
+  # Per-param manual override: set any geometry_force_* > 0 (or > -1 for
+  # the int) to pin that specific value.
+  auto_derive_geometry_enabled: true
+  geometry_force_max_a_radius: -1
+  geometry_force_max_b_radius: -1
+  geometry_force_max_c_radius: -1
+  geometry_force_min_a_radius: -1
+  geometry_force_min_b_radius: -1
+  geometry_force_min_c_radius: -1
+  geometry_force_perturb_reference_radius: -1
+  geometry_force_xy_sigma: -1
+  geometry_force_z_sigma: -1
+  geometry_force_position_prior_threshold: -1
+  geometry_force_iterations_per_cell: 250
+  geometry_force_pca_bridge_min_side_voxels: -1
 
   # Edge brightness alignment runs after preprocessing and samples a
   # frame-shaped region on each XY slice.
@@ -218,7 +262,7 @@ simulation:
 
   # After all-frame brightness alignment, pixels below this normalized
   # brightness are forced to black. Set <=0 to disable.
-  post_alignment_black_threshold: 0.045
+  post_alignment_black_threshold: 0.015
 
   # After the fixed threshold above, each frame independently forces its
   # lowest brightness percentile to black. Set <=0 to disable.
@@ -249,7 +293,7 @@ simulation:
   post_process_final_direct_weight: 0.95
   post_process_final_direct_amplification: 1.0
   post_process_final_blurred_amplification: 0.5
-  post_alignment_final_blur_sigma: 1.25
+  post_alignment_final_blur_sigma: 0.0
 
   export_preprocessed_images: false
   # Debug signal-guidance localization. When true, exports two stacks per
@@ -345,7 +389,7 @@ simulation:
   # rescale after each blur to recover the original bright-center mean.
   signal_map_enabled: true
   signal_map_blur_sigma: 2.5
-  signal_map_max_iterations: 15
+  signal_map_max_iterations: 10
   signal_map_bright_center_percentile: 0.0
   signal_map_epsilon: 0.000001
   # Normal movement perturbation guidance from the signal map. Split burn-in,
@@ -390,7 +434,11 @@ prob:
   split_final_refine_iterations: 30
   split_calibration_iterations_per_cell: 50
   split_candidate_rotation_delta_degrees: 8
-  split_candidate_translation_delta_fraction: 0.2
+  # 2026-05-05: bumped 0.2 → 0.5 to widen the trans+/trans- candidate
+  # spread for late-frame splits where daughter lobes are far apart.
+  # Translation = 0.5 × daughterR; for daughterR=30 that's ±15px instead
+  # of ±6px. Pairs with split_burn_in_pos_sigma_scale: 0.8.
+  split_candidate_translation_delta_fraction: 0.5
 
   # Reject split candidates whose daughters only fit by walking far away from
   # the proposed split geometry. This catches false splits where an elongated
@@ -425,7 +473,12 @@ prob:
   bio_bridge_max_valley_ratio: 0.8
   bio_bridge_min_edge_brightness_absolute: 0.07
 
-  split_burn_in_pos_sigma_scale: 0.4
+  # 2026-05-05: bumped 0.4 → 0.8 to fix late-frame missed splits (e.g. f70+
+  # cell_411 where daughter lobes were 60-100 px apart and the previous
+  # 0.4 sigma × 50 burn-in iters could only reach ~20 px). At 0.8 the
+  # random-walk reach doubles to ~40 px, and the cost gate still catches
+  # wrong placements.
+  split_burn_in_pos_sigma_scale: 0.8
 
   use_bbox_cost: true
   bbox_margin_scale: 2.5

@@ -7,6 +7,7 @@
 #include "Frame.hpp"
 #include "types.hpp"
 #include "Ellipsoid.hpp"
+#include "GeometryDerivation.hpp"
 
 #include <array>
 #include <iostream>
@@ -38,6 +39,23 @@ public:
         const std::vector<Ellipsoid> &cells,
         const std::vector<cv::Mat> &rawFrame0,
         const BaseConfig &config);
+
+    // Compute geometry parameters from initial CSV statistics + image
+    // dimensions. Pure function, no member mutation. Per-param manual
+    // overrides in config.simulation.geometry_force_* take precedence
+    // over the auto-derived values. When cells is empty, returns an
+    // invalid DerivedGeometry. Caller applies the result via
+    // applyDerivedGeometry to Ellipsoid::cellConfig and BaseConfig
+    // before constructing CellUniverse.
+    static DerivedGeometry computeDerivedGeometry(
+        const std::vector<Ellipsoid> &cells,
+        const ImageSize3D &image_size,
+        const BaseConfig &config);
+
+    // Apply a DerivedGeometry result to BaseConfig (cell + simulation +
+    // prob blocks) and to the Ellipsoid::cellConfig global static.
+    // Idempotent — safe to call multiple times.
+    static void applyDerivedGeometry(const DerivedGeometry &g, BaseConfig &config);
 
     // Storage accessors for the brightness calibration computed at startup.
     // Task 4 wiring: main.cpp computes the calibration via

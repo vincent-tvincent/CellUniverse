@@ -19,6 +19,12 @@ struct BrightnessCalibration {
     std::size_t background_pixel_count = 0;
     BrightnessCalibrationSource source = BrightnessCalibrationSource::Uninitialized;
 
+    // Mean of frame 0's raw pixel values. Used by applyCalibratedPreprocess
+    // for per-frame brightness-ratio adjustment of (background, cell) anchors
+    // to handle photobleaching. See Change 16 plan
+    // docs/plans/2026-05-05-auto-derive-geometry-from-initial-csv.md.
+    float frame_0_mean = 0.0f;
+
     bool isValid() const {
         return (cell_intensity - background_intensity) > 1e-3f;
     }
@@ -44,7 +50,8 @@ inline std::string calibrationDescribe(const BrightnessCalibration &cal) {
         << " span=" << (cal.cell_intensity - cal.background_intensity)
         << " bg_pixels=" << cal.background_pixel_count
         << " cell_pixels=" << cal.cell_pixel_count
-        << " source=" << src;
+        << " source=" << src
+        << " frame_0_mean=" << cal.frame_0_mean;
     return oss.str();
 }
 

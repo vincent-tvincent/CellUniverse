@@ -83,6 +83,83 @@ public:
     // Drop the brightest and dimmest pixel_trim_percent of each cell's pixels
     // before computing the median. Defends against saturation + edge halo.
     float calibration_pixel_trim_percent = 0.10f;
+    // Bg anchor percentile (default P10). Lower values widen the [0, 1]
+    // span — dim chromatin gaps inside cells stay above the bg anchor
+    // and don't clip to 0. Median (0.5) was the original choice but it
+    // erased intra-cell dim regions, fragmenting cells into shredded
+    // confetti of bright peaks. P10 (0.10) keeps cells solid.
+    float calibration_bg_anchor_percentile = 0.10f;
+    // Generic Gaussian blur applied AFTER the linear calibration scale and
+    // BEFORE z-interpolation in the calibrated preprocessing path. Larger
+    // sigma smooths intra-cell chromatin patterns (5-10 px scale) into
+    // uniform-looking cells while preserving cell edges (30-40 px scale).
+    // 3.0 = generic dataset-agnostic noise removal — works on any
+    // fluorescence-microscopy-style cell data without per-dataset tuning.
+    // Set to 0 to disable. The legacy iterative path uses the global
+    // blur_sigma (1.1) instead.
+    float calibrated_preprocess_blur_sigma = 3.0f;
+    // ---- Simple preprocessing toggle (2026-05-05) ----
+    // When true, the calibrated preprocessing path skips photobleaching
+    // compensation (per-frame ratio) and applies a gentle fixed Gaussian
+    // blur (`simple_preprocess_blur_sigma`, default 1.0) instead of the
+    // aggressive `calibrated_preprocess_blur_sigma` (default 3.0). Bg/cell
+    // anchor remap to [0,1] is preserved because the L2 cost requires it
+    // (synthetic cells render at brightness ~1.0). Use this when the
+    // aggressive blur is over-smoothing cell edges and the PCA fit is
+    // picking up halos as cell support, making cells look rounder than
+    // they are. Diagnosed via the f0-5 smoke run on 2026-05-05 where
+    // sigma=3.0 produced near-spherical PCA-fit shapes (max/min radius
+    // ratio ~1.2-1.3) and unstable worldSplitAxis at the bio gate.
+    bool simple_preprocess_enabled = false;
+    float simple_preprocess_blur_sigma = 1.0f;
+    // Lower bound for the PCA shape gather brightness cutoff. Replaces the
+    // historical hardcoded 0.05 floor in Frame.cpp::gatherBrightPixelsVoronoi.
+    // The actual cutoff is `max(pca_shape_bg_floor, _backgroundValue + 0.02)`
+    // — `_backgroundValue` is already per-frame adaptive via
+    // estimateAdaptiveBackgroundFromFrame, so trusting it with a smaller
+    // floor lets the gather adapt to datasets where bg sits below 0.05
+    // (e.g., raw-mode `simple_preprocess`) without losing legitimate dim
+    // cell pixels. Default 0.01 matches a 1% noise floor on [0,1]
+    // normalized images.
+    float pca_shape_bg_floor = 0.01f;
+    // Adaptive PCA-shape gather: estimate local background from a thin
+    // shell of voxels just outside the cell (between
+    // `pca_shape_bg_shell_inner_scale` × maskMaxR and
+    // `pca_shape_bg_shell_outer_scale` × maskMaxR). The brightness cutoff
+    // becomes `bg_p90 + bg_sigma_k × bg_std`, anchored to what's actually
+    // outside the cell rather than a global per-frame estimate.
+    // Set `pca_shape_use_local_bg_estimation = false` to fall back to the
+    // legacy `_backgroundValue + 0.02` cutoff (cheaper, but global).
+    bool pca_shape_use_local_bg_estimation = true;
+    float pca_shape_bg_shell_inner_scale = 1.2f;
+    float pca_shape_bg_shell_outer_scale = 1.5f;
+    float pca_shape_bg_percentile = 0.50f;
+    float pca_shape_bg_sigma_k = 2.0f;  // unused; reserved for future
+    // ---- Auto-derive geometry from initial CSV (2026-05-05) ----
+    // Replaces the dataset-specific cell-radius bounds, perturbation sigmas,
+    // perturbSigmaReferenceRadius, position_prior_threshold, and
+    // iterations_per_cell with values derived from initial-CSV statistics
+    // + z_scaling. After this lands, a new dataset only needs (1) initial
+    // CSV with cell positions and radii, (2) z_scaling. Everything else
+    // auto-derives.
+    //
+    // Per-param manual override: any geometry_force_* > 0 (or > -1 for the
+    // int) takes precedence over the auto-derived value, allowing users
+    // to pin specific values when auto-derive does the wrong thing
+    // (e.g. extreme cell aspect ratios skewing the mean).
+    bool auto_derive_geometry_enabled = true;
+    float geometry_force_max_a_radius = -1.0f;
+    float geometry_force_max_b_radius = -1.0f;
+    float geometry_force_max_c_radius = -1.0f;
+    float geometry_force_min_a_radius = -1.0f;
+    float geometry_force_min_b_radius = -1.0f;
+    float geometry_force_min_c_radius = -1.0f;
+    float geometry_force_perturb_reference_radius = -1.0f;
+    float geometry_force_xy_sigma = -1.0f;
+    float geometry_force_z_sigma = -1.0f;
+    float geometry_force_position_prior_threshold = -1.0f;
+    int geometry_force_iterations_per_cell = -1;
+    int geometry_force_pca_bridge_min_side_voxels = -1;
     bool edge_brightness_alignment_enabled = false;
     int edge_brightness_alignment_xy_margin = 24;
     int edge_brightness_alignment_left_offset = 0;
@@ -272,6 +349,29 @@ public:
         if (node["manual_cell_intensity"]) manual_cell_intensity = node["manual_cell_intensity"].as<float>();
         if (node["calibration_cell_inner_fraction"]) calibration_cell_inner_fraction = node["calibration_cell_inner_fraction"].as<float>();
         if (node["calibration_pixel_trim_percent"]) calibration_pixel_trim_percent = node["calibration_pixel_trim_percent"].as<float>();
+        if (node["calibration_bg_anchor_percentile"]) calibration_bg_anchor_percentile = node["calibration_bg_anchor_percentile"].as<float>();
+        if (node["calibrated_preprocess_blur_sigma"]) calibrated_preprocess_blur_sigma = node["calibrated_preprocess_blur_sigma"].as<float>();
+        if (node["simple_preprocess_enabled"]) simple_preprocess_enabled = node["simple_preprocess_enabled"].as<bool>();
+        if (node["simple_preprocess_blur_sigma"]) simple_preprocess_blur_sigma = node["simple_preprocess_blur_sigma"].as<float>();
+        if (node["pca_shape_bg_floor"]) pca_shape_bg_floor = node["pca_shape_bg_floor"].as<float>();
+        if (node["pca_shape_use_local_bg_estimation"]) pca_shape_use_local_bg_estimation = node["pca_shape_use_local_bg_estimation"].as<bool>();
+        if (node["pca_shape_bg_shell_inner_scale"]) pca_shape_bg_shell_inner_scale = node["pca_shape_bg_shell_inner_scale"].as<float>();
+        if (node["pca_shape_bg_shell_outer_scale"]) pca_shape_bg_shell_outer_scale = node["pca_shape_bg_shell_outer_scale"].as<float>();
+        if (node["pca_shape_bg_percentile"]) pca_shape_bg_percentile = node["pca_shape_bg_percentile"].as<float>();
+        if (node["pca_shape_bg_sigma_k"]) pca_shape_bg_sigma_k = node["pca_shape_bg_sigma_k"].as<float>();
+        if (node["auto_derive_geometry_enabled"]) auto_derive_geometry_enabled = node["auto_derive_geometry_enabled"].as<bool>();
+        if (node["geometry_force_max_a_radius"]) geometry_force_max_a_radius = node["geometry_force_max_a_radius"].as<float>();
+        if (node["geometry_force_max_b_radius"]) geometry_force_max_b_radius = node["geometry_force_max_b_radius"].as<float>();
+        if (node["geometry_force_max_c_radius"]) geometry_force_max_c_radius = node["geometry_force_max_c_radius"].as<float>();
+        if (node["geometry_force_min_a_radius"]) geometry_force_min_a_radius = node["geometry_force_min_a_radius"].as<float>();
+        if (node["geometry_force_min_b_radius"]) geometry_force_min_b_radius = node["geometry_force_min_b_radius"].as<float>();
+        if (node["geometry_force_min_c_radius"]) geometry_force_min_c_radius = node["geometry_force_min_c_radius"].as<float>();
+        if (node["geometry_force_perturb_reference_radius"]) geometry_force_perturb_reference_radius = node["geometry_force_perturb_reference_radius"].as<float>();
+        if (node["geometry_force_xy_sigma"]) geometry_force_xy_sigma = node["geometry_force_xy_sigma"].as<float>();
+        if (node["geometry_force_z_sigma"]) geometry_force_z_sigma = node["geometry_force_z_sigma"].as<float>();
+        if (node["geometry_force_position_prior_threshold"]) geometry_force_position_prior_threshold = node["geometry_force_position_prior_threshold"].as<float>();
+        if (node["geometry_force_iterations_per_cell"]) geometry_force_iterations_per_cell = node["geometry_force_iterations_per_cell"].as<int>();
+        if (node["geometry_force_pca_bridge_min_side_voxels"]) geometry_force_pca_bridge_min_side_voxels = node["geometry_force_pca_bridge_min_side_voxels"].as<int>();
         if (node["iterative_improvement_tolerance"]) iterative_improvement_tolerance = node["iterative_improvement_tolerance"].as<float>();
         if (node["iterative_score_percentile"]) iterative_score_percentile = node["iterative_score_percentile"].as<float>();
         if (node["contrast_structure_threshold"]) contrast_structure_threshold = node["contrast_structure_threshold"].as<float>();
@@ -401,6 +501,19 @@ public:
         std::cout << "manual_cell_intensity: " << manual_cell_intensity << '\n';
         std::cout << "calibration_cell_inner_fraction: " << calibration_cell_inner_fraction << '\n';
         std::cout << "calibration_pixel_trim_percent: " << calibration_pixel_trim_percent << '\n';
+        std::cout << "calibration_bg_anchor_percentile: " << calibration_bg_anchor_percentile << '\n';
+        std::cout << "calibrated_preprocess_blur_sigma: " << calibrated_preprocess_blur_sigma << '\n';
+        std::cout << "simple_preprocess_enabled: " << simple_preprocess_enabled << '\n';
+        std::cout << "simple_preprocess_blur_sigma: " << simple_preprocess_blur_sigma << '\n';
+        std::cout << "pca_shape_bg_floor: " << pca_shape_bg_floor << '\n';
+        std::cout << "auto_derive_geometry_enabled: " << auto_derive_geometry_enabled << '\n';
+        std::cout << "geometry_force_max_a_radius: " << geometry_force_max_a_radius << '\n';
+        std::cout << "geometry_force_min_a_radius: " << geometry_force_min_a_radius << '\n';
+        std::cout << "geometry_force_perturb_reference_radius: " << geometry_force_perturb_reference_radius << '\n';
+        std::cout << "geometry_force_xy_sigma: " << geometry_force_xy_sigma << '\n';
+        std::cout << "geometry_force_z_sigma: " << geometry_force_z_sigma << '\n';
+        std::cout << "geometry_force_position_prior_threshold: " << geometry_force_position_prior_threshold << '\n';
+        std::cout << "geometry_force_iterations_per_cell: " << geometry_force_iterations_per_cell << '\n';
         std::cout << "iterative_improvement_tolerance: " << iterative_improvement_tolerance << '\n';
         std::cout << "iterative_score_percentile: " << iterative_score_percentile << '\n';
         std::cout << "contrast_structure_threshold: " << contrast_structure_threshold << '\n';
@@ -650,6 +763,17 @@ public:
     // a phantom daughter sitting in empty space regardless of ratios.
     // Typical cell cores are 0.1-0.3 above background; 0.05 is ~3× bg noise.
     float bio_bridge_min_edge_brightness_absolute = 0.05f;
+    // Adaptive variant of the daughter-edge brightness floor (2026-05-06).
+    // When > 0, the effective threshold becomes
+    //   max(bio_bridge_min_edge_brightness_absolute, parent_brightness × fraction)
+    // so the gate auto-scales with the parent cell's actual brightness:
+    //   - Normalized cells (brightness ≈ 1.0):     0.10 × 1.0 = 0.10
+    //   - Raw-mode cells   (brightness ≈ 0.34):    0.10 × 0.34 ≈ 0.034 → clamped to absolute floor
+    //   - Dying cell       (brightness ≈ 0.15):    0.10 × 0.15 = 0.015 → clamped to absolute floor
+    // The absolute value remains as the noise floor so dying cells still
+    // get strict-rejected (correct: don't split a near-dead cell).
+    // Set to 0 to disable adaptive form and use absolute only (legacy).
+    float bio_bridge_min_edge_brightness_fraction = 0.05f;
 
     // Multiplier applied to the Ellipsoid x/y/z perturbation sigmas during
     // candidate burn-in. The main-loop sigmas (x=5, y=5, z=8) let daughters
@@ -720,6 +844,14 @@ public:
     float pca_bridge_min_long_mid_ratio = 1.35f;
     float pca_bridge_max_mid_short_ratio = 1.35f;
     float pca_bridge_black_threshold = 0.05f;
+    // Adaptive variant of the PCA-bridge dark-gap threshold (2026-05-06).
+    // Bridge gap pixels should be at-or-near actual background, so anchor
+    // the threshold to `_backgroundValue + sigma * std`. When > 0, the
+    // effective threshold becomes
+    //   max(pca_bridge_black_threshold, _backgroundValue + 0.02 × multiplier)
+    // matching the PCA-shape gather's per-frame adaptive cutoff. Keeps the
+    // absolute value as a noise floor. Set to 0 to disable adaptive form.
+    float pca_bridge_black_bg_multiplier = 1.0f;
     float pca_bridge_min_black_fraction = 0.75f;
     float pca_bridge_gap_center_fraction = 0.35f;
     int pca_bridge_profile_bins = 21;
@@ -777,6 +909,7 @@ public:
         if (node["bio_bridge_max_valley_ratio"]) bio_bridge_max_valley_ratio = node["bio_bridge_max_valley_ratio"].as<float>();
         if (node["bio_bridge_no_valley_hard_threshold"]) bio_bridge_no_valley_hard_threshold = node["bio_bridge_no_valley_hard_threshold"].as<float>();
         if (node["bio_bridge_min_edge_brightness_absolute"]) bio_bridge_min_edge_brightness_absolute = node["bio_bridge_min_edge_brightness_absolute"].as<float>();
+        if (node["bio_bridge_min_edge_brightness_fraction"]) bio_bridge_min_edge_brightness_fraction = node["bio_bridge_min_edge_brightness_fraction"].as<float>();
         if (node["split_burn_in_pos_sigma_scale"]) split_burn_in_pos_sigma_scale = node["split_burn_in_pos_sigma_scale"].as<float>();
         if (node["use_bbox_cost"]) use_bbox_cost = node["use_bbox_cost"].as<bool>();
         if (node["bbox_margin_scale"]) bbox_margin_scale = node["bbox_margin_scale"].as<float>();
@@ -789,6 +922,7 @@ public:
         if (node["pca_bridge_min_long_mid_ratio"]) pca_bridge_min_long_mid_ratio = node["pca_bridge_min_long_mid_ratio"].as<float>();
         if (node["pca_bridge_max_mid_short_ratio"]) pca_bridge_max_mid_short_ratio = node["pca_bridge_max_mid_short_ratio"].as<float>();
         if (node["pca_bridge_black_threshold"]) pca_bridge_black_threshold = node["pca_bridge_black_threshold"].as<float>();
+        if (node["pca_bridge_black_bg_multiplier"]) pca_bridge_black_bg_multiplier = node["pca_bridge_black_bg_multiplier"].as<float>();
         if (node["pca_bridge_min_black_fraction"]) pca_bridge_min_black_fraction = node["pca_bridge_min_black_fraction"].as<float>();
         if (node["pca_bridge_gap_center_fraction"]) pca_bridge_gap_center_fraction = node["pca_bridge_gap_center_fraction"].as<float>();
         if (node["pca_bridge_profile_bins"]) pca_bridge_profile_bins = node["pca_bridge_profile_bins"].as<int>();

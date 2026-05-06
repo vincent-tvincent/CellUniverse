@@ -625,6 +625,17 @@ public:
     float split_bridge_cost_rescue_max_positive_fraction = 0.20f;
     float split_bridge_cost_rescue_max_valley_ratio = 0.40f;
     float split_bridge_cost_rescue_max_gap_density = 0.05f;
+    // Live-collapse guard at the split-baseline-selection step. When the
+    // live ellipsoid's volume drops below this fraction of the snapshot
+    // ellipsoid's volume, the live cost is treated as an overfit artefact
+    // and the snapshot is forced as baseline regardless of which is
+    // cheaper. Default 0.5 (live < half snap volume = collapsed).
+    float split_live_collapse_volume_ratio = 0.5f;
+    // Perpendicular cylinder radius (relative to max(r1Along, r2Along))
+    // used when scanning the bridge gap voxels directly from _realFrame.
+    // 1.0 ≈ daughter's axial extent at the gap; smaller values restrict
+    // the scan to the cell core, larger values include peripheral halo.
+    float split_bridge_perp_radius_scale = 1.0f;
     // Quadratic position prior weight for perturbCell.
     // penalty = weight × ||cell.pos - snap.pos||²
     // Temporal anchor independent of image evidence. Prevents drift
@@ -875,6 +886,8 @@ public:
         if (node["split_bridge_cost_rescue_max_positive_fraction"]) split_bridge_cost_rescue_max_positive_fraction = node["split_bridge_cost_rescue_max_positive_fraction"].as<float>();
         if (node["split_bridge_cost_rescue_max_valley_ratio"]) split_bridge_cost_rescue_max_valley_ratio = node["split_bridge_cost_rescue_max_valley_ratio"].as<float>();
         if (node["split_bridge_cost_rescue_max_gap_density"]) split_bridge_cost_rescue_max_gap_density = node["split_bridge_cost_rescue_max_gap_density"].as<float>();
+        if (node["split_live_collapse_volume_ratio"]) split_live_collapse_volume_ratio = node["split_live_collapse_volume_ratio"].as<float>();
+        if (node["split_bridge_perp_radius_scale"]) split_bridge_perp_radius_scale = node["split_bridge_perp_radius_scale"].as<float>();
         if (node["position_prior_weight"]) position_prior_weight = node["position_prior_weight"].as<float>();
         if (node["position_prior_threshold"]) position_prior_threshold = node["position_prior_threshold"].as<float>();
         if (node["max_perturb_drift_xy"]) max_perturb_drift_xy = node["max_perturb_drift_xy"].as<float>();
@@ -949,6 +962,8 @@ public:
         std::cout << "split_bridge_cost_rescue_max_positive_fraction: " << split_bridge_cost_rescue_max_positive_fraction << '\n';
         std::cout << "split_bridge_cost_rescue_max_valley_ratio: " << split_bridge_cost_rescue_max_valley_ratio << '\n';
         std::cout << "split_bridge_cost_rescue_max_gap_density: " << split_bridge_cost_rescue_max_gap_density << '\n';
+        std::cout << "split_live_collapse_volume_ratio: " << split_live_collapse_volume_ratio << '\n';
+        std::cout << "split_bridge_perp_radius_scale: " << split_bridge_perp_radius_scale << '\n';
         std::cout << "overlap_penalty_weight: " << overlap_penalty_weight << '\n';
         std::cout << "split_candidates_per_attempt: " << split_candidates_per_attempt << '\n';
         std::cout << "split_candidate_burn_in_iterations: " << split_candidate_burn_in_iterations << '\n';

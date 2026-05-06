@@ -511,6 +511,113 @@ Smaller knob adjustments that landed alongside the structural changes:
 
 ---
 
+## Change 22: Bridge metric integrity — fix algorithm/visual divergence at the gap **ACTIVE**
+
+### Problem
+
+Output run `output_fluo_0-50_20260505_005405` rejected the f7 cell_3 division (cell_30 + cell_31 — present in the GT, caught by `output_fluo_0-50_20260504_005706`). The image at f7 visibly shows a clean split with a black gap between two daughters, but the bridge metric reported `gapBright=0.215` and `valleyFromBright=0.488`, and the cost gate then rejected with `costDiff=+92914 / threshold=−5983`.
+
+Two distinct failures, both rooted in "the algorithm wasn't seeing what the user sees":
+
+**(a) Brightness-cutoff bias on the bridge gap**: `gatherBrightPixelsVoronoi` (`Frame.cpp:1786`) drops every voxel below `_backgroundValue + 0.02` (~0.02). The downstream bridge metric iterated only those filtered pixels — so dark gap voxels never contributed. The remaining bright halo bleed (~0.4) drove the average to 0.215 even when most of the gap was black. Sigma=1.5 blur from `simple_preprocess` is a minor contributor; the cutoff is the dominant one.
+
+**(b) Live-collapse baseline collapse**: in-frame perturbation shrunk live cell_3 from snap radii (37.4, 32.6, 12.3) to (24.2, 22.9, 8.3) — about 30% of snap volume — fitting onto only the bright core. With the existing `min(liveCost, snapCost)` rule, baseline became `liveCost=114k` (vs `snapCost=387k`). Both the cost-gate adaptive threshold and the rescue's `0.20 × baselineImageCost` budget shrank by 3.4×, putting the legitimate split out of reach. RNG-dependent: 05-04 hit the split attempt before perturbation, so live==snap exactly and baseline was correct.
+
+### Fix
+
+Two coupled adaptive changes (both threshold-free; relative ratios that work across datasets):
+
+#### (1) Bridge gap scan reads `_realFrame` directly, no brightness cutoff
+
+**File:** `C++/src/Frame.cpp`
+
+**Lines ~4870-4970 (after):**
+```cpp
+// Edge accumulation: iterate the brightness-filtered `pixels` (cell tissue).
+for (const auto &bp : pixels) {
+    ... (only edge1Lo..gapLo and gapHi..edge2Hi accumulated)
+}
+
+// Gap accumulation: scan _realFrame DIRECTLY in a 3D box covering the bridge,
+// no brightness cutoff. Perpendicular cylinder bound by
+// split_bridge_perp_radius_scale × max(r1Along, r2Along).
+for (int z, y, x in bridge bbox) {
+    proj = (p - daughterMidpoint) · axisDir;
+    if (proj < gapLo || proj > gapHi) continue;
+    perpSq = |delta|² - proj²;
+    if (perpSq > perpRadiusSq) continue;
+    w = max(0, _realFrame[z](y,x) - _backgroundValue);
+    gapBrightSum += w; ++gapCount;
+    slabSum[bin] += w; ++slabCount[bin];
+}
+totalInRange += edge1Count + edge2Count;
+```
+
+Edge zones still use the cutoff-filtered `pixels` (correct — edges represent CELL TISSUE brightness, dark voxels near the periphery shouldn't dilute). Gap reads true voxel intensity — when the gap is visually black, gapBright reports near-zero.
+
+#### (2) Live-collapse baseline guard
+
+**File:** `C++/src/Frame.cpp`
+
+**Lines ~3355 (after):**
+```cpp
+const double liveVol = liveParent.getARadius() * liveParent.getBRadius() * liveParent.getCRadius();
+const double snapVol = srcMajor * srcB * srcMinor;
+const float collapseRatio = probConfig.split_live_collapse_volume_ratio > 0
+    ? probConfig.split_live_collapse_volume_ratio : 0.5f;
+const bool liveCollapsed = (snapVol > 0.0) && (liveVol < collapseRatio * snapVol);
+const bool useSnapshotBaseline =
+    liveCollapsed || (snapCostForComparison <= liveCostForComparison);
+```
+
+When live volume drops below `split_live_collapse_volume_ratio × snap volume` (default 0.5), force snap as baseline regardless of which is cheaper. Drift case (live moved but kept its size) is unaffected. The `[Split Snapshot Parent]` log line gains `liveVol`, `snapVol`, `volRatio`, `collapseLimit`, `collapsed` fields for diagnosability.
+
+#### Config additions
+
+**File:** `C++/includes/ConfigTypes.hpp` (`ProbabilityConfig`)
+- `split_live_collapse_volume_ratio` — default 0.5
+- `split_bridge_perp_radius_scale` — default 1.0
+
+**File:** `C++/config/config.yaml` — surface both keys with explanatory comments.
+
+### Effect on f7 cell_3
+
+| | Before (regression) | After (this change) |
+|---|---|---|
+| `liveR / snapR` volume ratio | 0.31 | 0.31 (unchanged) |
+| Baseline selection | live (114k) — collapsed wins | **snap (387k) — collapse-guarded** |
+| Adaptive cost threshold | 0.03 × 114k = 3.4k | 0.03 × 387k = 11.6k |
+| Rescue positive limit | 0.20 × 114k = 22.7k | 0.20 × 387k = 77.4k |
+| `gapBright` (no-cutoff scan) | 0.215 (filtered pixels only) | ≪ 0.215 (true voxel mean) |
+| `valleyFromBright` | 0.488 — fails 0.40 rescue | ≪ 0.40 — passes rescue |
+| `costDiff` | +92.9k vs collapsed live | ~+27k vs honest snap |
+| Split decision | REJECT cost | ACCEPT (rescue or main gate) |
+
+### Adaptive properties
+
+- **Gap-scan no-cutoff**: zero magic numbers. Sees every voxel inside the bridge cylinder; the slab-min approach already handles outliers.
+- **Live-collapse guard**: a single dimensionless ratio (0.5). Fires only on the failure mode (volume collapse) — healthy cells where live ≈ snap are unaffected.
+- Both work identically on fluo and embryo because they're geometric self-comparisons, not absolute brightness or pixel-count thresholds.
+- The existing `split_bridge_cost_rescue` thresholds (max_valley_ratio=0.40, max_positive_fraction=0.20) stay where they are — they were calibrated correctly; the denominator shifted out from under them. Fixing the denominator restores their intent.
+
+---
+
+## Change 23: Per-frame log split real cells from trash **ACTIVE**
+
+Trash cells (`isTrash=1`) are bookkeeping markers, not biology — counting them with real cells in the per-frame log inflated the perceived cell count and made it harder to read GT-match status at a glance.
+
+**File:** `C++/src/CellUniverse.cpp`
+
+Two log lines updated:
+
+`[Optimize] frame N (M cells, K iterations)` → `[Optimize] frame N (M cells T trash, K iterations)` where M is the real-cell count and T the trash count.
+
+`Saved N cells for frame K to ...` → `Saved N cells T trash for frame K to ...`, plus a follow-up line `cells=[name1,name2,...] trash=[trash_1,trash_2]` listing both groups by name.
+
+Trivial bookkeeping change; no behavioural impact.
+
+---
+
 ## Cross-cutting summary: A new dataset now needs only 2 inputs
 
 After Changes 14–19, a new dataset works with:

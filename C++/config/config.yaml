@@ -285,7 +285,7 @@ simulation:
   # After adaptive chunk blackoff, remove isolated nonzero connected
   # components whose z/y/x bounding-box dimensions are all smaller than the
   # configured minimum cell diameters. Disabled by default.
-  post_alignment_tiny_particle_removal_enabled: true
+  post_alignment_tiny_particle_removal_enabled: false
   preprocess_radius_batch_size: 8
 
   post_process_blur_sigma: 0.0
@@ -422,6 +422,22 @@ prob:
   split_bridge_cost_rescue_max_positive_fraction: 0.20
   split_bridge_cost_rescue_max_valley_ratio: 0.40
   split_bridge_cost_rescue_max_gap_density: 0.05
+
+  # Bridge metric integrity (Change 16, 2026-05-06).
+  # Live-collapse guard: when the live ellipsoid is < this fraction of the
+  # snapshot's volume, treat live as a perturbation-collapsed overfit and
+  # force the snapshot as the cost baseline. Stops the trap where cell_3
+  # at f7 collapsed onto a bright sub-region (livR ~35% of snapR) and the
+  # collapsed live cost (114k vs snap 387k) made every legitimate split
+  # candidate look "worse than parent" and reject.
+  split_live_collapse_volume_ratio: 0.5
+
+  # Bridge gap voxel scan: perpendicular cylinder radius relative to the
+  # daughters' along-axis extent. The bridge gap statistic now scans
+  # _realFrame directly (no brightness cutoff) so dark gap voxels — the
+  # ones the user actually sees — drive the gapBright statistic instead
+  # of being filtered out before the metric runs.
+  split_bridge_perp_radius_scale: 1.0
 
   position_prior_weight: 75.0
   position_prior_threshold: 20.0

@@ -3352,7 +3352,28 @@ CostCallbackPair Frame::trySplitCellPhased(
         // the inflated snapshot baseline would make ANY daughter placement
         // look like an improvement — causing false splits. Using the
         // minimum ensures the split must beat the TIGHTER of the two fits.
-        const bool useSnapshotBaseline = (snapCostForComparison <= liveCostForComparison);
+        //
+        // Live-collapse guard: in-frame perturbation can shrink the live
+        // ellipsoid onto a bright sub-region (live volume << snap volume),
+        // which produces an artificially low live cost that no legitimate
+        // split can beat. Detected via volume ratio — when triggered, force
+        // the snap baseline regardless of cost. Threshold default 0.5
+        // (live < half snap volume = collapsed); configurable via
+        // split_live_collapse_volume_ratio.
+        const double liveVol = static_cast<double>(liveParent.getARadius())
+                             * static_cast<double>(liveParent.getBRadius())
+                             * static_cast<double>(liveParent.getCRadius());
+        const double snapVol = static_cast<double>(srcMajor)
+                             * static_cast<double>(srcB)
+                             * static_cast<double>(srcMinor);
+        const float collapseRatio =
+            (probConfig.split_live_collapse_volume_ratio > 0.0f)
+                ? probConfig.split_live_collapse_volume_ratio
+                : 0.5f;
+        const bool liveCollapsed =
+            (snapVol > 0.0) && (liveVol < collapseRatio * snapVol);
+        const bool useSnapshotBaseline =
+            liveCollapsed || (snapCostForComparison <= liveCostForComparison);
         if (useSnapshotBaseline) {
             _synthFrame = swappedSynth;
             if (!_useBboxCost) {
@@ -3370,6 +3391,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " snapPos=(" << snapshot.position.x << "," << snapshot.position.y << "," << snapshot.position.z << ")"
                   << " liveR=(" << liveParent.getARadius() << "," << liveParent.getBRadius() << "," << liveParent.getCRadius() << ")"
                   << " snapR=(" << srcMajor << "," << srcB << "," << srcMinor << ")"
+                  << " liveVol=" << liveVol
+                  << " snapVol=" << snapVol
+                  << " volRatio=" << (snapVol > 0.0 ? liveVol / snapVol : 0.0)
+                  << " collapseLimit=" << collapseRatio
+                  << " collapsed=" << (liveCollapsed ? 1 : 0)
                   << " liveCost=" << liveCostForComparison
                   << " snapCost=" << snapCostForComparison
                   << " baseline=" << (useSnapshotBaseline ? "snapshot" : "live")
@@ -4871,6 +4897,10 @@ CostCallbackPair Frame::trySplitCellPhased(
             std::array<int,    kGapSlabs> slabCount{};
             const float slabWidth = (gapHi - gapLo) / static_cast<float>(kGapSlabs);
 
+            // Edge accumulation iterates the brightness-filtered `pixels`
+            // (from gatherBrightPixelsVoronoi) — edges represent CELL TISSUE
+            // brightness, so dark voxels near the daughter periphery should
+            // not dilute the average.
             for (const auto &bp : pixels) {
                 const cv::Point3f delta(
                     bp.pos.x - daughterMidpoint.x,
@@ -4882,25 +4912,92 @@ CostCallbackPair Frame::trySplitCellPhased(
                     delta.z * axisDir.z;
 
                 if (proj < edge1Lo || proj > edge2Hi) continue;
-                ++totalInRange;
 
-                if (proj >= gapLo && proj <= gapHi) {
-                    ++gapCount;
-                    gapBrightSum += bp.weight;
-                    int bin = (slabWidth > 0.0f)
-                        ? static_cast<int>((proj - gapLo) / slabWidth)
-                        : 0;
-                    if (bin < 0) bin = 0;
-                    if (bin >= kGapSlabs) bin = kGapSlabs - 1;
-                    slabSum[bin] += bp.weight;
-                    slabCount[bin] += 1;
-                } else if (proj >= edge1Lo && proj <= edge1Hi) {
+                if (proj >= edge1Lo && proj < gapLo) {
                     ++edge1Count;
                     edge1BrightSum += bp.weight;
-                } else if (proj >= edge2Lo && proj <= edge2Hi) {
+                } else if (proj > gapHi && proj <= edge2Hi) {
                     ++edge2Count;
                     edge2BrightSum += bp.weight;
                 }
+            }
+
+            // Gap accumulation scans `_realFrame` DIRECTLY in a 3D box
+            // covering the bridge volume — no brightness cutoff. The
+            // brightness cutoff in gatherBrightPixelsVoronoi (bg + 0.02)
+            // drops every dark voxel before the bridge metric sees it,
+            // leaving only the cell-halo bleed from each daughter's edges.
+            // That biases gapBright upward by ~0.2 even when the gap is
+            // visually black (f7 cell_3 regression: gapBright=0.215
+            // reported, but actual mean over all gap voxels is ~0).
+            //
+            // Scan-radius perpendicular to axisDir is bounded by
+            // max(r1Along, r2Along) × bridge_perp_radius_scale (1.0 default,
+            // i.e. roughly the daughter's extent at the gap). totalInRange
+            // is computed on the unfiltered scan so gapDensity reflects the
+            // true voxel population.
+            {
+                const float perpRadiusScale =
+                    std::max(0.5f, probConfig.split_bridge_perp_radius_scale > 0.0f
+                                       ? probConfig.split_bridge_perp_radius_scale
+                                       : 1.0f);
+                const float perpRadius =
+                    perpRadiusScale * std::max(r1Along, r2Along);
+                const float perpRadiusSq = perpRadius * perpRadius;
+                const float scanAxialLo = -halfLen - r1Along - 1.0f;
+                const float scanAxialHi =  halfLen + r2Along + 1.0f;
+                const float scanRadius =
+                    std::sqrt(scanAxialHi * scanAxialHi + perpRadiusSq) + 1.0f;
+                const int rows = _realFrame.empty() ? 0 : _realFrame[0].rows;
+                const int cols = _realFrame.empty() ? 0 : _realFrame[0].cols;
+                const int slices = static_cast<int>(_realFrame.size());
+                const int minX = std::max(0,
+                    static_cast<int>(std::floor(daughterMidpoint.x - scanRadius)));
+                const int maxX = std::min(cols - 1,
+                    static_cast<int>(std::ceil(daughterMidpoint.x + scanRadius)));
+                const int minY = std::max(0,
+                    static_cast<int>(std::floor(daughterMidpoint.y - scanRadius)));
+                const int maxY = std::min(rows - 1,
+                    static_cast<int>(std::ceil(daughterMidpoint.y + scanRadius)));
+                const int minZ = std::max(0,
+                    static_cast<int>(std::floor(daughterMidpoint.z - scanRadius)));
+                const int maxZ = std::min(slices - 1,
+                    static_cast<int>(std::ceil(daughterMidpoint.z + scanRadius)));
+                for (int z = minZ; z <= maxZ; ++z) {
+                    if (z < 0 || z >= slices) continue;
+                    const cv::Mat &slice = _realFrame[z];
+                    if (slice.empty() || slice.type() != CV_32F) continue;
+                    const float dz = static_cast<float>(z) - daughterMidpoint.z;
+                    for (int y = minY; y <= maxY; ++y) {
+                        const float *row = slice.ptr<float>(y);
+                        const float dy = static_cast<float>(y) - daughterMidpoint.y;
+                        for (int x = minX; x <= maxX; ++x) {
+                            const float dx = static_cast<float>(x) - daughterMidpoint.x;
+                            const float proj =
+                                dx * axisDir.x + dy * axisDir.y + dz * axisDir.z;
+                            if (proj < gapLo || proj > gapHi) continue;
+                            // Perpendicular distance² = |delta|² - proj²
+                            const float deltaSq = dx*dx + dy*dy + dz*dz;
+                            const float perpSq = deltaSq - proj * proj;
+                            if (perpSq > perpRadiusSq) continue;
+                            const float v = row[x];
+                            const float w = std::max(0.0f, v - _backgroundValue);
+                            ++totalInRange;
+                            ++gapCount;
+                            gapBrightSum += w;
+                            int bin = (slabWidth > 0.0f)
+                                ? static_cast<int>((proj - gapLo) / slabWidth)
+                                : 0;
+                            if (bin < 0) bin = 0;
+                            if (bin >= kGapSlabs) bin = kGapSlabs - 1;
+                            slabSum[bin] += w;
+                            slabCount[bin] += 1;
+                        }
+                    }
+                }
+                // Add the edge voxel counts to totalInRange so gapDensity
+                // remains the gap-fraction over the full sampled span.
+                totalInRange += edge1Count + edge2Count;
             }
 
             const int edgeCount = edge1Count + edge2Count;

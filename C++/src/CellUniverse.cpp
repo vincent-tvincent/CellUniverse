@@ -2653,8 +2653,14 @@ void CellUniverse::optimize(int frameIndex)
     const float randomPerturbRadiusRatio =
         config.cell ? config.cell->randomPerturbRadiusRatio : 0.5f;
 
+    int optTrashCount = 0;
+    for (const auto &c : frame.cells) {
+        if (c.isTrash()) ++optTrashCount;
+    }
+    const int optRealCount = static_cast<int>(frame.cells.size()) - optTrashCount;
     std::cout << "[Optimize] frame " << displayFrame
-              << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)"
+              << " (" << optRealCount << " cells " << optTrashCount << " trash, "
+              << totalIterations << " iterations)"
               << " perturbMode=" << (useSignalGuidanceThisFrame ? "signal_guided" : "random")
               << " guidedItersPerCell=" << guidedPerCellIters
               << " randomItersPerCell=" << randomPerCellIters
@@ -4100,11 +4106,22 @@ void CellUniverse::optimize(int frameIndex)
         }
     }
 
+    // Separate real vs trash in the cell count so GT comparisons can be
+    // made directly against `final_real_cells` (the CTC `man_track.txt` GT
+    // is real-cells-only). Total final_cells is preserved for backward
+    // compatibility with downstream tooling that scrapes the legacy field.
+    std::size_t finalTrashCells = 0;
+    for (const auto &c : frame.cells) {
+        if (c.isTrash()) ++finalTrashCells;
+    }
+    const std::size_t finalRealCells = frame.cells.size() - finalTrashCells;
     std::cout << "[Optimize Done] frame " << displayFrame
               << " perturb_accepted=" << perturbAccepted
               << " split_attempts=" << splitAttempted
               << " split_accepted=" << splitAccepted
-              << " final_cells=" << frame.cells.size() << std::endl;
+              << " final_cells=" << frame.cells.size()
+              << " final_real_cells=" << finalRealCells
+              << " final_trash_cells=" << finalTrashCells << std::endl;
 
     const auto tOptimizeT1 = std::chrono::steady_clock::now();
     const double tOptimizeTotal =
@@ -4238,8 +4255,34 @@ void CellUniverse::saveCells(int frameIndex)
              << '\n';
     }
 
-    std::cout << "Saved " << frame.cells.size() << " cells for frame " << (firstFrame + frameIndex)
+    int trashCount = 0;
+    std::vector<std::string> trashNames;
+    std::vector<std::string> realNames;
+    trashNames.reserve(frame.cells.size());
+    realNames.reserve(frame.cells.size());
+    for (const auto &c : frame.cells) {
+        if (c.isTrash()) {
+            ++trashCount;
+            trashNames.push_back(c.getName());
+        } else {
+            realNames.push_back(c.getName());
+        }
+    }
+    const int realCount = static_cast<int>(frame.cells.size()) - trashCount;
+    std::ostringstream realJoin, trashJoin;
+    for (size_t i = 0; i < realNames.size(); ++i) {
+        if (i) realJoin << ",";
+        realJoin << realNames[i];
+    }
+    for (size_t i = 0; i < trashNames.size(); ++i) {
+        if (i) trashJoin << ",";
+        trashJoin << trashNames[i];
+    }
+    std::cout << "Saved " << realCount << " cells "
+              << trashCount << " trash for frame " << (firstFrame + frameIndex)
               << " to " << cellsPath << std::endl;
+    std::cout << "  cells=[" << realJoin.str() << "]"
+              << " trash=[" << trashJoin.str() << "]" << std::endl;
 }
 
 // ---------------------------------------------------------------------------

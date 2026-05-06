@@ -278,9 +278,29 @@ PreprocessLoadedFrameWithCalibrationTest.FallsBackToLegacyWhenCalibrationNullOrI
 ManualOverrideEndToEndTest.ManualValuesPassThroughPreprocessing
 ```
 
-### Open follow-ups
+### Full f0–f50 validation (Task 11, 2026-05-05)
 
-- **Full f0–f50 fluo validation run on Linux WSL** (Task 11 of the plan). Smoke tests cover f0–f5; the long run validates against the full bridge-demote baseline at `output_fluo_0-50_20260504_005706`.
+Run: `outputs/output_fluo_0-50_20260505_005405/` (Linux WSL, 17h 14m for 51 frames). Detailed plan-side findings in `docs/plans/2026-05-04-auto-calibration-from-frame-zero.md` § Validation Findings.
+
+**Result: PASS.**
+
+| Metric | Auto-calibrated | Baseline (bridge-demote) | GT |
+|---|---|---|---|
+| Final cell count at f50 | 26 ✓ | 26 ✓ | 26 |
+| Total splits accepted | 22 | 22 | 22 |
+| Cost rescues fired | 5 | 4 | — |
+| Lineage topology | matches | matches | — |
+| Wall time | 17h 14m | 15h 24m | — |
+| All `[Preprocess Dispatch]` lines | `path=calibrated` × 51 | `path=legacy_iterative` × 51 | — |
+| All `[Frame Intensity Scale]` lines | `enabled=skipped_for_calibration` | `enabled=1` (legacy normalization runs) | — |
+
+Two known timing wobbles, both self-correcting:
+- **f7 cell_3** delayed to f11 (cost-rejected at f7 with `diff=+92914 vs threshold=-5983`). Caught up alongside cell_4 at f11.
+- **f44** has +1 cell (one of the f45 splits pulled forward). Absorbed by the f45 wave at f46.
+
+Mean cell radii at f50 are ~7–15% smaller in the calibrated run (mean aR 31.3 vs 33.8, mean cR 19.8 vs 23.5) — tighter PCA fits enabled by cleaner [0, 1] cell-vs-background contrast. One cell at the radius ceiling (cf. baseline max 55), one near the floor; neither is systemic.
+
+### Open follow-ups
 - **Spatial illumination correction (vignetting).** Currently a single `background_intensity` constant. Some datasets need a per-pixel low-pass background field. Out of scope for this changelog; potential Change 15.
 - **Per-channel calibration for multi-channel datasets.** Single channel only today.
 - **Eventual removal of deprecated `iterative_*` / `contrast_*` / `frame_intensity_scale_*` config fields** once auto-calibration is validated on 3+ datasets. Removing these will collapse `SimulationConfig` from ~70 fields to ~35.

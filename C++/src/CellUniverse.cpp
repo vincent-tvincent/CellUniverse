@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <limits>
 #include <numeric>
@@ -16,6 +17,30 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+// Per-frame timing accumulators for the heavy phases inside optimize().
+// Reset at the top of each optimize(frame) call, reported at the end.
+// `std::atomic<long long>` of nanoseconds is thread-safe under the OpenMP
+// parallel for loops without needing per-thread arrays.
+namespace {
+std::atomic<long long> tCalibPcaShapeNs{0};
+std::atomic<long long> tTrySplitPhasedNs{0};
+std::atomic<long long> tPerturbCellNs{0};
+inline void resetOptimizeTimers() {
+    tCalibPcaShapeNs.store(0);
+    tTrySplitPhasedNs.store(0);
+    tPerturbCellNs.store(0);
+}
+inline void addNanos(std::atomic<long long> &accum,
+                     std::chrono::steady_clock::time_point t0,
+                     std::chrono::steady_clock::time_point t1) {
+    accum.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count(),
+                    std::memory_order_relaxed);
+}
+inline double nsToSec(long long ns) {
+    return static_cast<double>(ns) * 1e-9;
+}
+}  // namespace
 
 namespace utils
 {
@@ -86,8 +111,23 @@ static float computeMeanOfTopFraction(std::vector<float> values, float topFracti
     return static_cast<float>(sum / selectedCount);
 }
 
+static int normalizeExportBitDepth(int bitDepth)
+{
+    return bitDepth == 8 ? 8 : 16;
+}
+
+static float exportMaxForBitDepth(int bitDepth)
+{
+    return normalizeExportBitDepth(bitDepth) == 8 ? 255.0f : 65535.0f;
+}
+
+static int cvDepthForExportBitDepth(int bitDepth)
+{
+    return normalizeExportBitDepth(bitDepth) == 8 ? CV_8U : CV_16U;
+}
+
 static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice,
-                                           float maxBrightness = 65536.0f)
+                                           int exportBitDepth = 16)
 {
     if (slice.empty()) {
         return {};
@@ -107,32 +147,48 @@ static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice,
 
     cv::Mat output;
     if (gray.depth() == CV_8U || gray.depth() == CV_16U) {
-        output = gray.clone();
+        if ((gray.depth() == CV_8U && normalizeExportBitDepth(exportBitDepth) == 8) ||
+            (gray.depth() == CV_16U && normalizeExportBitDepth(exportBitDepth) == 16)) {
+            output = gray.clone();
+        } else {
+            const double scale = normalizeExportBitDepth(exportBitDepth) == 8
+                ? 255.0 / 65535.0
+                : 65535.0 / 255.0;
+            gray.convertTo(output, cvDepthForExportBitDepth(exportBitDepth), scale);
+        }
     } else {
-        const float exportMaxBrightness =
-            maxBrightness > 0.0f ? maxBrightness : 65536.0f;
+        const float exportMaxBrightness = exportMaxForBitDepth(exportBitDepth);
+        const int exportDepth = cvDepthForExportBitDepth(exportBitDepth);
         cv::Mat clipped = gray.clone();
         cv::patchNaNs(clipped, 0.0);
         cv::min(clipped, 1.0f, clipped);
         cv::max(clipped, 0.0f, clipped);
-        clipped.convertTo(output, CV_16U, exportMaxBrightness);
+        clipped.convertTo(output, exportDepth, exportMaxBrightness);
     }
     return output;
 }
 
 static cv::Mat makeNormalizedExportSlice(const cv::Mat &slice,
-                                         float maxBrightness = 65536.0f)
+                                         int exportBitDepth = 16)
 {
     if (slice.empty()) {
         return {};
     }
     if (slice.depth() == CV_8U || slice.depth() == CV_16U) {
-        return slice.clone();
+        if ((slice.depth() == CV_8U && normalizeExportBitDepth(exportBitDepth) == 8) ||
+            (slice.depth() == CV_16U && normalizeExportBitDepth(exportBitDepth) == 16)) {
+            return slice.clone();
+        }
+        cv::Mat converted;
+        const double scale = normalizeExportBitDepth(exportBitDepth) == 8
+            ? 255.0 / 65535.0
+            : 65535.0 / 255.0;
+        slice.convertTo(converted, cvDepthForExportBitDepth(exportBitDepth), scale);
+        return converted;
     }
 
-    const float exportMaxBrightness =
-        maxBrightness > 0.0f ? maxBrightness : 65536.0f;
-    const int exportDepth = exportMaxBrightness > 255.0f ? CV_16U : CV_8U;
+    const float exportMaxBrightness = exportMaxForBitDepth(exportBitDepth);
+    const int exportDepth = cvDepthForExportBitDepth(exportBitDepth);
 
     cv::Mat clipped = slice.clone();
     cv::patchNaNs(clipped, 0.0);
@@ -145,14 +201,14 @@ static cv::Mat makeNormalizedExportSlice(const cv::Mat &slice,
 }
 
 static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Mat> &stack,
-                                                        float maxBrightness = 65536.0f)
+                                                        int exportBitDepth = 16)
 {
     std::vector<cv::Mat> output;
     output.reserve(stack.size());
 
     cv::Size expectedSize;
     for (const auto &slice : stack) {
-        cv::Mat converted = makeNapariFriendlyTiffSlice(slice, maxBrightness);
+        cv::Mat converted = makeNapariFriendlyTiffSlice(slice, exportBitDepth);
         if (converted.empty()) {
             continue;
         }
@@ -172,9 +228,9 @@ static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Ma
 
 static void writeNapariFriendlyTiffStack(const std::string &path,
                                          const std::vector<cv::Mat> &stack,
-                                         float maxBrightness = 65536.0f)
+                                         int exportBitDepth = 16)
 {
-    std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(stack, maxBrightness);
+    std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(stack, exportBitDepth);
     const std::vector<int> params = {
         cv::IMWRITE_TIFF_COMPRESSION, 1 // COMPRESSION_NONE: easiest for TIFF readers.
     };
@@ -255,6 +311,27 @@ static float computeStackMax(const std::vector<cv::Mat> &stack)
     return foundValue ? maxValue : 0.0f;
 }
 
+static float resolveFrameIntensityHardMax(const std::vector<cv::Mat> &stack,
+                                          const SimulationConfig &config)
+{
+    if (!config.frame_intensity_auto_hard_max ||
+        config.frame_intensity_hard_max > 0.0f) {
+        return config.frame_intensity_hard_max;
+    }
+
+    // Fallback for callers that provide already-decoded float stacks without
+    // passing through ImageHandler::loadRawFrame, where dtype-based detection
+    // normally happens.
+    const float observedMax = computeStackMax(stack);
+    if (observedMax <= 255.0f + 1e-3f) {
+        return 255.0f;
+    }
+    if (observedMax <= 65535.0f + 1e-3f) {
+        return 65536.0f;
+    }
+    return std::max(observedMax, config.frame_intensity_hard_max);
+}
+
 static void normalizeStackToFrameScale(std::vector<cv::Mat> &stack,
                                        float lowReference,
                                        float highReference,
@@ -279,15 +356,20 @@ static void normalizeStackToFrameScale(std::vector<cv::Mat> &stack,
 }
 
 static std::pair<float, float> normalizeStackToFrameIntensity(std::vector<cv::Mat> &stack,
-                                                              const SimulationConfig &config)
+                                                              SimulationConfig &config)
 {
+    const float effectiveHardMax = resolveFrameIntensityHardMax(stack, config);
+    if (config.frame_intensity_auto_hard_max && effectiveHardMax > 0.0f) {
+        config.frame_intensity_hard_max = effectiveHardMax;
+    }
+
     if (config.frame_intensity_fixed_hard_max_scale &&
-        config.frame_intensity_hard_max > 0.0f) {
+        effectiveHardMax > 0.0f) {
         normalizeStackToFrameScale(stack,
                                    0.0f,
-                                   config.frame_intensity_hard_max,
-                                   config.frame_intensity_hard_max);
-        return {0.0f, config.frame_intensity_hard_max};
+                                   effectiveHardMax,
+                                   effectiveHardMax);
+        return {0.0f, effectiveHardMax};
     }
 
     float lowReference = computeStackPercentile(
@@ -298,23 +380,23 @@ static std::pair<float, float> normalizeStackToFrameIntensity(std::vector<cv::Ma
         stack,
         config.frame_intensity_scale_high_percentile,
         config.frame_intensity_percentile_exclude_zeros);
-    if (config.frame_intensity_hard_max > 0.0f &&
-        highReference > config.frame_intensity_hard_max) {
-        highReference = config.frame_intensity_hard_max;
+    if (effectiveHardMax > 0.0f &&
+        highReference > effectiveHardMax) {
+        highReference = effectiveHardMax;
     }
 
     if (highReference <= lowReference + 1e-6f) {
         const float fallback = computeStackMax(stack);
         if (fallback > lowReference + 1e-6f) {
             highReference = fallback;
-            if (config.frame_intensity_hard_max > 0.0f) {
-                highReference = std::min(highReference, config.frame_intensity_hard_max);
+            if (effectiveHardMax > 0.0f) {
+                highReference = std::min(highReference, effectiveHardMax);
             }
         } else {
             lowReference = 0.0f;
             highReference = 1.0f;
-            if (config.frame_intensity_hard_max > 0.0f) {
-                highReference = std::min(highReference, config.frame_intensity_hard_max);
+            if (effectiveHardMax > 0.0f) {
+                highReference = std::min(highReference, effectiveHardMax);
             }
         }
     }
@@ -322,7 +404,7 @@ static std::pair<float, float> normalizeStackToFrameIntensity(std::vector<cv::Ma
     normalizeStackToFrameScale(stack,
                                lowReference,
                                highReference,
-                               config.frame_intensity_hard_max);
+                               effectiveHardMax);
     return {lowReference, highReference};
 }
 
@@ -1124,7 +1206,7 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
                                 const fs::path &framePath,
                                 bool exportPng,
                                 bool exportTiff,
-                                float tiffMaxBrightness = 65536.0f)
+                                int exportBitDepth = 16)
 {
     const fs::path outputDir = baseOutputDir / subdir;
 
@@ -1137,7 +1219,7 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
                 continue;
             }
 
-            cv::Mat outputImage = makeNormalizedExportSlice(stack[i], tiffMaxBrightness);
+            cv::Mat outputImage = makeNormalizedExportSlice(stack[i], exportBitDepth);
 
             const fs::path outputFile = frameOutputDir / (std::to_string(i) + ".png");
             cv::imwrite(outputFile.string(), outputImage);
@@ -1147,7 +1229,7 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
     if (exportTiff) {
         fs::create_directories(outputDir);
         const fs::path outputFile = outputDir / (framePath.stem().string() + ".tif");
-        writeNapariFriendlyTiffStack(outputFile.string(), stack, tiffMaxBrightness);
+        writeNapariFriendlyTiffStack(outputFile.string(), stack, exportBitDepth);
     }
 }
 
@@ -1156,10 +1238,10 @@ static void exportPreprocessedStack(const std::vector<cv::Mat> &stack,
                                     const fs::path &framePath,
                                     bool exportPng,
                                     bool exportTiff,
-                                    float tiffMaxBrightness = 65536.0f)
+                                    int exportBitDepth = 16)
 {
     exportStackToSubdir(stack, baseOutputDir, "preprocessed", framePath,
-                        exportPng, exportTiff, tiffMaxBrightness);
+                        exportPng, exportTiff, exportBitDepth);
 }
 
 static std::vector<cv::Mat> makeEmptyDebugStackLike(const std::vector<cv::Mat> &realFrame)
@@ -1737,12 +1819,12 @@ static void exportSignalDebugStacks(const std::vector<cv::Mat> &realFrame,
                         framePath,
                         config.simulation.export_frame_png,
                         config.simulation.export_frame_tiff,
-                        config.simulation.frame_intensity_hard_max);
+                        config.simulation.export_bit_depth);
     exportStackToSubdir(probabilityDebug, baseOutputDir, "signal_debug/perturb_probability",
                         framePath,
                         config.simulation.export_frame_png,
                         config.simulation.export_frame_tiff,
-                        config.simulation.frame_intensity_hard_max);
+                        config.simulation.export_bit_depth);
 }
 
 static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
@@ -1917,7 +1999,7 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
             normalizeStackToFrameIntensity(probe, config.simulation);
         }
         probe = ImageHandler::preprocessLoadedFrame(
-            probe, imagePaths.front().string(), config, &probePre);
+            probe, imagePaths.front().string(), config, &brightnessCalibration, &probePre);
         config.simulation.z_slices = static_cast<int>(probe.size());
         Ellipsoid::cellConfig.maxZ = static_cast<float>(probe.size()) - 1.0f;
         std::cout << "[M2 Probe] post-preprocess z_slices=" << probe.size()
@@ -1957,6 +2039,9 @@ void CellUniverse::prepareFrame(int frameIndex)
         return;  // already loaded
     }
 
+    using TClock = std::chrono::steady_clock;
+    const auto tStart = TClock::now();
+
     // Load + normalize + preprocess just this frame.
     std::ostringstream rawLog;
     std::ostringstream preprocessLog;
@@ -1964,8 +2049,18 @@ void CellUniverse::prepareFrame(int frameIndex)
         ImageHandler::loadRawFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
                                    config, &rawLog);
     std::cout << rawLog.str();
+    const auto tLoadEnd = TClock::now();
 
-    if (config.simulation.frame_intensity_normalization_enabled) {
+    // Skip the percentile-based intensity normalization when auto-calibration
+    // is active and valid — calibration anchors were measured against the
+    // RAW frame, so the calibrated preprocess path expects raw input. Running
+    // normalize first would map raw->normalized, then the calibration anchors
+    // would mismatch and clip everything to 0. Constructor's M2 probe runs
+    // before calibration is installed (Uninitialized), so legacy normalize
+    // still runs there.
+    const bool calibratedActive = config.simulation.auto_calibrate_brightness_enabled
+        && brightnessCalibration.isValid();
+    if (config.simulation.frame_intensity_normalization_enabled && !calibratedActive) {
         const auto [lowReference, highReference] =
             normalizeStackToFrameIntensity(real_frame, config.simulation);
         std::cout << "[Frame Intensity Scale] frame="
@@ -1977,7 +2072,7 @@ void CellUniverse::prepareFrame(int frameIndex)
     } else {
         std::cout << "[Frame Intensity Scale] frame="
                   << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " enabled=0"
+                  << " enabled=" << (calibratedActive ? "skipped_for_calibration" : "0")
                   << " mean=" << computeStackMean(real_frame)
                   << '\n';
     }
@@ -1985,8 +2080,9 @@ void CellUniverse::prepareFrame(int frameIndex)
     real_frame = ImageHandler::preprocessLoadedFrame(
         real_frame,
         imagePaths[static_cast<size_t>(frameIndex)].string(),
-        config, &preprocessLog);
+        config, &brightnessCalibration, &preprocessLog);
     std::cout << preprocessLog.str();
+    const auto tPreprocessEnd = TClock::now();
     if (config.simulation.edge_brightness_alignment_enabled &&
         !edgeBrightnessAlignmentTargetInitialized) {
         edgeBrightnessAlignmentTarget =
@@ -2023,18 +2119,20 @@ void CellUniverse::prepareFrame(int frameIndex)
                                 config.simulation,
                                 imagePaths[static_cast<size_t>(frameIndex)],
                                 std::cout);
+    const auto tPostProcEnd = TClock::now();
     std::vector<cv::Mat> signalMap = buildSignalMapStack(
         real_frame,
         config.simulation,
         imagePaths[static_cast<size_t>(frameIndex)],
         std::cout);
+    const auto tSignalMapEnd = TClock::now();
 
     if (config.simulation.export_preprocessed_images) {
         exportPreprocessedStack(real_frame, fs::path(outputPath),
                                 imagePaths[static_cast<size_t>(frameIndex)],
                                 config.simulation.export_frame_png,
                                 config.simulation.export_frame_tiff,
-                                config.simulation.frame_intensity_hard_max);
+                                config.simulation.export_bit_depth);
     }
 
     // loadImageStacks already generates _synthFrame + refreshes the full-image
@@ -2043,6 +2141,18 @@ void CellUniverse::prepareFrame(int frameIndex)
     frames[frameIndex].loadImageStacks(real_frame);
     frames[frameIndex].setSignalMap(std::move(signalMap));
     prepareSignalCentersForFrame(frameIndex, real_frame, true);
+    const auto tEnd = TClock::now();
+
+    const auto fmt = [](const TClock::time_point &a, const TClock::time_point &b) {
+        return std::chrono::duration<double>(b - a).count();
+    };
+    std::cout << "[PrepareTiming] frame=" << frameIndex
+              << " load=" << fmt(tStart, tLoadEnd) << "s"
+              << " preprocess=" << fmt(tLoadEnd, tPreprocessEnd) << "s"
+              << " postproc=" << fmt(tPreprocessEnd, tPostProcEnd) << "s"
+              << " signalMap=" << fmt(tPostProcEnd, tSignalMapEnd) << "s"
+              << " loadStacks=" << fmt(tSignalMapEnd, tEnd) << "s"
+              << " total=" << fmt(tStart, tEnd) << "s" << std::endl;
 }
 
 void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
@@ -2084,6 +2194,275 @@ void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
     }
 }
 
+namespace {
+
+float trimmedMedian(std::vector<float> &values, float trim_percent) {
+    if (values.empty()) return 0.0f;
+    std::sort(values.begin(), values.end());
+    const std::size_t n = values.size();
+    const std::size_t lo = static_cast<std::size_t>(trim_percent * n);
+    const std::size_t hi = n - lo;
+    if (hi <= lo) return values[n / 2];
+    const std::size_t midIdx = lo + (hi - lo) / 2;
+    return values[midIdx];
+}
+
+// Lower-percentile bg anchor selector. Used for the bg anchor (which we
+// want at a LOW percentile so dim chromatin gaps inside cells don't clip
+// to 0 in the calibrated output — the median bg anchor erased those,
+// fragmenting cells into "shredded confetti" of bright peaks). Local
+// helper named distinctly from the existing `percentileValue` at
+// CellUniverse.cpp:453 (different signature, used by the signal-map
+// pipeline) to avoid overload ambiguity.
+float bgPercentileAnchor(std::vector<float> &values, float pct) {
+    if (values.empty()) return 0.0f;
+    std::sort(values.begin(), values.end());
+    const float clamped = std::clamp(pct, 0.0f, 1.0f);
+    const std::size_t idx = std::min(values.size() - 1,
+        static_cast<std::size_t>(clamped * static_cast<float>(values.size())));
+    return values[idx];
+}
+
+bool pointInsideScaledEllipsoid(const Ellipsoid &cell, float scale,
+                                int x, int y, int z, float zScale) {
+    // Cell positions and radii are in interpolated z-space (CellFactory
+    // multiplies the initial CSV z by config.simulation.z_scaling). When we
+    // scan a RAW frame's z slices (which are NOT interpolated), we must
+    // multiply the raw z index by zScale to bring it into the cell's
+    // coordinate system. The 2026-05-04 calibration uses raw frame for
+    // efficiency, so this conversion is required. zScale=1 (default) keeps
+    // the helper compatible with synthetic unit tests where cells live in
+    // raw-z space.
+    const float dx = static_cast<float>(x) - cell.getX();
+    const float dy = static_cast<float>(y) - cell.getY();
+    const float dz = static_cast<float>(z) * zScale - cell.getZ();
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    const double lx = R_T[0]*dx + R_T[1]*dy + R_T[2]*dz;
+    const double ly = R_T[3]*dx + R_T[4]*dy + R_T[5]*dz;
+    const double lz = R_T[6]*dx + R_T[7]*dy + R_T[8]*dz;
+    const float ra = std::max(1e-3f, cell.getARadius() * scale);
+    const float rb = std::max(1e-3f, cell.getBRadius() * scale);
+    const float rc = std::max(1e-3f, cell.getCRadius() * scale);
+    const double v = (lx*lx)/(ra*ra) + (ly*ly)/(rb*rb) + (lz*lz)/(rc*rc);
+    return v <= 1.0;
+}
+
+}  // namespace
+
+BrightnessCalibration CellUniverse::computeAutoCalibration(
+    const std::vector<Ellipsoid> &cells,
+    const std::vector<cv::Mat> &rawFrame0,
+    const BaseConfig &config)
+{
+    BrightnessCalibration cal;
+
+    // Always compute frame_0_mean if the frame is non-empty (regardless of
+    // auto-detect vs manual override). applyCalibratedPreprocess uses this
+    // for per-frame brightness-ratio adjustment to handle photobleaching.
+    if (!rawFrame0.empty()) {
+        double frameSum = 0.0;
+        std::size_t framePixels = 0;
+        for (const auto &slice : rawFrame0) {
+            for (int y = 0; y < slice.rows; ++y) {
+                const float *row = slice.ptr<float>(y);
+                for (int x = 0; x < slice.cols; ++x) {
+                    frameSum += row[x];
+                    ++framePixels;
+                }
+            }
+        }
+        cal.frame_0_mean = framePixels > 0
+            ? static_cast<float>(frameSum / framePixels)
+            : 0.0f;
+    }
+
+    const float manualBg = config.simulation.manual_background_intensity;
+    const float manualCell = config.simulation.manual_cell_intensity;
+    if (manualBg > 0.0f && manualCell > 0.0f && manualCell > manualBg) {
+        cal.background_intensity = manualBg;
+        cal.cell_intensity = manualCell;
+        cal.source = BrightnessCalibrationSource::ManualOverride;
+        return cal;
+    }
+
+    if (cells.empty() || rawFrame0.empty()) return cal;
+
+    const int height = rawFrame0[0].rows;
+    const int width = rawFrame0[0].cols;
+    const int depth = static_cast<int>(rawFrame0.size());
+    const float innerScale = config.simulation.calibration_cell_inner_fraction;
+    const float trim = config.simulation.calibration_pixel_trim_percent;
+    // Map raw z to cell's interpolated z. Cells live in interpolated coords
+    // (CellFactory multiplies CSV z by z_scaling). When z_scaling=1 (unit
+    // tests with synthetic frame in raw-z), this is a no-op.
+    const float zScale = std::max(1.0f, static_cast<float>(config.simulation.z_scaling));
+
+    std::vector<float> cellPixels;
+    std::vector<float> bgPixels;
+    cellPixels.reserve(static_cast<std::size_t>(width) * height * depth / 100);
+    bgPixels.reserve(static_cast<std::size_t>(width) * height * depth);
+
+    // For background sampling: skip any pixel inside ANY cell's full-radius
+    // ellipsoid. For cell sampling: include pixels inside the inner-fraction
+    // ellipsoid of any non-trash cell.
+    for (int z = 0; z < depth; ++z) {
+        const cv::Mat &slice = rawFrame0[z];
+        for (int y = 0; y < height; ++y) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = 0; x < width; ++x) {
+                const float v = row[x];
+                bool insideAny = false;
+                bool insideInnerNonTrash = false;
+                for (const auto &cell : cells) {
+                    if (pointInsideScaledEllipsoid(cell, 1.0f, x, y, z, zScale)) {
+                        insideAny = true;
+                        if (!cell.isTrash() && pointInsideScaledEllipsoid(cell, innerScale, x, y, z, zScale)) {
+                            insideInnerNonTrash = true;
+                        }
+                    }
+                }
+                if (insideInnerNonTrash) cellPixels.push_back(v);
+                if (!insideAny) bgPixels.push_back(v);
+            }
+        }
+    }
+
+    if (cellPixels.empty() || bgPixels.empty()) return cal;
+
+    // Cell anchor: trimmed median of cell-interior pixels (drops top/bottom
+    // trim_percent to handle saturation + edge halo).
+    cal.cell_intensity = trimmedMedian(cellPixels, trim);
+    // Bg anchor: low percentile (default P10) of bg pixels — NOT the
+    // median. The median bg anchor erased dim chromatin gaps inside cells
+    // (raw values just above the bg distribution's median but well within
+    // a real cell's brightness range mapped to <0 and clipped). Using P10
+    // widens the [0, 1] span so dim cell pixels stay above 0 in the
+    // calibrated output. See screenshot fragmentation in 2026-05-05 plan.
+    const float bgPct = std::clamp(
+        config.simulation.calibration_bg_anchor_percentile, 0.0f, 1.0f);
+    cal.background_intensity = bgPercentileAnchor(bgPixels, bgPct);
+    cal.cell_pixel_count = cellPixels.size();
+    cal.background_pixel_count = bgPixels.size();
+    cal.source = BrightnessCalibrationSource::AutoFrameZero;
+    return cal;
+}
+
+DerivedGeometry CellUniverse::computeDerivedGeometry(
+    const std::vector<Ellipsoid> &cells,
+    const ImageSize3D &image_size,
+    const BaseConfig &config)
+{
+    (void)image_size;  // reserved for future image-bound clamping
+    DerivedGeometry g;
+
+    // Filter to non-trash cells
+    std::vector<const Ellipsoid*> realCells;
+    for (const auto &c : cells) {
+        if (!c.isTrash()) realCells.push_back(&c);
+    }
+    if (realCells.empty()) return g;
+
+    g.cell_count = realCells.size();
+
+    float sum_a = 0.0f, sum_b = 0.0f, sum_c = 0.0f;
+    float max_a = 0.0f, max_b = 0.0f, max_c = 0.0f;
+    for (const auto *c : realCells) {
+        sum_a += c->getARadius();
+        sum_b += c->getBRadius();
+        sum_c += c->getCRadius();
+        max_a = std::max(max_a, c->getARadius());
+        max_b = std::max(max_b, c->getBRadius());
+        max_c = std::max(max_c, c->getCRadius());
+    }
+    const float n = static_cast<float>(realCells.size());
+    g.mean_a_radius = sum_a / n;
+    g.mean_b_radius = sum_b / n;
+    g.mean_c_radius = sum_c / n;
+
+    // Formulas
+    g.max_a_radius = max_a * 2.0f;
+    g.max_b_radius = max_b * 2.0f;
+    g.max_c_radius = max_c * 2.0f;
+    g.min_a_radius = g.mean_a_radius * 0.2f;
+    g.min_b_radius = g.mean_b_radius * 0.2f;
+    g.min_c_radius = g.mean_c_radius * 0.2f;
+    g.perturb_reference_radius = g.mean_a_radius;
+    g.x_sigma = g.mean_a_radius * 0.15f;
+    g.y_sigma = g.mean_b_radius * 0.15f;
+    g.z_sigma = g.mean_c_radius * 0.30f;
+    g.position_prior_threshold = g.mean_a_radius * 0.8f;
+
+    const int rawIters = static_cast<int>(g.cell_count) * 30;
+    g.iterations_per_cell = std::clamp(rawIters, 150, 500);
+
+    // pca_bridge_min_side_voxels = clamp(mean_cell_volume * 0.05, 20, 200)
+    const double meanVolume =
+        (4.0 / 3.0) * 3.14159265358979 *
+        static_cast<double>(g.mean_a_radius) *
+        static_cast<double>(g.mean_b_radius) *
+        static_cast<double>(g.mean_c_radius);
+    const int rawMinSide = static_cast<int>(meanVolume * 0.05);
+    g.pca_bridge_min_side_voxels = std::clamp(rawMinSide, 20, 200);
+
+    // Apply per-field manual overrides
+    const auto &sim = config.simulation;
+    if (sim.geometry_force_max_a_radius > 0.0f) g.max_a_radius = sim.geometry_force_max_a_radius;
+    if (sim.geometry_force_max_b_radius > 0.0f) g.max_b_radius = sim.geometry_force_max_b_radius;
+    if (sim.geometry_force_max_c_radius > 0.0f) g.max_c_radius = sim.geometry_force_max_c_radius;
+    if (sim.geometry_force_min_a_radius > 0.0f) g.min_a_radius = sim.geometry_force_min_a_radius;
+    if (sim.geometry_force_min_b_radius > 0.0f) g.min_b_radius = sim.geometry_force_min_b_radius;
+    if (sim.geometry_force_min_c_radius > 0.0f) g.min_c_radius = sim.geometry_force_min_c_radius;
+    if (sim.geometry_force_perturb_reference_radius > 0.0f)
+        g.perturb_reference_radius = sim.geometry_force_perturb_reference_radius;
+    if (sim.geometry_force_xy_sigma > 0.0f) {
+        g.x_sigma = sim.geometry_force_xy_sigma;
+        g.y_sigma = sim.geometry_force_xy_sigma;
+    }
+    if (sim.geometry_force_z_sigma > 0.0f) g.z_sigma = sim.geometry_force_z_sigma;
+    if (sim.geometry_force_position_prior_threshold > 0.0f)
+        g.position_prior_threshold = sim.geometry_force_position_prior_threshold;
+    if (sim.geometry_force_iterations_per_cell > 0)
+        g.iterations_per_cell = sim.geometry_force_iterations_per_cell;
+    if (sim.geometry_force_pca_bridge_min_side_voxels > 0)
+        g.pca_bridge_min_side_voxels = sim.geometry_force_pca_bridge_min_side_voxels;
+
+    return g;
+}
+
+void CellUniverse::applyDerivedGeometry(const DerivedGeometry &g, BaseConfig &config)
+{
+    if (!g.isValid()) {
+        std::cout << "[Auto-Derive Geometry] derived geometry invalid; skipping apply\n";
+        return;
+    }
+
+    if (config.cell) {
+        config.cell->maxARadius = g.max_a_radius;
+        config.cell->maxBRadius = g.max_b_radius;
+        config.cell->maxCRadius = g.max_c_radius;
+        config.cell->minARadius = g.min_a_radius;
+        config.cell->minBRadius = g.min_b_radius;
+        config.cell->minCRadius = g.min_c_radius;
+        config.cell->perturbSigmaReferenceRadius = g.perturb_reference_radius;
+        config.cell->x.sigma = g.x_sigma;
+        config.cell->y.sigma = g.y_sigma;
+        config.cell->z.sigma = g.z_sigma;
+    }
+
+    config.simulation.iterations_per_cell = g.iterations_per_cell;
+    config.prob.position_prior_threshold = g.position_prior_threshold;
+    config.prob.pca_bridge_min_side_voxels = g.pca_bridge_min_side_voxels;
+
+    // Sync the Ellipsoid global static — main.cpp normally does this
+    // line ONCE after parsing config (`Ellipsoid::cellConfig = *config.cell;`).
+    // Doing it here too keeps the pre-CellUniverse-construction code path
+    // consistent for any code that reads cellConfig directly.
+    if (config.cell) {
+        Ellipsoid::cellConfig = *config.cell;
+    }
+}
+
 void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFrames)
 {
     struct PreprocessedFrame
@@ -2107,7 +2486,11 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                                        &rawLog);
         std::cout << rawLog.str();
 
-        if (config.simulation.frame_intensity_normalization_enabled) {
+        // See "calibratedActive" comment at the prepareFrame call site —
+        // skip percentile-based normalization when calibrated path is active.
+        const bool calibratedActiveLocal = config.simulation.auto_calibrate_brightness_enabled
+            && brightnessCalibration.isValid();
+        if (config.simulation.frame_intensity_normalization_enabled && !calibratedActiveLocal) {
             const auto [lowReference, highReference] =
                 normalizeStackToFrameIntensity(realFrame, config.simulation);
             std::cout << "[Frame Intensity Scale] frame="
@@ -2128,6 +2511,7 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
             realFrame,
             imagePaths[static_cast<size_t>(frameIndex)].string(),
             config,
+            &brightnessCalibration,
             &preprocessLog);
         std::cout << preprocessLog.str();
 
@@ -2165,7 +2549,7 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                                         imagePaths[static_cast<size_t>(frameIndex)],
                                         config.simulation.export_frame_png,
                                         config.simulation.export_frame_tiff,
-                                        config.simulation.frame_intensity_hard_max);
+                                        config.simulation.export_bit_depth);
             }
 
             if (loadIntoFrames) {
@@ -2251,7 +2635,7 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                                     imagePaths[static_cast<size_t>(frameIndex)],
                                     config.simulation.export_frame_png,
                                     config.simulation.export_frame_tiff,
-                                    config.simulation.frame_intensity_hard_max);
+                                    config.simulation.export_bit_depth);
         }
 
         if (loadIntoFrames) {
@@ -2270,6 +2654,9 @@ void CellUniverse::optimize(int frameIndex)
     {
         throw std::invalid_argument("Invalid frame index");
     }
+
+    resetOptimizeTimers();
+    const auto tOptimizeT0 = std::chrono::steady_clock::now();
 
     Frame &frame = frames[frameIndex];
     const int absoluteFrame = firstFrame + frameIndex;
@@ -2361,8 +2748,14 @@ void CellUniverse::optimize(int frameIndex)
     const float randomPerturbRadiusRatio =
         config.cell ? config.cell->randomPerturbRadiusRatio : 0.5f;
 
+    int optTrashCount = 0;
+    for (const auto &c : frame.cells) {
+        if (c.isTrash()) ++optTrashCount;
+    }
+    const int optRealCount = static_cast<int>(frame.cells.size()) - optTrashCount;
     std::cout << "[Optimize] frame " << displayFrame
-              << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)"
+              << " (" << optRealCount << " cells " << optTrashCount << " trash, "
+              << totalIterations << " iterations)"
               << " perturbMode=" << (useSignalGuidanceThisFrame ? "signal_guided" : "random")
               << " guidedItersPerCell=" << guidedPerCellIters
               << " randomItersPerCell=" << randomPerCellIters
@@ -2405,8 +2798,11 @@ void CellUniverse::optimize(int frameIndex)
     const float overlapWeight = config.prob.overlap_penalty_weight;
     const float baseSplitProb = config.prob.P_split_base;
 
-    // No splits on the first frame — cells can't divide before any time has passed
-    bool allowSplits = (frameIndex > 0);
+    // No splits on the first frame — cells can't divide before any time has passed.
+    // EXCEPTION: when resuming from a checkpoint, previousSnapshots is non-empty
+    // (loadCheckpoint populates it), and biological time HAS passed; the local
+    // frameIndex==0 is just the first frame after resume. Allow splits in that case.
+    bool allowSplits = (frameIndex > 0) || !previousSnapshots.empty();
 
     // Cells that already failed a burn-in this frame — skip all further split attempts.
     std::set<std::string> splitBlacklist;
@@ -2709,12 +3105,14 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
 
+            const auto tPcaT0 = std::chrono::steady_clock::now();
             frame.calibrateCellShapeViaPca(ci, others,
                                            pcaMaxIters, pcaScale, pcaMin,
                                            maskScale, convR, convAng,
                                            updatePos, posShiftCap,
                                            maskA, maskB, maskC,
                                            &shapeLogs[ci]);
+            addNanos(tCalibPcaShapeNs, tPcaT0, std::chrono::steady_clock::now());
             if (isTrashCell) {
                 auto originalIt = cellShapeBirth.find(sname);
                 if (originalIt != cellShapeBirth.end()) {
@@ -2746,48 +3144,12 @@ void CellUniverse::optimize(int frameIndex)
             if (!buf.empty()) std::cout << buf;
         }
 
-        if (config.prob.pca_bridge_split_enabled) {
-            // PCA has just changed cell shapes; refresh the synth so the
-            // bridge split compares daughters against the actual long fitted
-            // parent, not the pre-PCA render.
-            frame.regenerateSynthFrame();
-
-            std::vector<std::string> bridgeCheckNames;
-            bridgeCheckNames.reserve(frame.cells.size());
-            float maxBridgeElong = 0.0f;
-            int bridgeEligible = 0;
-            for (const auto &cell : frame.cells) {
-                if (cell.isTrash()) continue;
-                bridgeCheckNames.push_back(cell.getName());
-                const float elong = cell.shapeElongation();
-                maxBridgeElong = std::max(maxBridgeElong, elong);
-                if (elong >= config.prob.pca_bridge_elongation_ratio) {
-                    ++bridgeEligible;
-                }
-            }
-
-            int bridgeSplitsAccepted = 0;
-            for (const std::string &parentName : bridgeCheckNames) {
-                auto it = std::find_if(
-                    frame.cells.begin(), frame.cells.end(),
-                    [&](const Ellipsoid &cell) { return cell.getName() == parentName; });
-                if (it == frame.cells.end()) continue;
-                const size_t ci = static_cast<size_t>(std::distance(frame.cells.begin(), it));
-                if (frame.tryPcaBridgeSplit(ci, config.prob)) {
-                    cellShapeReference.erase(parentName);
-                    cellShapeBirth.erase(parentName);
-                    ++bridgeSplitsAccepted;
-                }
-            }
-            std::cout << "[PCA Bridge Split] frame " << displayFrame
-                      << " scanned=" << bridgeCheckNames.size()
-                      << " eligible=" << bridgeEligible
-                      << " accepted=" << bridgeSplitsAccepted
-                      << " maxElong=" << maxBridgeElong
-                      << " threshold=" << config.prob.pca_bridge_elongation_ratio
-                      << " cellsNow=" << frame.cells.size()
-                      << std::endl;
-        }
+        // PCA-bridge discovery moved out of this end-of-frame lambda — it
+        // now runs BEFORE the main split loop (see "PCA Bridge Propose"
+        // block earlier in optimize()), so its (left, right) daughter
+        // centroids can be injected as a "bridge_primary" candidate into
+        // trySplitCellPhased and validated by the main path's full gate
+        // stack instead of an independent accepting path.
 
         // ---- Fit-side growth cap (anti-bloat within mask) ----
         //
@@ -3249,6 +3611,50 @@ void CellUniverse::optimize(int frameIndex)
         splitPerturbDebugPlacements = makeEmptyDebugStackLike(frame.getRealFrame());
     }
 
+    // ---- PCA-bridge proposal pre-pass (split-gate-overlap-analysis.md) ----
+    //
+    // The PCA bridge no longer accepts splits on its own. For each elongated
+    // cell with a valid dark-bridge gap, we discover a (left, right)
+    // daughter-centroid proposal here and store it by cell name. The
+    // proposal is then injected as a "bridge_primary" candidate inside the
+    // main split loop's trySplitCellPhased call below — the standard
+    // burn-in + bio + daughter-overlap + bridge + asymmetric L2 + adaptive
+    // cost gates decide acceptance.
+    //
+    // Cells use the previous frame's PCA-fitted shape at this point (the
+    // current frame's PCA fit happens in runPcaShapeFit at end of frame),
+    // but the bright-pixel input is the current frame's image — same input
+    // the original end-of-frame bridge had access to via the next frame's
+    // start. Daughter centroids go through 50-iter burn-in inside
+    // trySplitCellPhased, so any seed-position drift is corrected.
+    std::unordered_map<std::string, BridgeSplitProposal> bridgeProposals;
+    if (config.prob.pca_bridge_split_enabled) {
+        float maxBridgeElong = 0.0f;
+        int bridgeEligible = 0;
+        for (const auto &cell : frame.cells) {
+            if (cell.isTrash()) continue;
+            const float elong = cell.shapeElongation();
+            maxBridgeElong = std::max(maxBridgeElong, elong);
+            if (elong >= config.prob.pca_bridge_elongation_ratio) {
+                ++bridgeEligible;
+            }
+        }
+        for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+            const std::string parentName = frame.cells[ci].getName();
+            BridgeSplitProposal proposal;
+            if (frame.discoverPcaBridgeProposal(ci, config.prob, proposal)) {
+                bridgeProposals[parentName] = proposal;
+            }
+        }
+        std::cout << "[PCA Bridge Propose] frame " << (firstFrame + frameIndex)
+                  << " scanned=" << frame.cells.size()
+                  << " eligible=" << bridgeEligible
+                  << " proposalsFound=" << bridgeProposals.size()
+                  << " maxElong=" << maxBridgeElong
+                  << " threshold=" << config.prob.pca_bridge_elongation_ratio
+                  << std::endl;
+    }
+
     // ---- Single-phase iteration helper ----
     auto runPhase = [&](std::set<std::string> &phaseNames,
                         bool phaseB,
@@ -3485,11 +3891,24 @@ void CellUniverse::optimize(int frameIndex)
                     }
                 }
 
+                // If the post-PCA pass produced a bridge proposal for this
+                // cell, hand it to trySplitCellPhased so it competes as
+                // "bridge_primary" alongside data_/snap_ candidates.
+                const BridgeSplitProposal *bridgeForCell = nullptr;
+                if (!bridgeProposals.empty()) {
+                    auto bIt = bridgeProposals.find(cellName);
+                    if (bIt != bridgeProposals.end()) {
+                        bridgeForCell = &bIt->second;
+                    }
+                }
+                const auto tSplitT0 = std::chrono::steady_clock::now();
                 auto result = frame.trySplitCellPhased(
                     cellIdx, splitSnapshot, others, useSnapDir, config.prob,
                     exportPerturbDebug ? &splitPerturbDebugPlacements : nullptr,
                     exportPerturbDebug ? &splitPerturbDebugPlacementCount : nullptr,
-                    config.simulation.perturb_debug_cell_brightness);
+                    config.simulation.perturb_debug_cell_brightness,
+                    bridgeForCell);
+                addNanos(tTrySplitPhasedNs, tSplitT0, std::chrono::steady_clock::now());
 
                 double costDiff = result.first;
                 auto callback = result.second;
@@ -3557,10 +3976,12 @@ void CellUniverse::optimize(int frameIndex)
             } else {
                 // --- Perturbation ---
                 const float effectivePerturbRadiusRatio = perturbRatioFor(cellName);
+                const auto tPertT0 = std::chrono::steady_clock::now();
                 auto result = frame.perturbCell(
                     cellIdx, overlapWeight, useSignalGuidanceThisFrame,
                     effectivePerturbRadiusRatio,
                     /*pcaRefitWellFilledMove=*/true);
+                addNanos(tPerturbCellNs, tPertT0, std::chrono::steady_clock::now());
                 double costDiff = result.first;
                 auto callback = result.second;
                 const bool perturbAccept = costDiff < 0;
@@ -3623,14 +4044,14 @@ void CellUniverse::optimize(int frameIndex)
                             framePath,
                             config.simulation.export_frame_png,
                             config.simulation.export_frame_tiff,
-                            config.simulation.frame_intensity_hard_max);
+                            config.simulation.export_bit_depth);
         exportStackToSubdir(splitPerturbDebugPlacements,
                             fs::path(outputPath),
                             "perturb_debug/split_placements",
                             framePath,
                             config.simulation.export_frame_png,
                             config.simulation.export_frame_tiff,
-                            config.simulation.frame_intensity_hard_max);
+                            config.simulation.export_bit_depth);
     }
 
     if (exportPerturbCenterDebug) {
@@ -3651,7 +4072,7 @@ void CellUniverse::optimize(int frameIndex)
                             framePath,
                             config.simulation.export_frame_png,
                             config.simulation.export_frame_tiff,
-                            config.simulation.frame_intensity_hard_max);
+                            config.simulation.export_bit_depth);
     }
 
     runPcaShapeFit();
@@ -3786,11 +4207,36 @@ void CellUniverse::optimize(int frameIndex)
         }
     }
 
+    // Separate real vs trash in the cell count so GT comparisons can be
+    // made directly against `final_real_cells` (the CTC `man_track.txt` GT
+    // is real-cells-only). Total final_cells is preserved for backward
+    // compatibility with downstream tooling that scrapes the legacy field.
+    std::size_t finalTrashCells = 0;
+    for (const auto &c : frame.cells) {
+        if (c.isTrash()) ++finalTrashCells;
+    }
+    const std::size_t finalRealCells = frame.cells.size() - finalTrashCells;
     std::cout << "[Optimize Done] frame " << displayFrame
               << " perturb_accepted=" << perturbAccepted
               << " split_attempts=" << splitAttempted
               << " split_accepted=" << splitAccepted
-              << " final_cells=" << frame.cells.size() << std::endl;
+              << " final_cells=" << frame.cells.size()
+              << " final_real_cells=" << finalRealCells
+              << " final_trash_cells=" << finalTrashCells << std::endl;
+
+    const auto tOptimizeT1 = std::chrono::steady_clock::now();
+    const double tOptimizeTotal =
+        std::chrono::duration<double>(tOptimizeT1 - tOptimizeT0).count();
+    std::cout << "[OptimizeTiming] frame=" << displayFrame
+              << " total=" << tOptimizeTotal << "s"
+              << " calibPcaShape=" << nsToSec(tCalibPcaShapeNs.load()) << "s"
+              << " perturbCell=" << nsToSec(tPerturbCellNs.load()) << "s"
+              << " trySplitPhased=" << nsToSec(tTrySplitPhasedNs.load()) << "s"
+              << " other=" << (tOptimizeTotal
+                               - nsToSec(tCalibPcaShapeNs.load())
+                               - nsToSec(tPerturbCellNs.load())
+                               - nsToSec(tTrySplitPhasedNs.load())) << "s"
+              << std::endl;
 
     // M1/M2 cache per-frame summaries so optimize(frameIndex+1) doesn't need
     // frames[frameIndex]'s image stacks.
@@ -3860,10 +4306,10 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
 
         writeNapariFriendlyTiffStack(realTiffOutputPath + "/" + std::to_string(displayFrame) + ".tif",
                                      realImages,
-                                     config.simulation.frame_intensity_hard_max);
+                                     config.simulation.export_bit_depth);
         writeNapariFriendlyTiffStack(synthTiffOutputPath + "/" + std::to_string(displayFrame) + ".tif",
                                      synthImages,
-                                     config.simulation.frame_intensity_hard_max);
+                                     config.simulation.export_bit_depth);
     }
 
     std::cout << "Done" << '\n';
@@ -3912,8 +4358,34 @@ void CellUniverse::saveCells(int frameIndex)
              << '\n';
     }
 
-    std::cout << "Saved " << frame.cells.size() << " cells for frame " << (firstFrame + frameIndex)
+    int trashCount = 0;
+    std::vector<std::string> trashNames;
+    std::vector<std::string> realNames;
+    trashNames.reserve(frame.cells.size());
+    realNames.reserve(frame.cells.size());
+    for (const auto &c : frame.cells) {
+        if (c.isTrash()) {
+            ++trashCount;
+            trashNames.push_back(c.getName());
+        } else {
+            realNames.push_back(c.getName());
+        }
+    }
+    const int realCount = static_cast<int>(frame.cells.size()) - trashCount;
+    std::ostringstream realJoin, trashJoin;
+    for (size_t i = 0; i < realNames.size(); ++i) {
+        if (i) realJoin << ",";
+        realJoin << realNames[i];
+    }
+    for (size_t i = 0; i < trashNames.size(); ++i) {
+        if (i) trashJoin << ",";
+        trashJoin << trashNames[i];
+    }
+    std::cout << "Saved " << realCount << " cells "
+              << trashCount << " trash for frame " << (firstFrame + frameIndex)
               << " to " << cellsPath << std::endl;
+    std::cout << "  cells=[" << realJoin.str() << "]"
+              << " trash=[" << trashJoin.str() << "]" << std::endl;
 }
 
 // ---------------------------------------------------------------------------

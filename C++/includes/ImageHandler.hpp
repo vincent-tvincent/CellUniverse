@@ -1,6 +1,7 @@
 #ifndef IMAGEHANDLER_HPP
 #define IMAGEHANDLER_HPP
 
+#include "CalibrationTypes.hpp"
 #include "ConfigTypes.hpp"
 #include "Frame.hpp"
 #include "types.hpp"
@@ -13,12 +14,23 @@ class ImageHandler
 public:
     static Image processImage(const Image &image, const BaseConfig &config);
     static std::vector<cv::Mat> loadRawFrame(const std::string &imageFile,
-                                             const BaseConfig &config,
+                                             BaseConfig &config,
                                              std::ostream *logSink = nullptr);
     static std::vector<cv::Mat> preprocessLoadedFrame(const std::vector<cv::Mat> &normalizedSlices,
                                                       const std::string &imageFile,
                                                       const BaseConfig &config,
                                                       std::ostream *logSink = nullptr);
+    static std::vector<cv::Mat> preprocessLoadedFrame(
+        const std::vector<cv::Mat> &normalizedSlices,
+        const std::string &imageFile,
+        const BaseConfig &config,
+        const BrightnessCalibration *calibration,
+        std::ostream *logSink = nullptr);
+    static std::vector<cv::Mat> applyCalibratedPreprocess(
+        const std::vector<cv::Mat> &normalizedSlices,
+        const BrightnessCalibration &calibration,
+        const BaseConfig &config,
+        std::ostream *logSink);
     static float evaluateSequenceContrastScore(const ImageStack &sequence, const BaseConfig &config);
     static float evaluateBestWindowContrastScore(const ImageStack &sequence, const BaseConfig &config);
     static std::vector<cv::Mat> loadFrame(const std::string &imageFile,

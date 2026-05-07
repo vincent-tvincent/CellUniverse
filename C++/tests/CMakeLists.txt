@@ -25,6 +25,8 @@ add_executable(core_unit_test
         spheroid_test.cc
         spheroid_params_test.cc
         spheroid_rotation_test.cc
+        calibration_test.cc
+        geometry_derivation_test.cc
         ${CMAKE_SOURCE_DIR}/src/Frame.cpp
         ${CMAKE_SOURCE_DIR}/src/CellUniverse.cpp
         ${CMAKE_SOURCE_DIR}/src/ImageHandler.cpp

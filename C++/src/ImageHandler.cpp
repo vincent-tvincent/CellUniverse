@@ -597,7 +597,15 @@ ImageStack applySimpleBlurBlendPreprocess(const ImageStack &sequence,
         << " background_factor=" << backgroundFactor
         << std::endl;
 
-    #pragma omp parallel for schedule(static)
+    double rawSum = 0.0;
+    double blurredSum = 0.0;
+    double blendSum = 0.0;
+    double maxBlend = -std::numeric_limits<double>::infinity();
+    double outputMinusBlurAbsSum = 0.0;
+    double outputMinusRawAbsSum = 0.0;
+    std::size_t voxelCount = 0;
+
+    #pragma omp parallel for schedule(static) reduction(+:rawSum,blurredSum,blendSum,outputMinusBlurAbsSum,outputMinusRawAbsSum,voxelCount) reduction(max:maxBlend)
     for (int sliceIndex = 0; sliceIndex < static_cast<int>(processed.size()); ++sliceIndex)
     {
         const cv::Mat rawSlice = sequence[static_cast<std::size_t>(sliceIndex)];
@@ -625,12 +633,33 @@ ImageStack applySimpleBlurBlendPreprocess(const ImageStack &sequence,
             {
                 const float rawValue = rawRow[x];
                 const float blend = realRatio * rawValue * backgroundFactor;
-                outRow[x] = rawValue * blend + blurredRow[x] * (1.0f - blend);
+                const float outputValue = rawValue * blend + blurredRow[x] * (1.0f - blend);
+                outRow[x] = outputValue;
+
+                rawSum += rawValue;
+                blurredSum += blurredRow[x];
+                blendSum += blend;
+                maxBlend = std::max(maxBlend, static_cast<double>(blend));
+                outputMinusBlurAbsSum += std::abs(outputValue - blurredRow[x]);
+                outputMinusRawAbsSum += std::abs(outputValue - rawValue);
+                ++voxelCount;
             }
         }
     }
 
     clipStack(processed);
+    if (voxelCount > 0)
+    {
+        const double invCount = 1.0 / static_cast<double>(voxelCount);
+        log << "[SimplePreprocess Stats] file=" << fs::path(imageFile).filename().string()
+            << " raw_mean=" << rawSum * invCount
+            << " blurred_mean=" << blurredSum * invCount
+            << " blend_mean=" << blendSum * invCount
+            << " blend_max=" << maxBlend
+            << " mean_abs_output_minus_blur=" << outputMinusBlurAbsSum * invCount
+            << " mean_abs_output_minus_raw=" << outputMinusRawAbsSum * invCount
+            << std::endl;
+    }
     return processed;
 }
 } // namespace
@@ -880,7 +909,7 @@ ImageStack ImageHandler::processPreparedSequence(const ImageStack &sequence,
 }
 
 std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
-                                                const BaseConfig &config,
+                                                BaseConfig &config,
                                                 std::ostream *logSink)
 {
     std::ostream &log = logSink ? *logSink : std::cout;
@@ -908,10 +937,30 @@ std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
         log << "[LoadFrame] file=" << fs::path(imageFile).filename().string()
             << " rawSlices=" << numTiffSlices
             << " rawType=" << firstSlice.type()
+            << " rawDepth=" << firstSlice.depth()
             << " rawChannels=" << firstSlice.channels()
             << " rawRows=" << firstSlice.rows
             << " rawCols=" << firstSlice.cols
             << std::endl;
+
+        if (config.simulation.frame_intensity_auto_hard_max &&
+            config.simulation.frame_intensity_fixed_hard_max_scale)
+        {
+            if (firstSlice.depth() == CV_8U)
+            {
+                config.simulation.frame_intensity_hard_max = 255.0f;
+            }
+            else if (firstSlice.depth() == CV_16U)
+            {
+                config.simulation.frame_intensity_hard_max = 65536.0f;
+            }
+            log << "[Frame Intensity Auto Hard Max] file="
+                << fs::path(imageFile).filename().string()
+                << " raw_depth=" << firstSlice.depth()
+                << " selected_hard_max="
+                << config.simulation.frame_intensity_hard_max
+                << std::endl;
+        }
 
         normalizedSlices.resize(numTiffSlices);
         #pragma omp parallel for schedule(static)
@@ -939,6 +988,19 @@ std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
             cv::cvtColor(image, image, cv::COLOR_BGR2GRAY);
         }
 
+        if (config.simulation.frame_intensity_auto_hard_max &&
+            config.simulation.frame_intensity_fixed_hard_max_scale)
+        {
+            config.simulation.frame_intensity_hard_max =
+                image.depth() == CV_16U ? 65536.0f : 255.0f;
+            log << "[Frame Intensity Auto Hard Max] file="
+                << fs::path(imageFile).filename().string()
+                << " raw_depth=" << image.depth()
+                << " selected_hard_max="
+                << config.simulation.frame_intensity_hard_max
+                << std::endl;
+        }
+
         normalizedSlices.push_back(processImage(image, config));
     }
 
@@ -955,7 +1017,16 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
     std::vector<cv::Mat> processedZSlices = cloneStack(normalizedSlices);
     std::vector<cv::Mat> interpolatedZSlices;
 
-    processedZSlices = processPreparedSequence(processedZSlices, config, log, imageFile);
+    if (config.simulation.simple_preprocess_enabled)
+    {
+        processedZSlices = processPreparedSequence(processedZSlices, config, log, imageFile);
+    }
+    else
+    {
+        log << "[SimplePreprocess] file=" << fs::path(imageFile).filename().string()
+            << " enabled=0; weighted_blend_skipped=1"
+            << std::endl;
+    }
 
     const float localScore = evaluateBestWindowContrastScore(processedZSlices, config);
     log << "[PreprocessScores] file=" << fs::path(imageFile).filename().string()
@@ -1036,6 +1107,154 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
     printStackStats(log, "post_cube_pooling", imageFile, interpolatedZSlices);
     log << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;
     return interpolatedZSlices;
+}
+
+std::vector<cv::Mat> ImageHandler::applyCalibratedPreprocess(
+    const std::vector<cv::Mat> &normalizedSlices,
+    const BrightnessCalibration &calibration,
+    const BaseConfig &config,
+    std::ostream *logSink)
+{
+    std::ostream &log = logSink ? *logSink : std::cout;
+    if (!calibration.isValid()) {
+        log << "[Calibrated Preprocess] calibration invalid; returning input unchanged\n";
+        return normalizedSlices;
+    }
+
+    // Step 1a: compute per-frame brightness ratio for anchor adjustment.
+    // ratio = current_frame_mean / frame_0_mean. Falls back to 1.0 (no
+    // adjustment) when frame_0_mean is zero (sentinel for "not populated"
+    // in older calibrations or manual-override paths that didn't compute it).
+    float ratio = 1.0f;
+    const bool simplePreprocess = config.simulation.simple_preprocess_enabled;
+    if (calibration.frame_0_mean > 1e-6f) {
+        double currentSum = 0.0;
+        std::size_t currentPixels = 0;
+        for (const auto &slice : normalizedSlices) {
+            for (int y = 0; y < slice.rows; ++y) {
+                const float *row = slice.ptr<float>(y);
+                for (int x = 0; x < slice.cols; ++x) {
+                    currentSum += row[x];
+                    ++currentPixels;
+                }
+            }
+        }
+        const float currentMean = currentPixels > 0
+            ? static_cast<float>(currentSum / currentPixels)
+            : calibration.frame_0_mean;
+        ratio = currentMean / calibration.frame_0_mean;
+        // Clamp to a sane range — extreme values usually mean the input
+        // frame is corrupted or otherwise abnormal. 0.3..3.0 covers
+        // ±3× brightness shift which is well past any normal photobleaching.
+        ratio = std::clamp(ratio, 0.3f, 3.0f);
+    }
+
+    const float bg_n = calibration.background_intensity * ratio;
+    const float cell_n = calibration.cell_intensity * ratio;
+    const float span_n = std::max(1e-3f, cell_n - bg_n);
+
+    log << "[Calibrated Preprocess Ratio] frame_0_mean=" << calibration.frame_0_mean
+        << " ratio=" << ratio
+        << " bg_0=" << calibration.background_intensity
+        << " cell_0=" << calibration.cell_intensity
+        << " bg_n=" << bg_n
+        << " cell_n=" << cell_n
+        << "\n";
+
+    // Step 1b: linear normalize via bg/cell anchors → [0, 1].
+    // bg → 0, cell → 1. Mandatory for the L2 cost (synth cells render with
+    // `_brightness` clamped to [0.1, 0.98]) and for the bio gates that
+    // expect cell-edge brightness in absolute terms (e.g., 0.07 floor).
+    //
+    // Clip to [0, 1] after calibration. If simple preprocessing is also
+    // enabled, the weighted raw/blurred blend below expects normalized input,
+    // just like the fixed-hard-max branch pipeline.
+    std::vector<cv::Mat> linearScaled;
+    linearScaled.reserve(normalizedSlices.size());
+    for (const auto &slice : normalizedSlices) {
+        cv::Mat out;
+        slice.convertTo(out, CV_32F, 1.0f / span_n, -bg_n / span_n);
+        cv::min(out, 1.0f, out);
+        cv::max(out, 0.0f, out);
+        linearScaled.push_back(out);
+    }
+
+    // Step 2: optional filter. With simple preprocessing enabled, compose the
+    // calibrated intensity remap with the branch's weighted raw/blurred blend.
+    // Otherwise use the calibrated Gaussian blur path.
+    if (simplePreprocess) {
+        linearScaled = applySimpleBlurBlendPreprocess(
+            linearScaled, config, log, "calibrated");
+    } else if (config.simulation.calibrated_preprocess_blur_sigma > 0.0f) {
+        const float blurSigma = config.simulation.calibrated_preprocess_blur_sigma;
+        const int ksize = std::max(3, 2 * static_cast<int>(std::ceil(3.0f * blurSigma)) + 1);
+        for (auto &slice : linearScaled) {
+            cv::GaussianBlur(slice, slice, cv::Size(ksize, ksize),
+                             blurSigma, blurSigma,
+                             cv::BORDER_REPLICATE);
+        }
+    }
+
+    // Step 3: z-interpolate unless the simple branch explicitly requests the
+    // Python-reference behavior of preserving original z pages.
+    const int expandFactor = (simplePreprocess && !config.simulation.simple_preprocess_interpolate_z)
+        ? 1
+        : static_cast<int>(config.simulation.z_scaling);
+    if (linearScaled.size() <= 1 || expandFactor <= 1) {
+        log << "[Calibrated Preprocess] " << calibrationDescribe(calibration)
+            << " input_slices=" << normalizedSlices.size()
+            << " output_slices=" << linearScaled.size()
+            << " (no z-interp)\n";
+        return linearScaled;
+    }
+
+    const unsigned numSynthSlices =
+        static_cast<unsigned>(expandFactor) * (linearScaled.size() - 1U) + 1U;
+    std::vector<cv::Mat> interpolated(numSynthSlices);
+
+    #pragma omp parallel for schedule(static)
+    for (int idx = 0; idx < static_cast<int>(numSynthSlices); ++idx) {
+        const int loIdx = idx / expandFactor;
+        const int hiIdx = std::min(static_cast<int>(linearScaled.size()) - 1, loIdx + 1);
+        const float t = static_cast<float>(idx % expandFactor) / static_cast<float>(expandFactor);
+        cv::Mat blended = (1.0f - t) * linearScaled[loIdx] + t * linearScaled[hiIdx];
+        interpolated[idx] = blended;
+    }
+
+    log << "[Calibrated Preprocess] " << calibrationDescribe(calibration)
+        << " input_slices=" << normalizedSlices.size()
+        << " output_slices=" << interpolated.size() << "\n";
+    return interpolated;
+}
+
+std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(
+    const std::vector<cv::Mat> &normalizedSlices,
+    const std::string &imageFile,
+    const BaseConfig &config,
+    const BrightnessCalibration *calibration,
+    std::ostream *logSink)
+{
+    std::ostream &log = logSink ? *logSink : std::cout;
+    const bool calibratedPath = config.simulation.auto_calibrate_brightness_enabled
+        && calibration != nullptr
+        && calibration->isValid();
+
+    if (calibratedPath) {
+        log << "[Preprocess Dispatch] file=" << fs::path(imageFile).filename().string()
+            << " path="
+            << (config.simulation.simple_preprocess_enabled
+                    ? "calibrated+simple_blend" : "calibrated")
+            << "\n";
+        return applyCalibratedPreprocess(normalizedSlices, *calibration, config, logSink);
+    }
+
+    log << "[Preprocess Dispatch] file=" << fs::path(imageFile).filename().string()
+        << " path="
+        << (config.simulation.simple_preprocess_enabled ? "simple_blend" : "unweighted_fallback")
+        << " auto_requested=" << config.simulation.auto_calibrate_brightness_enabled
+        << " calibration_valid=" << (calibration != nullptr && calibration->isValid())
+        << "\n";
+    return preprocessLoadedFrame(normalizedSlices, imageFile, config, logSink);
 }
 
 std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,

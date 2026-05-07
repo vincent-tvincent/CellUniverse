@@ -149,9 +149,9 @@ target_include_directories(brightness_volume_analyzer PRIVATE
 target_link_libraries(brightness_volume_analyzer ${OpenCV_LIBS})
 target_link_libraries(brightness_volume_analyzer yaml-cpp)
 
-# Tests disabled 2026-04-08: they reference SimulationConfig fields
-# (background_color, cell_color) that were removed in the sigmoid-pipeline
-# invariants cleanup. Re-enable after updating the test files to use
-# Frame::_backgroundValue / literal 1.0f seed.
-# add_subdirectory(tests)
+# Tests re-enabled 2026-05-04: stale references to deleted SimulationConfig
+# fields (background_color, cell_color) and EllipsoidConfig.flatCellRotationRefineEnabled
+# updated to use Frame::setBackgroundColor / per-cell brightness / literal 1.0f
+# seed. See the matching changelog entry for details.
 add_subdirectory(lib/yaml-cpp)
+add_subdirectory(tests)

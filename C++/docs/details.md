@@ -716,3 +716,92 @@ file, name, x, y, z, majorRadius, minorRadius, theta_x, theta_y, theta_z
 | `C++/includes/types.hpp` | | Type aliases (Cost, CostCallbackPair, etc.) |
 | `C++/config/config.yaml` | | Runtime configuration |
 | `C++/config/initial.csv` | | Initial cell positions and shapes |
+
+---
+
+## 12. Auto-calibration + auto-derive geometry (2026-05-04 / 2026-05-05)
+
+### Auto-calibration from frame zero (Change 14, shipped)
+
+`CellUniverse::computeAutoCalibration(cells, rawFrame0, config)` measures `(background_intensity, cell_intensity)` from raw frame 0 + initial CSV cell positions. Pure static function. Stored on `BrightnessCalibration` struct (`C++/includes/CalibrationTypes.hpp`):
+
+```cpp
+struct BrightnessCalibration {
+    float background_intensity;          // P10 of bg pixels (lowered 2026-05-05 from median)
+    float cell_intensity;                 // trimmed median of cell-interior pixels
+    std::size_t cell_pixel_count;
+    std::size_t background_pixel_count;
+    BrightnessCalibrationSource source;
+    float frame_0_mean;                   // for per-frame ratio adjustment (Change 16)
+    bool isValid() const;
+    float normalize(float raw) const;
+};
+```
+
+Installed via `setBrightnessCalibration(cal)` in main.cpp BEFORE the optimizer runs. Dispatcher overload `ImageHandler::preprocessLoadedFrame(slices, file, config, &calibration, log)` chooses calibrated vs legacy path based on `auto_calibrate_brightness_enabled && calibration->isValid()`.
+
+### Per-frame ratio adjustment (Change 16, 2026-05-05)
+
+`applyCalibratedPreprocess` adjusts anchors per-frame to track photobleaching:
+```
+ratio_n  = current_frame_mean / frame_0_mean   (clamped to [0.3, 3.0])
+bg_n     = bg_0   × ratio_n
+cell_n   = cell_0 × ratio_n
+calibrated[v] = clamp((raw[v] - bg_n) / (cell_n - bg_n), 0, 1)
+```
+Falls back to ratio=1.0 when `frame_0_mean=0` (sentinel). Logs `[Calibrated Preprocess Ratio] frame_0_mean=X ratio=Y bg_0=Z cell_0=W bg_n=A cell_n=B`.
+
+### Generic noise removal blur
+
+`calibrated_preprocess_blur_sigma: 3.0` (default) replaces the legacy iterative pipeline's multi-pass smoothing with a single Gaussian. Smooths intra-cell chromatin (5-10 px) while preserving cell edges (30-40 px). Dataset-agnostic.
+
+### Auto-derive geometry (Change 15, in progress 2026-05-05)
+
+`CellUniverse::computeDerivedGeometry(cells, image_size, config) -> DerivedGeometry` (`C++/includes/GeometryDerivation.hpp`) derives all dataset-specific geometry/motion knobs from initial-CSV statistics:
+
+| Param | Formula |
+|---|---|
+| `max_a/b/c_radius` | `max(initial radii) × 2.0` |
+| `min_a/b/c_radius` | `mean(initial radii) × 0.2` |
+| `perturb_reference_radius` | `mean(major radii)` |
+| `x/y_sigma` | `mean(major radii) × 0.15` |
+| `z_sigma` | `mean(minor radii) × 0.30` |
+| `position_prior_threshold` | `mean(major radii) × 0.8` |
+| `iterations_per_cell` | `clamp(N_cells × 30, 150, 500)` |
+| `pca_bridge_min_side_voxels` | `clamp(mean_volume × 0.05, 20, 200)` |
+
+Per-param manual override via `SimulationConfig.geometry_force_*` (12 fields, default `-1`). When `> 0` (or `> -1` for ints), overrides auto-derived value.
+
+`applyDerivedGeometry(g, config)` (PENDING — Task 4 next session) mutates `BaseConfig.cell.{min,max}{A,B,C}Radius`, `cell.x/y/z.sigma`, `cell.perturbSigmaReferenceRadius`, `simulation.iterations_per_cell`, `prob.position_prior_threshold`, `prob.pca_bridge_min_side_voxels`, AND syncs `Ellipsoid::cellConfig` static.
+
+### Wiring order in main.cpp (post-Task 5, projected)
+
+```
+1. Parse args, load image paths
+2. CellFactory.createCells(initial.csv, ...)
+3. computeDerivedGeometry(cells, image_size, config)   ← PENDING (Task 5)
+4. applyDerivedGeometry(derived, config)               ← PENDING (Task 5)
+5. Auto-calibration: loadRawFrame(0) + computeAutoCalibration(cells, frame0, config)
+6. if (quit_after_preprocessing) { preprocessOnlyLineage; return 0; }
+7. CellUniverse lineage = CellUniverse(cells, ...)
+8. lineage.setBrightnessCalibration(calibration)
+9. ... optimize loop ...
+```
+
+### New SimulationConfig fields (Changes 14-16)
+
+- `auto_calibrate_brightness_enabled: true`
+- `manual_background_intensity: -1`, `manual_cell_intensity: -1`
+- `calibration_cell_inner_fraction: 0.7`
+- `calibration_pixel_trim_percent: 0.10`
+- `calibration_bg_anchor_percentile: 0.10` (P10 of bg pixels)
+- `calibrated_preprocess_blur_sigma: 3.0`
+- `auto_derive_geometry_enabled: true`
+- 12× `geometry_force_*` per-param manual overrides (defaults `-1`)
+
+### Test surface
+
+49/49 tests passing as of 2026-05-05 PM. Test files:
+- `C++/tests/calibration_test.cc` — Brightness/Initialize/CellUniverseStorage/ManualOverride suites
+- `C++/tests/geometry_derivation_test.cc` — DerivedGeometry/ImageSize3D/ComputeDerivedGeometry suites
+- `C++/tests/process_image_test.cc` — adds `ApplyCalibratedPreprocessTest.PerFrameRatio*` + `PreprocessLoadedFrameWithCalibrationTest`

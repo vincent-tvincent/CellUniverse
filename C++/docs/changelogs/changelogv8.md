@@ -693,3 +693,310 @@ Revert `C++/src/Frame.cpp` bridge-gate slab accumulator additions. The old `gapB
 - **Investigate whether pre-pooled image** (used in other valley-like checks?) would help elsewhere. The slab-min approach is a per-metric fix; sampling raw pixels through the pooled output is the deeper architectural option.
 - **Capture the slab-min log** in the validation run's artifact for any future regression — the `minSlabIdx` field tells us at a glance when slab-min was the deciding factor.
 
+## 2026-05-03: Demote PCA bridge from accepting path to candidate-proposal source (Change 13) — **status: ACTIVE, awaiting build**
+
+### Problem / Motivation
+
+The PCA-bridge split path (`Frame::tryPcaBridgeSplit`) acted as an independent
+accepting path: when an elongated cell with a dark long-axis bin gap was
+found, the function fitted two daughters via PCA on the left/right pixel
+clusters and committed the replacement immediately. It had its own cost
+threshold (`pca_bridge_min_cost_improvement`) and bypassed the main path's
+gates: candidate burn-in, daughter-overlap fraction gate, asymmetric L2
+weighting, the final bridge gate, the adaptive cost gate, and the new
+split-bridge cost rescue.
+
+This produced false positives. Concrete case in
+`output_ubuntu_fluo_resume33_0-50_20260503_184603/debug_log.txt` at f43:
+
+```
+[PCA Bridge Split Accept] cell=cell_310 elong=3.7316 gapBins=9-11
+  splitProj=0 left=7335 right=6790 costDiff=-9554.39
+  oldImage=2.18448e+06 newImage=2.15753e+06
+  oldOverlap=0 newOverlap=17392.7
+```
+
+`costDiff=-9554` is below the bridge's `min_cost_improvement` so it was
+accepted, but the split CREATED 17392 voxels of overlap with neighbors
+(oldOverlap=0 → newOverlap=17392.7). The main path's
+`split_daughter_overlap_gate` and the asymmetric L2 cost would have rejected
+this. `docs/split-gate-overlap-analysis.md` flagged this as the
+highest-risk overlap and recommended demoting the bridge to a
+candidate-proposal source.
+
+### Files changed
+
+- `C++/includes/Frame.hpp`
+- `C++/src/Frame.cpp`
+- `C++/src/CellUniverse.cpp`
+
+### Code changes
+
+**File:** `C++/includes/Frame.hpp`
+
+**Before (around L40–55, before BoundingBox3D `};`):** no `BridgeSplitProposal` struct.
+
+**After (immediately after `BoundingBox3D`):**
+```cpp
+struct BridgeSplitProposal
+{
+    cv::Point3f d1Pos{0.0f, 0.0f, 0.0f};
+    cv::Point3f d2Pos{0.0f, 0.0f, 0.0f};
+    float elongation = 0.0f;
+    int gapStartBin = -1;
+    int gapEndBin = -1;
+    int leftPixelCount = 0;
+    int rightPixelCount = 0;
+};
+```
+
+**Before (around L177–193):**
+```cpp
+CostCallbackPair trySplitCellPhased(
+    size_t cellIndex,
+    const PreviousFrameSnapshot &snapshot,
+    const ClaimSet &otherCellsClaimSets,
+    bool useSnapshotDirection,
+    const ProbabilityConfig &probConfig,
+    std::vector<cv::Mat> *splitPerturbDebugPlacements = nullptr,
+    int *splitPerturbDebugPlacementCount = nullptr,
+    float splitPerturbDebugBrightness = 0.0f);
+
+bool tryPcaBridgeSplit(size_t cellIndex,
+                       const ProbabilityConfig &probConfig,
+                       std::ostream *logSink = nullptr);
+```
+
+**After:**
+```cpp
+CostCallbackPair trySplitCellPhased(
+    size_t cellIndex,
+    const PreviousFrameSnapshot &snapshot,
+    const ClaimSet &otherCellsClaimSets,
+    bool useSnapshotDirection,
+    const ProbabilityConfig &probConfig,
+    std::vector<cv::Mat> *splitPerturbDebugPlacements = nullptr,
+    int *splitPerturbDebugPlacementCount = nullptr,
+    float splitPerturbDebugBrightness = 0.0f,
+    const BridgeSplitProposal *bridgeProposal = nullptr);
+
+bool discoverPcaBridgeProposal(size_t cellIndex,
+                               const ProbabilityConfig &probConfig,
+                               BridgeSplitProposal &outProposal,
+                               std::ostream *logSink = nullptr) const;
+```
+
+`tryPcaBridgeSplit` declaration removed. The new `discoverPcaBridgeProposal` is `const` (no cell mutation) and returns the (left, right) weighted centroids.
+
+**File:** `C++/src/Frame.cpp`
+
+The old `tryPcaBridgeSplit` (~L2841–L3030) is replaced by `discoverPcaBridgeProposal` (now at L2850–L3030). The bin-analysis half is preserved verbatim. The fit-daughter / synth-mutate / cost-gate half is deleted; in its place the function computes weighted L/R centroids directly and writes them into `outProposal`. Log tag changed from `[PCA Bridge Split]` / `[PCA Bridge Split Accept]` / `[PCA Bridge Split Reject]` to `[PCA Bridge Propose]`.
+
+**`Frame::trySplitCellPhased` signature (L3032–L3041):**
+
+Added trailing parameter `const BridgeSplitProposal *bridgeProposal` (default `nullptr` via the header).
+
+**Bridge candidate injection inside `trySplitCellPhased` (just before `Kmax` truncation, ~L3590):**
+
+```cpp
+if (bridgeProposal != nullptr) {
+    Candidate bridgeCand;
+    bridgeCand.d1Pos = bridgeProposal->d1Pos;
+    bridgeCand.d2Pos = bridgeProposal->d2Pos;
+    bridgeCand.label = "bridge_primary";
+    candidates.insert(candidates.begin(), bridgeCand);
+    std::cout << "  [Split Bridge Inject] " << parentName
+              << " d1=(" << bridgeCand.d1Pos.x << "," << bridgeCand.d1Pos.y
+              << "," << bridgeCand.d1Pos.z << ")"
+              << " d2=(" << bridgeCand.d2Pos.x << "," << bridgeCand.d2Pos.y
+              << "," << bridgeCand.d2Pos.z << ")"
+              << " elong=" << bridgeProposal->elongation
+              << " gapBins=" << bridgeProposal->gapStartBin << "-"
+              << bridgeProposal->gapEndBin
+              << std::endl;
+}
+```
+
+The proposal is inserted at the FRONT of `candidates` so it survives the `Kmax` cap. It then competes against `data_*` and `snap_*` candidates under identical burn-in + bio + bridge + cost rules.
+
+**File:** `C++/src/CellUniverse.cpp`
+
+**Before (around L2711–L2752, inside `runPcaShapeFit` lambda body, end-of-frame):**
+
+A loop scanned every cell, computed elongation, and called `frame.tryPcaBridgeSplit(ci, config.prob)`. Each accepted bridge mutated `frame.cells` and erased `cellShapeReference` / `cellShapeBirth` for that cell.
+
+**After:**
+
+Replaced with a comment block that points to the new pre-loop discovery phase. The synth refresh (`frame.regenerateSynthFrame()`) that bridge needed is removed because we no longer mutate cells here.
+
+**Pre-loop discovery (new, just before `runPhase` lambda, around L3178–L3220):**
+
+```cpp
+std::unordered_map<std::string, BridgeSplitProposal> bridgeProposals;
+if (config.prob.pca_bridge_split_enabled) {
+    float maxBridgeElong = 0.0f;
+    int bridgeEligible = 0;
+    for (const auto &cell : frame.cells) {
+        if (cell.isTrash()) continue;
+        const float elong = cell.shapeElongation();
+        maxBridgeElong = std::max(maxBridgeElong, elong);
+        if (elong >= config.prob.pca_bridge_elongation_ratio) {
+            ++bridgeEligible;
+        }
+    }
+    for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+        const std::string parentName = frame.cells[ci].getName();
+        BridgeSplitProposal proposal;
+        if (frame.discoverPcaBridgeProposal(ci, config.prob, proposal)) {
+            bridgeProposals[parentName] = proposal;
+        }
+    }
+    std::cout << "[PCA Bridge Propose] frame " << (firstFrame + frameIndex)
+              << " scanned=" << frame.cells.size()
+              << " eligible=" << bridgeEligible
+              << " proposalsFound=" << bridgeProposals.size()
+              << " maxElong=" << maxBridgeElong
+              << " threshold=" << config.prob.pca_bridge_elongation_ratio
+              << std::endl;
+}
+```
+
+Cells at this point carry the previous frame's PCA-fit shape (current frame's PCA-fit happens in `runPcaShapeFit` at end-of-frame), but the bright-pixel input is the current frame's image — same input the original end-of-frame bridge had against the next frame's start. Daughter centroids feed the standard 50-iter burn-in inside `trySplitCellPhased`, so any seed-position drift from the stale shape is corrected.
+
+**Lookup at the trySplitCellPhased call site (around L3457):**
+
+```cpp
+const BridgeSplitProposal *bridgeForCell = nullptr;
+if (!bridgeProposals.empty()) {
+    auto bIt = bridgeProposals.find(cellName);
+    if (bIt != bridgeProposals.end()) {
+        bridgeForCell = &bIt->second;
+    }
+}
+auto result = frame.trySplitCellPhased(
+    cellIdx, splitSnapshot, others, useSnapDir, config.prob,
+    exportPerturbDebug ? &splitPerturbDebugPlacements : nullptr,
+    exportPerturbDebug ? &splitPerturbDebugPlacementCount : nullptr,
+    config.simulation.perturb_debug_cell_brightness,
+    bridgeForCell);
+```
+
+### Effect
+
+1. The PCA bridge no longer accepts splits independently. The cell_310 f43 false split (overlap going from 0 → 17392) is impossible under this design — the main path's `split_daughter_overlap_gate_enabled` (currently 0.05) catches it.
+2. Cells where the standard `data_*` / `snap_*` candidates miss but the bridge finds a clean L/R cluster (e.g. f11 cell_4 = GT 640) still split, because the bridge's daughter centroids are now offered as `bridge_primary` to the burn-in winner-pick.
+3. Acceptance economics are unified — `split_cost`, `split_cost_fraction`, and `split_bridge_cost_rescue_*` apply uniformly to all candidate sources.
+4. Eligibility is unified — only cells whose `P(split)` from snapshot elongation triggers an attempt this iteration get to use their bridge proposal. The bridge no longer fires on cells the main path didn't pick.
+
+### Diagnostic surface
+
+- `[PCA Bridge Propose] frame N scanned=… eligible=… proposalsFound=… maxElong=… threshold=…` — frame-level summary.
+- `[PCA Bridge Propose] cell=… elong=… gapBins=…-… splitProj=… left=… right=… d1=(…) d2=(…)` — per-cell discovery.
+- `[PCA Bridge Propose] cell=… rejected=no_dark_bridge|too_few_side_voxels` — discovery rejections.
+- `[Split Bridge Inject] cell=… d1=(…) d2=(…) elong=… gapBins=…-…` — confirms the proposal entered the candidate list.
+- The old tags `[PCA Bridge Split]` / `[PCA Bridge Split Accept]` / `[PCA Bridge Split Reject]` are gone.
+
+### Open follow-ups
+
+- **Validate on a fluo f0–f43 run.** Confirm: (a) the f4/f7/f11/f18/f24/f25 splits still fire (the cell_4 f11 split was the only one that depended on the old bridge), (b) the f35 wave hits 9 splits across f34 + f35, (c) the f43 cell_310 false split does NOT fire.
+- **`split-candidate-current-code.md` should be updated** to add `bridge_primary` to the candidate label table once validation lands.
+- **Eligibility coupling:** the bridge proposal is currently consumed only when `P(split)` triggers an attempt. For cells where snapshot elongation is low but post-PCA elongation is high (the original use case for the bridge), the snap-driven `P(split)` may not fire even though the bridge sees a valid gap. If validation shows missed splits here, consider boosting `P(split)` for cells with a discovered proposal.
+- **Cells without snapshot.** A bridge proposal can exist for a newborn daughter that has no snapshot (frame after split). The current code falls through `splitBlacklist.insert(cellName)` then `continue` when the snapshot is missing, so the bridge proposal is silently dropped. Acceptable for now (newborn daughters shouldn't re-split immediately) but worth a log line.
+
+## 2026-05-04: Port prolate-shape pre-filter from yp_opt_speed 1ec91e7 (Change 13b) — **status: ACTIVE, awaiting build**
+
+### Problem / Motivation
+
+Vincent's commit `1ec91e7` ("debug for the black bridge split shortcut, add a missing logic") added a parent-shape gate to the PCA bridge that rejects ellipsoids whose elongation comes from one collapsed axis instead of a clean rod shape. Concrete failure case from the commit message: `R = (43, 30, 12)` has `long/short = 3.58` (passes the elong=2.0 trigger) but `mid/short = 2.5` — a wedge, not a rod. The bin-analysis "valley" along the long axis is not biological in that case and should not produce a daughter pair.
+
+This change is complementary to Change 13 (bridge demote): demote unifies acceptance under the main gate stack so cost/overlap can catch false positives at evaluation time; the prolate gate rejects geometrically-suspect proposals **at discovery time** so they never enter the candidate list, never burn-in, never log noise. Both fix bridge false-positive sources from different angles.
+
+### Files changed
+
+- `C++/includes/ConfigTypes.hpp`
+- `C++/config/config.yaml`
+- `C++/src/Frame.cpp`
+
+### Code changes
+
+**File:** `C++/includes/ConfigTypes.hpp`
+
+**Before (around L666–668):**
+```cpp
+bool pca_bridge_split_enabled = false;
+float pca_bridge_elongation_ratio = 3.0f;
+float pca_bridge_black_threshold = 0.05f;
+```
+
+**After:**
+```cpp
+bool pca_bridge_split_enabled = false;
+float pca_bridge_elongation_ratio = 3.0f;
+// Prolate-shape pre-filter (ported from yp_opt_speed 1ec91e7). Reject
+// bridge candidates where the high elongation comes from one collapsed
+// axis instead of a clean rod shape. R=(43,30,12) has long/short=3.58
+// (passes elong gate) but mid/short=2.5 — wedge, not rod, and the
+// bin-analysis "valley" along the long axis is not biological.
+//   long/mid >= pca_bridge_min_long_mid_ratio  → one clearly long axis
+//   mid/short <= pca_bridge_max_mid_short_ratio → two non-long axes
+//                                                 close in size
+// Set either to 0 to disable that half of the gate.
+float pca_bridge_min_long_mid_ratio = 1.35f;
+float pca_bridge_max_mid_short_ratio = 1.35f;
+float pca_bridge_black_threshold = 0.05f;
+```
+
+YAML reads + cout dumps for both new fields added alongside the existing `pca_bridge_elongation_ratio` entries.
+
+**File:** `C++/config/config.yaml`
+
+**Inserted under `prob:` after `pca_bridge_elongation_ratio`:**
+```yaml
+  pca_bridge_min_long_mid_ratio: 1.35
+  pca_bridge_max_mid_short_ratio: 1.35
+```
+
+**File:** `C++/src/Frame.cpp`
+
+**Inside `discoverPcaBridgeProposal`, immediately after the elong threshold check (around L2865–L2895):**
+
+Adds a `midIdx` lookup, computes `midR`, then:
+
+```cpp
+const float longMidRatio = longR / midR;
+const float midShortRatio = midR / shortR;
+const float minLongMidRatio = std::max(0.0f, probConfig.pca_bridge_min_long_mid_ratio);
+const float maxMidShortRatio = std::max(0.0f, probConfig.pca_bridge_max_mid_short_ratio);
+const bool longAxisDistinct = minLongMidRatio <= 0.0f || longMidRatio >= minLongMidRatio;
+const bool shortAxesSimilar = maxMidShortRatio <= 0.0f || midShortRatio <= maxMidShortRatio;
+if (!longAxisDistinct || !shortAxesSimilar) {
+    log << "  [PCA Bridge Propose] cell=" << parent.getName()
+        << " elong=" << elong
+        << " rejected=triaxial_shape"
+        << " longR=" << longR
+        << " midR=" << midR
+        << " shortR=" << shortR
+        << " longMidRatio=" << longMidRatio
+        << " minLongMidRatio=" << minLongMidRatio
+        << " midShortRatio=" << midShortRatio
+        << " maxMidShortRatio=" << maxMidShortRatio
+        << std::endl;
+    return false;
+}
+```
+
+The log tag is `[PCA Bridge Propose]` (consistent with the discover-only naming from Change 13a) rather than the original commit's `[PCA Bridge Split]`. The reject reason `triaxial_shape` is preserved verbatim for grep continuity with Vincent's branch.
+
+### Effect
+
+- Cells with collapsed-axis geometry now bypass bin-analysis entirely. Saves a small amount of compute; more importantly, prevents proposals that come from a non-biological "valley" derived from wonky ellipsoid fits.
+- Pairs with Change 13a: the demote unifies acceptance economics (good against false positives caused by unfair scoring), the prolate gate rejects geometrically degenerate parents at discovery (good against false positives caused by wonky shapes). Together they make the bridge produce only proposals worth competing in the main candidate list.
+
+### Open follow-ups
+
+- Tune `pca_bridge_min_long_mid_ratio` and `pca_bridge_max_mid_short_ratio` against fluo runs. 1.35/1.35 may be too tight for asymmetric divisions where one daughter remains larger.
+
+---
+
+**Status: CLOSED 2026-05-04** at Change 13b (PCA-bridge prolate-shape gate port).
+Continued in [`changelogv9.md`](./changelogv9.md), opening with Change 14 (auto-calibration from frame zero).

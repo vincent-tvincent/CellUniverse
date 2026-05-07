@@ -6,17 +6,16 @@
 #include <vector>
 
 namespace {
-SimulationConfig MakeFrameConfig(int zSlices, float background) {
+SimulationConfig MakeFrameConfig(int zSlices) {
     SimulationConfig cfg;
     cfg.z_slices = zSlices;
-    cfg.background_color = background;
     cfg.z_scaling = 1.0f;
     return cfg;
 }
 }
 
 TEST(FrameTest, CalculateCostReturnsZeroForIdenticalStacks) {
-    const SimulationConfig cfg = MakeFrameConfig(1, 0.0f);
+    const SimulationConfig cfg = MakeFrameConfig(1);
     std::vector<cv::Mat> real = {cv::Mat::zeros(2, 2, CV_32F)};
     Frame frame(real, cfg, {}, "", "f0");
 
@@ -24,7 +23,7 @@ TEST(FrameTest, CalculateCostReturnsZeroForIdenticalStacks) {
 }
 
 TEST(FrameTest, CalculateCostSumsL2NormAcrossSlices) {
-    const SimulationConfig cfg = MakeFrameConfig(2, 0.0f);
+    const SimulationConfig cfg = MakeFrameConfig(2);
     std::vector<cv::Mat> real = {
         cv::Mat::zeros(2, 2, CV_32F),
         cv::Mat::zeros(2, 2, CV_32F)
@@ -40,7 +39,7 @@ TEST(FrameTest, CalculateCostSumsL2NormAcrossSlices) {
 }
 
 TEST(FrameTest, CalculateCostThrowsOnMismatchedStackSize) {
-    const SimulationConfig cfg = MakeFrameConfig(2, 0.0f);
+    const SimulationConfig cfg = MakeFrameConfig(2);
     std::vector<cv::Mat> real = {
         cv::Mat::zeros(2, 2, CV_32F),
         cv::Mat::zeros(2, 2, CV_32F)
@@ -52,9 +51,11 @@ TEST(FrameTest, CalculateCostThrowsOnMismatchedStackSize) {
 }
 
 TEST(FrameTest, GenerateOutputSynthFrameConvertsFloatTo8Bit) {
-    const SimulationConfig cfg = MakeFrameConfig(1, 0.5f);
+    const SimulationConfig cfg = MakeFrameConfig(1);
     std::vector<cv::Mat> real = {cv::Mat::zeros(3, 3, CV_32F)};
     Frame frame(real, cfg, {}, "", "f3");
+    frame.setBackgroundColor(0.5f);
+    frame.regenerateSynthFrame();
 
     std::vector<cv::Mat> out = frame.generateOutputSynthFrame();
 

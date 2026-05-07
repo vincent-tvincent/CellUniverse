@@ -36,15 +36,16 @@ TEST(EllipsoidTest, DrawColorsCenterPixelAndLeavesFarPixelUnchanged) {
     ConfigureEllipsoidBounds();
 
     SimulationConfig simulationConfig;
-    simulationConfig.cell_color = 0.9f;
-    simulationConfig.background_color = 0.1f;
+    constexpr float kCellBrightness = 0.9f;
+    constexpr float kBackground = 0.1f;
 
-    cv::Mat image(21, 21, CV_32F, cv::Scalar(simulationConfig.background_color));
-    Ellipsoid spheroid(EllipsoidParams("cellC", 10.0f, 10.0f, 0.0f, 3.0f, 3.0f));
+    cv::Mat image(21, 21, CV_32F, cv::Scalar(kBackground));
+    // Pass per-cell brightness explicitly; draw() reads _brightness, not config.
+    Ellipsoid spheroid(EllipsoidParams("cellC", 10.0f, 10.0f, 0.0f, 3.0f, 3.0f, 0.0f, 0.0f, 0.0f, kCellBrightness));
 
     spheroid.draw(image, simulationConfig, 0.0f);
 
-    EXPECT_NEAR(image.at<float>(10, 10), simulationConfig.cell_color, 1e-6f);
-    EXPECT_NEAR(image.at<float>(0, 0), simulationConfig.background_color, 1e-6f);
+    EXPECT_NEAR(image.at<float>(10, 10), kCellBrightness, 1e-6f);
+    EXPECT_NEAR(image.at<float>(0, 0), kBackground, 1e-6f);
 }
 

@@ -159,13 +159,75 @@ simulation:
 
   frame_intensity_normalization_enabled: true
   frame_intensity_fixed_hard_max_scale: true
+  # Auto-selects 255 for 8-bit-range TIFFs and 65536 for larger-range TIFFs.
+  # Set false to force frame_intensity_hard_max manually.
+  frame_intensity_auto_hard_max: true
   frame_intensity_hard_max: 65536.0
 
-  simple_preprocess_blur_sigma: 10.0
-  simple_preprocess_real_ratio: 0.5
-  simple_preprocess_background_factor: 1.5
+  # Branch-preferred preprocessing path: fixed hard-max normalize, then
+  # raw/blurred blend matching the Python preprocessing experiment.
+  simple_preprocess_enabled: true
+  simple_preprocess_blur_sigma: 5.0
+  simple_preprocess_real_ratio: 0.4
+  simple_preprocess_background_factor: 1.0
   # Python reference exports the original z pages without interpolation.
   simple_preprocess_interpolate_z: true
+
+  # Auto-calibration from frame 0 (2026-05-04). See plan
+  # docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
+  # When true, dataset-specific iterative_*/contrast_*/frame_intensity_scale_*
+  # tunables are bypassed in favor of inferring (background, cell) intensity
+  # from the initial CSV cell positions in frame 0.
+  auto_calibrate_brightness_enabled: false
+  # Manual override of frame-0 auto-calibration. Both must be > 0 (raw 16-bit
+  # intensity values, not normalized) to take effect; otherwise auto-detection
+  # runs against the initial CSV cell positions.
+  #
+  # Use this when:
+  #  - Frame 0 cells are mid-division (cell-stat estimate would be biased)
+  #  - The initial CSV is approximate and you've measured (bg, cell) by hand
+  #  - You want to lock the brightness scale across runs for direct comparison
+  #
+  # Workflow: open frame 0 in Fiji/Napari, measure mean intensity in a clean
+  # background ROI -> manual_background_intensity. Mean intensity at the center
+  # of a typical cell -> manual_cell_intensity.
+  manual_background_intensity: -1
+  manual_cell_intensity: -1
+  calibration_cell_inner_fraction: 0.7
+  calibration_pixel_trim_percent: 0.10
+  # Bg anchor percentile (P10 default). Lower = wider [0,1] span = dim
+  # chromatin gaps inside cells stay above 0. Median was breaking cells
+  # into fragments. See plan 2026-05-05-auto-derive-geometry-from-initial-csv.md.
+  calibration_bg_anchor_percentile: 0.10
+  # Gaussian blur in calibrated preprocessing. Smooths chromatin patterns
+  # within cells (5-10 px scale) while preserving cell edges (30-40 px).
+  # 3.0 = dataset-agnostic noise removal; works for fluo + embryo without
+  # tuning. Set to 0 to disable.
+  calibrated_preprocess_blur_sigma: 3.0 
+
+  # Auto-derive geometry from initial CSV (2026-05-05). See plan
+  # docs/plans/2026-05-05-auto-derive-geometry-from-initial-csv.md.
+  # When true, cell-radius bounds, perturbation sigmas,
+  # perturbSigmaReferenceRadius, position_prior_threshold, and
+  # iterations_per_cell are computed from initial-CSV statistics +
+  # z_scaling and OVERRIDE the values set in cell:/prob:/simulation:
+  # blocks below.
+  #
+  # Per-param manual override: set any geometry_force_* > 0 (or > -1 for
+  # the int) to pin that specific value.
+  auto_derive_geometry_enabled: true
+  geometry_force_max_a_radius: -1
+  geometry_force_max_b_radius: -1
+  geometry_force_max_c_radius: -1
+  geometry_force_min_a_radius: -1
+  geometry_force_min_b_radius: -1
+  geometry_force_min_c_radius: -1
+  geometry_force_perturb_reference_radius: -1
+  geometry_force_xy_sigma: -1
+  geometry_force_z_sigma: -1
+  geometry_force_position_prior_threshold: -1
+  geometry_force_iterations_per_cell: 250
+  geometry_force_pca_bridge_min_side_voxels: -1
 
   # Edge brightness alignment runs after preprocessing and samples a
   # frame-shaped region on each XY slice.
@@ -183,11 +245,10 @@ simulation:
   edge_brightness_alignment_bottom_offset: 0
   edge_brightness_alignment_max_shift: 0.20
 
-  # Disabled for the simplified reference pipeline. With fixed 65536 scaling,
-  # a threshold like 0.045 would erase all raw signal below ~2949.
+  # Disabled for the branch-preferred simple preprocessing path.
   post_alignment_black_threshold: 0.0
 
-  # Disabled to match the Python preprocessing experiment.
+  # Disabled for the branch-preferred simple preprocessing path.
   post_alignment_black_percentile: 0.0
   # After the initial percentile blackoff, detect isolated nonzero 3D chunks
   # using 26-neighbor connectivity. A chunk is counted when each z/y/x
@@ -223,6 +284,9 @@ simulation:
   export_perturb_cell_center_debug_images: true
   export_frame_png: false
   export_frame_tiff: true
+  # Output bit depth for normalized float images: 8 or 16.
+  # This is independent from input normalization hard max.
+  export_bit_depth: 8
   quit_after_preprocessing: true
   prepare_analyze_one_frame: false
   # When true, after a frame has been optimized and exported, release its
@@ -304,7 +368,7 @@ simulation:
   # rescale after each blur to recover the original bright-center mean.
   signal_map_enabled: true
   signal_map_blur_sigma: 2.5
-  signal_map_max_iterations: 15
+  signal_map_max_iterations: 10
   signal_map_bright_center_percentile: 0.0
   signal_map_epsilon: 0.000001
   # Normal movement perturbation guidance from the signal map. Split burn-in,
@@ -338,6 +402,22 @@ prob:
   split_bridge_cost_rescue_max_valley_ratio: 0.40
   split_bridge_cost_rescue_max_gap_density: 0.05
 
+  # Bridge metric integrity (Change 16, 2026-05-06).
+  # Live-collapse guard: when the live ellipsoid is < this fraction of the
+  # snapshot's volume, treat live as a perturbation-collapsed overfit and
+  # force the snapshot as the cost baseline. Stops the trap where cell_3
+  # at f7 collapsed onto a bright sub-region (livR ~35% of snapR) and the
+  # collapsed live cost (114k vs snap 387k) made every legitimate split
+  # candidate look "worse than parent" and reject.
+  split_live_collapse_volume_ratio: 0.5
+
+  # Bridge gap voxel scan: perpendicular cylinder radius relative to the
+  # daughters' along-axis extent. The bridge gap statistic now scans
+  # _realFrame directly (no brightness cutoff) so dark gap voxels — the
+  # ones the user actually sees — drive the gapBright statistic instead
+  # of being filtered out before the metric runs.
+  split_bridge_perp_radius_scale: 1.0
+
   position_prior_weight: 75.0
   position_prior_threshold: 20.0
   overlap_penalty_weight: 75000.0
@@ -349,7 +429,11 @@ prob:
   split_final_refine_iterations: 30
   split_calibration_iterations_per_cell: 50
   split_candidate_rotation_delta_degrees: 8
-  split_candidate_translation_delta_fraction: 0.2
+  # 2026-05-05: bumped 0.2 → 0.5 to widen the trans+/trans- candidate
+  # spread for late-frame splits where daughter lobes are far apart.
+  # Translation = 0.5 × daughterR; for daughterR=30 that's ±15px instead
+  # of ±6px. Pairs with split_burn_in_pos_sigma_scale: 0.8.
+  split_candidate_translation_delta_fraction: 0.5
 
   # Reject split candidates whose daughters only fit by walking far away from
   # the proposed split geometry. This catches false splits where an elongated
@@ -374,7 +458,12 @@ prob:
   # Reject if generated daughters overlap each other by more than this
   # fraction of either daughter's voxel body.
   split_daughter_overlap_gate_enabled: true
-  split_max_daughter_overlap_fraction: 0.05
+  # Bumped 0.05 → 0.10 (Change 24, 2026-05-06). 0.05 was rejecting real
+  # just-divided GT splits (e.g. original f3 12345: overlap=0.0549, just
+  # 0.5% over) while the false-split phantom-overlap distribution sits at
+  # 0.16+. Adaptive: daughter-volume fraction, scale-invariant across
+  # datasets. Verified on original 1-12 + fluo (embryo_data) 0-10.
+  split_max_daughter_overlap_fraction: 0.10
   split_daughter_overlap_scale: 1.0
 
   bio_daughter_size_ratio_max: 1.5
@@ -384,7 +473,12 @@ prob:
   bio_bridge_max_valley_ratio: 0.8
   bio_bridge_min_edge_brightness_absolute: 0.07
 
-  split_burn_in_pos_sigma_scale: 0.4
+  # 2026-05-05: bumped 0.4 → 0.8 to fix late-frame missed splits (e.g. f70+
+  # cell_411 where daughter lobes were 60-100 px apart and the previous
+  # 0.4 sigma × 50 burn-in iters could only reach ~20 px). At 0.8 the
+  # random-walk reach doubles to ~40 px, and the cost gate still catches
+  # wrong placements.
+  split_burn_in_pos_sigma_scale: 0.8
 
   use_bbox_cost: true
   bbox_margin_scale: 2.5

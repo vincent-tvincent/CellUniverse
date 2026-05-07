@@ -2703,8 +2703,11 @@ void CellUniverse::optimize(int frameIndex)
     const float overlapWeight = config.prob.overlap_penalty_weight;
     const float baseSplitProb = config.prob.P_split_base;
 
-    // No splits on the first frame — cells can't divide before any time has passed
-    bool allowSplits = (frameIndex > 0);
+    // No splits on the first frame — cells can't divide before any time has passed.
+    // EXCEPTION: when resuming from a checkpoint, previousSnapshots is non-empty
+    // (loadCheckpoint populates it), and biological time HAS passed; the local
+    // frameIndex==0 is just the first frame after resume. Allow splits in that case.
+    bool allowSplits = (frameIndex > 0) || !previousSnapshots.empty();
 
     // Cells that already failed a burn-in this frame — skip all further split attempts.
     std::set<std::string> splitBlacklist;

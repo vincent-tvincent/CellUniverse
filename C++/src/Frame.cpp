@@ -4901,6 +4901,20 @@ CostCallbackPair Frame::trySplitCellPhased(
             // (from gatherBrightPixelsVoronoi) — edges represent CELL TISSUE
             // brightness, so dark voxels near the daughter periphery should
             // not dilute the average.
+            //
+            // Also count BRIGHT voxels falling in the gap zone here, into
+            // `gapBrightCount`. This restores the original `gapDensity`
+            // semantic (bright-voxel fraction in the gap). Change 22 moved
+            // gap brightness sampling to a no-cutoff scan of `_realFrame`
+            // (so dark voxels contribute to gapBright, fixing the algorithm/
+            // visual divergence). But `gapDensity = gapCount/totalInRange`
+            // computed on the no-cutoff scan no longer measures "bright
+            // fraction" — it now measures "voxel fraction" and reads ~0.2-
+            // 0.55 for real bridges, blocking the cost rescue calibrated
+            // for the old 0.001-0.04 range. Counting bright voxels in the
+            // gap separately preserves both: gapDensity stays calibrated,
+            // gapBright keeps the no-cutoff fix.
+            int gapBrightCount = 0;
             for (const auto &bp : pixels) {
                 const cv::Point3f delta(
                     bp.pos.x - daughterMidpoint.x,
@@ -4913,7 +4927,9 @@ CostCallbackPair Frame::trySplitCellPhased(
 
                 if (proj < edge1Lo || proj > edge2Hi) continue;
 
-                if (proj >= edge1Lo && proj < gapLo) {
+                if (proj >= gapLo && proj <= gapHi) {
+                    ++gapBrightCount;
+                } else if (proj >= edge1Lo && proj < gapLo) {
                     ++edge1Count;
                     edge1BrightSum += bp.weight;
                 } else if (proj > gapHi && proj <= edge2Hi) {
@@ -5003,8 +5019,15 @@ CostCallbackPair Frame::trySplitCellPhased(
             const int edgeCount = edge1Count + edge2Count;
             const double edgeBrightSum = edge1BrightSum + edge2BrightSum;
 
-            const float gapDensity = (totalInRange > 0)
-                ? static_cast<float>(gapCount) / static_cast<float>(totalInRange)
+            // gapDensity uses BRIGHT-voxel counts to preserve the rescue's
+            // original calibration (see Change 25 / 2026-05-06): real
+            // bridges have ~0.001-0.04 bright voxels in the gap relative
+            // to the bridge zone; no-bridge has ~0.2+. The no-cutoff scan
+            // (Change 22) inflated this metric — we route gapDensity off
+            // the bright-only count instead.
+            const int totalBrightInRange = gapBrightCount + edgeCount;
+            const float gapDensity = (totalBrightInRange > 0)
+                ? static_cast<float>(gapBrightCount) / static_cast<float>(totalBrightInRange)
                 : 0.0f;
             // Legacy mean — kept for diagnostic continuity in the log line.
             const float gapBrightMean = (gapCount > 0)

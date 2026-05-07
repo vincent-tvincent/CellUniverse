@@ -618,6 +618,137 @@ Trivial bookkeeping change; no behavioural impact.
 
 ---
 
+## Change 24: Daughter-overlap gate threshold 0.05 → 0.10 **ACTIVE**
+
+### Problem
+
+`split_max_daughter_overlap_fraction = 0.05` rejected real just-divided GT splits because freshly-emerged daughters are still pressed against each other (typical overlap 5–10%). Investigation of original_data f3 12345 (a known GT split):
+
+```
+[Split Winner] 12345 bestIdx=10/20 label=data_imgPca_primary
+               preCostDiff=-199646  baseline=866396  (winner ~200k cheaper, very strong)
+[Split Daughter Refit] d1 R=(27.76, 24.69, 20.77) at z=149.55
+                       d2 R=(28.70, 24.71, 20.77) at z=106.74
+                       (daughters separating along z by 42.8 vx, c-axis ends just 0.8 vx from touching)
+[Split Reject bio] reason=daughter_daughter_overlap
+                    daughterOverlap=0.0549   maxAllowed=0.05  ← rejected by 0.5%
+```
+
+Cross-checked against the 1-100 reference run (`output_original_1-100_20260506_045317`):
+the same f3 12345 attempt was rejected with `daughterOverlap=0.0553` — 12345 only finally split at f20 (17 frames late). So the 0.05 threshold has been wrong long before recent changes.
+
+### Distribution evidence
+
+Daughter-overlap fractions across all split attempts in the 1-12 run:
+
+| daughterOverlap | Attempt class |
+|---|---|
+| **0.055** | f3 12345 (real GT split — wrongly rejected) |
+| 0.16, 0.16, 0.23, 0.28, 0.33 | false phantom-overlap attempts (correctly rejected) |
+
+Bimodal — real divisions cluster at 5–10%, phantom splits cluster at 16%+. The 0.05 gate sat exactly where real just-divided pairs live.
+
+### Fix
+
+**File:** `C++/config/config.yaml` (line 482)
+
+```yaml
+# Before:
+split_max_daughter_overlap_fraction: 0.05
+
+# After:
+split_max_daughter_overlap_fraction: 0.10
+```
+
+Single config-only change. No code changes; no recompile needed for runs that already had the binary built post-Change 22.
+
+### Adaptive properties
+
+- Dimensionless fraction of daughter volume — scale-invariant across datasets.
+- Doesn't affect the e3d03 false split (which passed at < 0.05 — that's a separate cost-arithmetic problem).
+- Catches all real just-divided pairs (5–10%) while still rejecting phantom-overlap candidates (16%+).
+
+### Effect
+
+- **f3 12345 (original_data)**: 0.055 < 0.10 → ACCEPT (was rejected at 0.055 > 0.05)
+- **High-overlap phantoms (0.16+)**: still rejected — no false-split regression
+- **fluo dataset**: unaffected (no rejections at 5–10% overlap range observed in f0-10 run)
+
+---
+
+## Change 25: Restore `gapDensity` semantic — bridge cost rescue now fires again **ACTIVE**
+
+### Problem
+
+Change 22's no-cutoff gap scan (read every voxel in the bridge zone, not just bright ones) **silently broke `gapDensity`**. The metric was historically `gapCount / totalInRange` computed on cutoff-filtered bright voxels — it measured "what fraction of the BRIGHT signal in the bridge zone falls in the gap" (real bridges read 0.001-0.04, no-bridge cells read 0.5+). With Change 22, both `gapCount` and `totalInRange` switched to all-voxel counts, and real bridges started reading 0.2-0.55. The rescue's 0.05 max-gap-density gate now ALWAYS fails — cost rescue fired **0 times** in `output_fluo_0-50_20260506_170405` (50 frames).
+
+### Concrete impact: f45 cell_310 split lost
+
+```
+[Split Bridge] cell_310 axisLen=70.61   gapWidth=53.0   valleyFromBright=0   gapBright=0
+                        gapDensity=0.545                ← inflated by Change 22's all-voxel scan
+[Split Reject cost] diff=-31877  threshold=-38723        ← only 7K shy of cost gate
+                    drift1=13.67  drift2=20.04          ← daughters DID find the cells
+```
+
+The bridge is **perfect** (totally black gap, daughters drifted 13-20 vx and located the actual daughter cells 70 vx apart). The split should have been rescued. It wasn't, because gapDensity=0.545 > 0.05.
+
+User-visible result at f45: cell_310 collapsed onto ONE of the would-be daughter positions; the other daughter location stays uncovered (visible bright cell with no ellipse fit; original cell_310 ellipse sits in dark space at the other daughter's position).
+
+### Distribution evidence
+
+All 3 cost-rejections in the 0-50 run had inflated gapDensity:
+- 0.270, 0.303, 0.545 — all far above the 0.05 rescue cap
+
+The split that DID accept (f44 cell_30, costDiff=-321k) had gapDensity=0.218 — also above 0.05, but the main cost gate accepted without needing rescue.
+
+### Fix
+
+**File:** `C++/src/Frame.cpp` (bridge-metric block)
+
+Restore the original `gapDensity` semantic by counting **bright voxels only** in the gap zone, paralleling the cutoff-filtered edge zones. Keep Change 22's no-cutoff scan for `gapBright` / `gapBrightMinSlab` (the brightness-magnitude side). The two halves of the metric are now independent:
+
+```cpp
+// Inside the cutoff-filtered `pixels` loop, classify by zone:
+int gapBrightCount = 0;
+for (const auto &bp : pixels) {
+    ...
+    if (proj < edge1Lo || proj > edge2Hi) continue;
+    if (proj >= gapLo && proj <= gapHi) {
+        ++gapBrightCount;                          // NEW: bright voxels in gap
+    } else if (proj >= edge1Lo && proj < gapLo) {
+        ++edge1Count; edge1BrightSum += bp.weight;
+    } else if (proj > gapHi && proj <= edge2Hi) {
+        ++edge2Count; edge2BrightSum += bp.weight;
+    }
+}
+
+// gapDensity now reflects original "bright fraction" semantic:
+const int totalBrightInRange = gapBrightCount + edgeCount;
+const float gapDensity = (totalBrightInRange > 0)
+    ? static_cast<float>(gapBrightCount) / static_cast<float>(totalBrightInRange)
+    : 0.0f;
+```
+
+`gapBright` (slab-min over no-cutoff scan) is unchanged — keeps Change 22's algorithm/visual alignment.
+
+### Effect on f45 cell_310
+
+| Metric | Before | After |
+|---|---|---|
+| `gapBright` | 0 | 0 (unchanged — Change 22 preserved) |
+| `gapDensity` | 0.545 (all voxels) | < 0.05 (bright-voxel fraction — restored semantic) |
+| `valleyFromBright` | 0 | 0 |
+| Rescue fires? | NO (gapDensity > 0.05) | YES (all three eligibility checks pass) |
+| Cost diff | -31877 vs -38723 threshold | -31877 vs threshold; rescue makes the split ACCEPT |
+
+### Adaptive properties
+
+- No new config knobs. The original `split_bridge_cost_rescue_max_gap_density: 0.05` stays where it was — the calibration is correct, only the input metric was broken.
+- Both halves of the bridge metric (gapBright, gapDensity) now do their original jobs. Change 22's "see what the user sees" gap brightness is preserved.
+
+---
+
 ## Cross-cutting summary: A new dataset now needs only 2 inputs
 
 After Changes 14–19, a new dataset works with:

@@ -479,7 +479,12 @@ prob:
   # Reject if generated daughters overlap each other by more than this
   # fraction of either daughter's voxel body.
   split_daughter_overlap_gate_enabled: true
-  split_max_daughter_overlap_fraction: 0.05
+  # Bumped 0.05 → 0.10 (Change 24, 2026-05-06). 0.05 was rejecting real
+  # just-divided GT splits (e.g. original f3 12345: overlap=0.0549, just
+  # 0.5% over) while the false-split phantom-overlap distribution sits at
+  # 0.16+. Adaptive: daughter-volume fraction, scale-invariant across
+  # datasets. Verified on original 1-12 + fluo (embryo_data) 0-10.
+  split_max_daughter_overlap_fraction: 0.10
   split_daughter_overlap_scale: 1.0
 
   bio_daughter_size_ratio_max: 1.5

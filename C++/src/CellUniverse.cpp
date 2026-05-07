@@ -86,7 +86,8 @@ static float computeMeanOfTopFraction(std::vector<float> values, float topFracti
     return static_cast<float>(sum / selectedCount);
 }
 
-static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice)
+static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice,
+                                           float maxBrightness = 65536.0f)
 {
     if (slice.empty()) {
         return {};
@@ -105,26 +106,53 @@ static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice)
     }
 
     cv::Mat output;
-    if (gray.depth() == CV_8U) {
+    if (gray.depth() == CV_8U || gray.depth() == CV_16U) {
         output = gray.clone();
     } else {
+        const float exportMaxBrightness =
+            maxBrightness > 0.0f ? maxBrightness : 65536.0f;
         cv::Mat clipped = gray.clone();
         cv::patchNaNs(clipped, 0.0);
         cv::min(clipped, 1.0f, clipped);
         cv::max(clipped, 0.0f, clipped);
-        clipped.convertTo(output, CV_8U, 255.0);
+        clipped.convertTo(output, CV_16U, exportMaxBrightness);
     }
     return output;
 }
 
-static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Mat> &stack)
+static cv::Mat makeNormalizedExportSlice(const cv::Mat &slice,
+                                         float maxBrightness = 65536.0f)
+{
+    if (slice.empty()) {
+        return {};
+    }
+    if (slice.depth() == CV_8U || slice.depth() == CV_16U) {
+        return slice.clone();
+    }
+
+    const float exportMaxBrightness =
+        maxBrightness > 0.0f ? maxBrightness : 65536.0f;
+    const int exportDepth = exportMaxBrightness > 255.0f ? CV_16U : CV_8U;
+
+    cv::Mat clipped = slice.clone();
+    cv::patchNaNs(clipped, 0.0);
+    cv::min(clipped, 1.0f, clipped);
+    cv::max(clipped, 0.0f, clipped);
+
+    cv::Mat output;
+    clipped.convertTo(output, exportDepth, exportMaxBrightness);
+    return output;
+}
+
+static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Mat> &stack,
+                                                        float maxBrightness = 65536.0f)
 {
     std::vector<cv::Mat> output;
     output.reserve(stack.size());
 
     cv::Size expectedSize;
     for (const auto &slice : stack) {
-        cv::Mat converted = makeNapariFriendlyTiffSlice(slice);
+        cv::Mat converted = makeNapariFriendlyTiffSlice(slice, maxBrightness);
         if (converted.empty()) {
             continue;
         }
@@ -143,9 +171,10 @@ static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Ma
 }
 
 static void writeNapariFriendlyTiffStack(const std::string &path,
-                                         const std::vector<cv::Mat> &stack)
+                                         const std::vector<cv::Mat> &stack,
+                                         float maxBrightness = 65536.0f)
 {
-    std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(stack);
+    std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(stack, maxBrightness);
     const std::vector<int> params = {
         cv::IMWRITE_TIFF_COMPRESSION, 1 // COMPRESSION_NONE: easiest for TIFF readers.
     };
@@ -252,6 +281,15 @@ static void normalizeStackToFrameScale(std::vector<cv::Mat> &stack,
 static std::pair<float, float> normalizeStackToFrameIntensity(std::vector<cv::Mat> &stack,
                                                               const SimulationConfig &config)
 {
+    if (config.frame_intensity_fixed_hard_max_scale &&
+        config.frame_intensity_hard_max > 0.0f) {
+        normalizeStackToFrameScale(stack,
+                                   0.0f,
+                                   config.frame_intensity_hard_max,
+                                   config.frame_intensity_hard_max);
+        return {0.0f, config.frame_intensity_hard_max};
+    }
+
     float lowReference = computeStackPercentile(
         stack,
         config.frame_intensity_scale_low_percentile,
@@ -1085,7 +1123,8 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
                                 const fs::path &subdir,
                                 const fs::path &framePath,
                                 bool exportPng,
-                                bool exportTiff)
+                                bool exportTiff,
+                                float tiffMaxBrightness = 65536.0f)
 {
     const fs::path outputDir = baseOutputDir / subdir;
 
@@ -1098,16 +1137,7 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
                 continue;
             }
 
-            cv::Mat outputImage;
-            if (stack[i].depth() != CV_8U) {
-                cv::Mat clipped = stack[i].clone();
-                cv::patchNaNs(clipped, 0.0);
-                cv::min(clipped, 1.0f, clipped);
-                cv::max(clipped, 0.0f, clipped);
-                clipped.convertTo(outputImage, CV_8U, 255.0);
-            } else {
-                outputImage = stack[i].clone();
-            }
+            cv::Mat outputImage = makeNormalizedExportSlice(stack[i], tiffMaxBrightness);
 
             const fs::path outputFile = frameOutputDir / (std::to_string(i) + ".png");
             cv::imwrite(outputFile.string(), outputImage);
@@ -1117,7 +1147,7 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
     if (exportTiff) {
         fs::create_directories(outputDir);
         const fs::path outputFile = outputDir / (framePath.stem().string() + ".tif");
-        writeNapariFriendlyTiffStack(outputFile.string(), stack);
+        writeNapariFriendlyTiffStack(outputFile.string(), stack, tiffMaxBrightness);
     }
 }
 
@@ -1125,10 +1155,11 @@ static void exportPreprocessedStack(const std::vector<cv::Mat> &stack,
                                     const fs::path &baseOutputDir,
                                     const fs::path &framePath,
                                     bool exportPng,
-                                    bool exportTiff)
+                                    bool exportTiff,
+                                    float tiffMaxBrightness = 65536.0f)
 {
     exportStackToSubdir(stack, baseOutputDir, "preprocessed", framePath,
-                        exportPng, exportTiff);
+                        exportPng, exportTiff, tiffMaxBrightness);
 }
 
 static std::vector<cv::Mat> makeEmptyDebugStackLike(const std::vector<cv::Mat> &realFrame)
@@ -1705,11 +1736,13 @@ static void exportSignalDebugStacks(const std::vector<cv::Mat> &realFrame,
     exportStackToSubdir(centerCubes, baseOutputDir, "signal_debug/centers",
                         framePath,
                         config.simulation.export_frame_png,
-                        config.simulation.export_frame_tiff);
+                        config.simulation.export_frame_tiff,
+                        config.simulation.frame_intensity_hard_max);
     exportStackToSubdir(probabilityDebug, baseOutputDir, "signal_debug/perturb_probability",
                         framePath,
                         config.simulation.export_frame_png,
-                        config.simulation.export_frame_tiff);
+                        config.simulation.export_frame_tiff,
+                        config.simulation.frame_intensity_hard_max);
 }
 
 static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
@@ -1851,6 +1884,8 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
               << config.simulation.frame_intensity_scale_high_percentile
               << " exclude_zeros="
               << config.simulation.frame_intensity_percentile_exclude_zeros
+              << " fixed_hard_max_scale="
+              << config.simulation.frame_intensity_fixed_hard_max_scale
               << " hard_max=" << config.simulation.frame_intensity_hard_max
               << '\n';
 
@@ -1998,7 +2033,8 @@ void CellUniverse::prepareFrame(int frameIndex)
         exportPreprocessedStack(real_frame, fs::path(outputPath),
                                 imagePaths[static_cast<size_t>(frameIndex)],
                                 config.simulation.export_frame_png,
-                                config.simulation.export_frame_tiff);
+                                config.simulation.export_frame_tiff,
+                                config.simulation.frame_intensity_hard_max);
     }
 
     // loadImageStacks already generates _synthFrame + refreshes the full-image
@@ -2128,7 +2164,8 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                 exportPreprocessedStack(realFrame, fs::path(outputPath),
                                         imagePaths[static_cast<size_t>(frameIndex)],
                                         config.simulation.export_frame_png,
-                                        config.simulation.export_frame_tiff);
+                                        config.simulation.export_frame_tiff,
+                                        config.simulation.frame_intensity_hard_max);
             }
 
             if (loadIntoFrames) {
@@ -2213,7 +2250,8 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
             exportPreprocessedStack(item.stack, fs::path(outputPath),
                                     imagePaths[static_cast<size_t>(frameIndex)],
                                     config.simulation.export_frame_png,
-                                    config.simulation.export_frame_tiff);
+                                    config.simulation.export_frame_tiff,
+                                    config.simulation.frame_intensity_hard_max);
         }
 
         if (loadIntoFrames) {
@@ -3584,13 +3622,15 @@ void CellUniverse::optimize(int frameIndex)
                             "perturb_debug/movement_placements",
                             framePath,
                             config.simulation.export_frame_png,
-                            config.simulation.export_frame_tiff);
+                            config.simulation.export_frame_tiff,
+                            config.simulation.frame_intensity_hard_max);
         exportStackToSubdir(splitPerturbDebugPlacements,
                             fs::path(outputPath),
                             "perturb_debug/split_placements",
                             framePath,
                             config.simulation.export_frame_png,
-                            config.simulation.export_frame_tiff);
+                            config.simulation.export_frame_tiff,
+                            config.simulation.frame_intensity_hard_max);
     }
 
     if (exportPerturbCenterDebug) {
@@ -3610,7 +3650,8 @@ void CellUniverse::optimize(int frameIndex)
                             "perturb_debug/cell_centers",
                             framePath,
                             config.simulation.export_frame_png,
-                            config.simulation.export_frame_tiff);
+                            config.simulation.export_frame_tiff,
+                            config.simulation.frame_intensity_hard_max);
     }
 
     runPcaShapeFit();
@@ -3818,9 +3859,11 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
         std::filesystem::create_directories(synthTiffOutputPath);
 
         writeNapariFriendlyTiffStack(realTiffOutputPath + "/" + std::to_string(displayFrame) + ".tif",
-                                     realImages);
+                                     realImages,
+                                     config.simulation.frame_intensity_hard_max);
         writeNapariFriendlyTiffStack(synthTiffOutputPath + "/" + std::to_string(displayFrame) + ".tif",
-                                     synthImages);
+                                     synthImages,
+                                     config.simulation.frame_intensity_hard_max);
     }
 
     std::cout << "Done" << '\n';

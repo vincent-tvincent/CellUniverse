@@ -133,8 +133,8 @@ cell:
   # the push, while still damping random movement away from the bright core.
   randomPerturbBrightCoreGuideStrength: 0.75
 
-# Image preprocessing pipeline — iterative contrast enhancer ported from
-# scripts/image_processor_clean.py. No sigmoid.
+# Image preprocessing pipeline — fixed clamp/normalize, then the simplified
+# blur blend from the preprocessing experiment directory.
 simulation:
   iterations_per_cell: 250
   signal_guided_iterations_per_cell: 50
@@ -142,25 +142,11 @@ simulation:
   z_scaling: 7
   blur_sigma: 0.0 # 1.1
 
-  iterative_penalty: 0.1
-  iterative_penalty_range: 1.0
-  iterative_reward_gate: 0.5
-  iterative_reward_gate_step: 0.05
-  iterative_reward_gate_min: 0.1
-  iterative_reward: 0.2
-  iterative_reward_gate_learning_rate: 0.1
-  iterative_reward_gate_min_probability: 0.001
-  iterative_no_improvement_patience: 200
-  iterative_score_explosion_threshold: 5.0
+  # Guardrails used after optional cube pooling.
   iterative_candidate_max_mean: 0.40
   iterative_candidate_max_saturated_fraction: 0.3
-  iterative_reward_gate_seed: 12345
-  iterative_score_max: 0.6 # 0.6
-  iterative_score_target_tolerance: 0.05
-  iterative_max_count: 400
-  iterative_improvement_tolerance: 0.001
-  iterative_score_percentile: 1.0
 
+  # Used only for the diagnostic [PreprocessScores] log line.
   contrast_structure_threshold: 0.02
   contrast_background_floor: 0.02
   contrast_bright_fraction: 0.02
@@ -172,10 +158,14 @@ simulation:
   contrast_eps: 0.000001
 
   frame_intensity_normalization_enabled: true
-  frame_intensity_percentile_exclude_zeros: true
-  frame_intensity_scale_low_percentile: 0.05
-  frame_intensity_scale_high_percentile: 0.99
-  frame_intensity_hard_max: 512.0
+  frame_intensity_fixed_hard_max_scale: true
+  frame_intensity_hard_max: 65536.0
+
+  simple_preprocess_blur_sigma: 10.0
+  simple_preprocess_real_ratio: 0.5
+  simple_preprocess_background_factor: 1.5
+  # Python reference exports the original z pages without interpolation.
+  simple_preprocess_interpolate_z: true
 
   # Edge brightness alignment runs after preprocessing and samples a
   # frame-shaped region on each XY slice.
@@ -193,13 +183,12 @@ simulation:
   edge_brightness_alignment_bottom_offset: 0
   edge_brightness_alignment_max_shift: 0.20
 
-  # After all-frame brightness alignment, pixels below this normalized
-  # brightness are forced to black. Set <=0 to disable.
-  post_alignment_black_threshold: 0.045
+  # Disabled for the simplified reference pipeline. With fixed 65536 scaling,
+  # a threshold like 0.045 would erase all raw signal below ~2949.
+  post_alignment_black_threshold: 0.0
 
-  # After the fixed threshold above, each frame independently forces its
-  # lowest brightness percentile to black. Set <=0 to disable.
-  post_alignment_black_percentile: 0.975
+  # Disabled to match the Python preprocessing experiment.
+  post_alignment_black_percentile: 0.0
   # After the initial percentile blackoff, detect isolated nonzero 3D chunks
   # using 26-neighbor connectivity. A chunk is counted when each z/y/x
   # bounding-box dimension is in [min_size, max_size]. If too many chunks
@@ -218,15 +207,8 @@ simulation:
   # After adaptive chunk blackoff, remove isolated nonzero connected
   # components whose z/y/x bounding-box dimensions are all smaller than the
   # configured minimum cell diameters. Disabled by default.
-  post_alignment_tiny_particle_removal_enabled: true
-  preprocess_radius_batch_size: 8
-
-  post_process_blur_sigma: 0.0
-  post_process_final_blur_sigma: 2.5
-  post_process_final_direct_weight: 0.95
-  post_process_final_direct_amplification: 1.0
-  post_process_final_blurred_amplification: 0.5
-  post_alignment_final_blur_sigma: 1.25
+  post_alignment_tiny_particle_removal_enabled: false
+  post_alignment_final_blur_sigma: 0.0
 
   export_preprocessed_images: true
   # Debug signal-guidance localization. When true, exports two stacks per
@@ -241,8 +223,8 @@ simulation:
   export_perturb_cell_center_debug_images: true
   export_frame_png: false
   export_frame_tiff: true
-  quit_after_preprocessing: false
-  prepare_analyze_one_frame: true
+  quit_after_preprocessing: true
+  prepare_analyze_one_frame: false
   # When true, after a frame has been optimized and exported, release its
   # image-heavy stacks from memory while keeping cells, cached summaries,
   # checkpoints, and other state needed by later frames.

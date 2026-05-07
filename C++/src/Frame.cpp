@@ -1080,10 +1080,15 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
             cell.drawOutline(outputFrame, outlineIntensity, z);
         }
 
-        // Convert to 8-bit image if necessary
-        if (outputFrame.depth() != CV_8U)
+        // Preserve 16-bit dynamic range for 16-bit input/export settings.
+        if (outputFrame.depth() != CV_8U && outputFrame.depth() != CV_16U)
         {
-            outputFrame.convertTo(outputFrame, CV_8U, 255.0);
+            const float exportMaxBrightness =
+                simulationConfig.frame_intensity_hard_max > 0.0f
+                    ? simulationConfig.frame_intensity_hard_max
+                    : 255.0f;
+            const int exportDepth = exportMaxBrightness > 255.0f ? CV_16U : CV_8U;
+            outputFrame.convertTo(outputFrame, exportDepth, exportMaxBrightness);
         }
 
         realFrameWithOutlines.push_back(outputFrame);

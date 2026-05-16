@@ -12,6 +12,17 @@ SimulationConfig MakeFrameConfig(int zSlices) {
     cfg.z_scaling = 1.0f;
     return cfg;
 }
+
+void ConfigureFrameTestEllipsoidBounds() {
+    Ellipsoid::cellConfig.minARadius = 0.01;
+    Ellipsoid::cellConfig.maxARadius = 10.0;
+    Ellipsoid::cellConfig.minBRadius = 0.01;
+    Ellipsoid::cellConfig.maxBRadius = 10.0;
+    Ellipsoid::cellConfig.minCRadius = 0.01;
+    Ellipsoid::cellConfig.maxCRadius = 10.0;
+    Ellipsoid::cellConfig.minBrightness = 0.0;
+    Ellipsoid::cellConfig.maxBrightness = 1.0;
+}
 }
 
 TEST(FrameTest, CalculateCostReturnsZeroForIdenticalStacks) {
@@ -51,7 +62,8 @@ TEST(FrameTest, CalculateCostThrowsOnMismatchedStackSize) {
 }
 
 TEST(FrameTest, GenerateOutputSynthFrameConvertsFloatTo8Bit) {
-    const SimulationConfig cfg = MakeFrameConfig(1);
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.export_bit_depth = 8;
     std::vector<cv::Mat> real = {cv::Mat::zeros(3, 3, CV_32F)};
     Frame frame(real, cfg, {}, "", "f3");
     frame.setBackgroundColor(0.5f);
@@ -62,4 +74,133 @@ TEST(FrameTest, GenerateOutputSynthFrameConvertsFloatTo8Bit) {
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].type(), CV_8U);
     EXPECT_NEAR(static_cast<double>(out[0].at<unsigned char>(0, 0)), 128.0, 1.0);
+}
+
+TEST(FrameTest, GenerateOutputFrameUsesCustomRangeExportScale) {
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.export_bit_depth = 8;
+    std::vector<cv::Mat> real = {cv::Mat(1, 1, CV_32F, cv::Scalar(0.00144958f))};
+    Frame frame(real, cfg, {}, "", "range_real_export_scale");
+
+    const std::vector<cv::Mat> defaultOut = frame.generateOutputFrame();
+    const std::vector<cv::Mat> rangeScaledOut = frame.generateOutputFrame(65536.0f);
+
+    ASSERT_EQ(defaultOut.size(), 1U);
+    ASSERT_EQ(rangeScaledOut.size(), 1U);
+    EXPECT_EQ(defaultOut[0].type(), CV_8U);
+    EXPECT_EQ(rangeScaledOut[0].type(), CV_8U);
+    EXPECT_EQ(defaultOut[0].at<unsigned char>(0, 0), 0);
+    EXPECT_GT(rangeScaledOut[0].at<unsigned char>(0, 0), 0);
+}
+
+TEST(FrameTest, GenerateOutputSynthFrameUsesCustomRangeExportScale) {
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.export_bit_depth = 8;
+    std::vector<cv::Mat> real = {cv::Mat::zeros(3, 3, CV_32F)};
+    Frame frame(real, cfg, {}, "", "range_synth_export_scale");
+    frame.setBackgroundColor(0.00144958f);
+    frame.regenerateSynthFrame();
+
+    const std::vector<cv::Mat> defaultOut = frame.generateOutputSynthFrame();
+    const std::vector<cv::Mat> rangeScaledOut = frame.generateOutputSynthFrame(65536.0f);
+
+    ASSERT_EQ(defaultOut.size(), 1U);
+    ASSERT_EQ(rangeScaledOut.size(), 1U);
+    EXPECT_EQ(defaultOut[0].type(), CV_8U);
+    EXPECT_EQ(rangeScaledOut[0].type(), CV_8U);
+    EXPECT_EQ(defaultOut[0].at<unsigned char>(0, 0), 0);
+    EXPECT_GT(rangeScaledOut[0].at<unsigned char>(0, 0), 0);
+}
+
+TEST(FrameTest, GenerateSynthFrameAppliesBackgroundBrightnessFactor) {
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.synth_background_brightness_factor = 1.2f;
+    std::vector<cv::Mat> real = {cv::Mat::zeros(3, 3, CV_32F)};
+    Frame frame(real, cfg, {}, "", "synth_background_factor");
+    frame.setBackgroundColor(0.5f);
+
+    auto synth = frame.generateSynthFrame();
+
+    ASSERT_EQ(synth.size(), 1u);
+    EXPECT_NEAR(synth[0].at<float>(0, 0), 0.6f, 1e-6f);
+}
+
+TEST(FrameTest, GenerateSynthFrameUsesEmpiricalBackgroundNoise) {
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.synth_background_noise_enabled = true;
+    cfg.synth_background_noise_scale = 1.0f;
+    cfg.synth_background_noise_cell_mask_expand_factor = 1.0f;
+
+    cv::Mat slice(1, 2, CV_32F);
+    slice.at<float>(0, 0) = 0.4f;
+    slice.at<float>(0, 1) = 0.6f;
+    std::vector<cv::Mat> real = {slice};
+    Frame frame(real, cfg, {}, "", "noise_full");
+    frame.setBackgroundColor(0.5f);
+
+    auto synth = frame.generateSynthFrame();
+
+    ASSERT_EQ(synth.size(), 1u);
+    EXPECT_NEAR(synth[0].at<float>(0, 0), 0.4f, 1e-6f);
+    EXPECT_NEAR(synth[0].at<float>(0, 1), 0.6f, 1e-6f);
+}
+
+TEST(FrameTest, GenerateSynthFrameFastUsesEmpiricalBackgroundNoise) {
+    ConfigureFrameTestEllipsoidBounds();
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.synth_background_noise_enabled = true;
+    cfg.synth_background_noise_scale = 1.0f;
+    cfg.synth_background_noise_cell_mask_expand_factor = 1.0f;
+
+    cv::Mat slice(2, 2, CV_32F, cv::Scalar(0.5f));
+    slice.at<float>(0, 0) = 0.4f;
+    slice.at<float>(0, 1) = 0.6f;
+    std::vector<cv::Mat> real = {slice};
+
+    EllipsoidParams p("cell", 1.0f, 1.0f, 0.0f, 0.2f, 0.2f,
+                      0.0f, 0.0f, 0.0f, 0.9f);
+    Ellipsoid oldCell(p);
+    std::vector<Ellipsoid> cells = {oldCell};
+    Frame frame(real, cfg, cells, "", "noise_fast");
+    frame.setBackgroundColor(0.5f);
+    frame.regenerateSynthFrame();
+
+    EllipsoidParams moved = p;
+    moved.x = 1.0f;
+    moved.y = 1.0f;
+    Ellipsoid newCell(moved);
+    auto synth = frame.generateSynthFrameFast(oldCell, newCell);
+
+    ASSERT_EQ(synth.size(), 1u);
+    EXPECT_NEAR(synth[0].at<float>(0, 0), 0.4f, 1e-6f);
+    EXPECT_NEAR(synth[0].at<float>(0, 1), 0.6f, 1e-6f);
+}
+
+TEST(FrameTest, GenerateSynthFrameUsesRandomGaussianBackgroundNoise) {
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.synth_background_noise_enabled = true;
+    cfg.synth_background_noise_mode = "random_gaussian";
+    cfg.synth_background_noise_scale = 1.0f;
+    cfg.synth_background_noise_seed = 7;
+
+    cv::Mat slice(1, 9, CV_32F);
+    for (int x = 0; x < slice.cols; ++x) {
+        slice.at<float>(0, x) = 0.5f + 0.01f * static_cast<float>(x - 4);
+    }
+    std::vector<cv::Mat> real = {slice};
+    Frame frame(real, cfg, {}, "", "noise_random_gaussian");
+    frame.setBackgroundColor(0.5f);
+
+    auto synth = frame.generateSynthFrame();
+
+    ASSERT_EQ(synth.size(), 1u);
+    bool anyDifferentFromBackground = false;
+    for (int x = 0; x < synth[0].cols; ++x) {
+        const float v = synth[0].at<float>(0, x);
+        EXPECT_GE(v, 0.0f);
+        EXPECT_LE(v, 1.0f);
+        anyDifferentFromBackground =
+            anyDifferentFromBackground || std::abs(v - 0.5f) > 1e-6f;
+    }
+    EXPECT_TRUE(anyDifferentFromBackground);
 }

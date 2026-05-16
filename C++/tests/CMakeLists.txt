@@ -22,6 +22,7 @@ add_executable(core_unit_test
         interpolate_test.cc
         frame_test.cc
         process_image_test.cc
+        range_preprocessor_test.cc
         spheroid_test.cc
         spheroid_params_test.cc
         spheroid_rotation_test.cc
@@ -30,6 +31,7 @@ add_executable(core_unit_test
         ${CMAKE_SOURCE_DIR}/src/Frame.cpp
         ${CMAKE_SOURCE_DIR}/src/CellUniverse.cpp
         ${CMAKE_SOURCE_DIR}/src/ImageHandler.cpp
+        ${CMAKE_SOURCE_DIR}/src/RangePreprocessor.cpp
         ${CMAKE_SOURCE_DIR}/src/Ellipsoid.cpp
 )
 

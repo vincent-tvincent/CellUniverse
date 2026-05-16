@@ -106,6 +106,7 @@ add_executable(${PROJECT_NAME}
         ${cwd}/src/CellUniverse.cpp
         ${cwd}/src/Frame.cpp
         ${cwd}/src/ImageHandler.cpp
+        ${cwd}/src/RangePreprocessor.cpp
         ${cwd}/src/LineageViewer.cpp
         ${cwd}/src/Ellipsoid.cpp
 )

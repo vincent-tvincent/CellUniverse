@@ -80,6 +80,18 @@ std::vector<cv::Mat> makeSyntheticFrame(int width, int height, int depth,
     return stack;
 }
 
+void ensureCalibrationTestEllipsoidBounds() {
+    Ellipsoid::cellConfig.minARadius = 1.0;
+    Ellipsoid::cellConfig.maxARadius = 200.0;
+    Ellipsoid::cellConfig.minBRadius = 1.0;
+    Ellipsoid::cellConfig.maxBRadius = 200.0;
+    Ellipsoid::cellConfig.minCRadius = 1.0;
+    Ellipsoid::cellConfig.maxCRadius = 200.0;
+    Ellipsoid::cellConfig.maxZ = 1000.0f;
+    Ellipsoid::cellConfig.minBrightness = 0.0;
+    Ellipsoid::cellConfig.maxBrightness = 1.0;
+}
+
 }  // namespace
 
 TEST(InitializeBrightnessCalibrationTest, RecoversBackgroundAndCellMediansFromSyntheticFrame) {
@@ -101,6 +113,7 @@ TEST(InitializeBrightnessCalibrationTest, RecoversBackgroundAndCellMediansFromSy
     p.aRadius = radius; p.bRadius = radius; p.cRadius = radius;
     p.theta_x = 0; p.theta_y = 0; p.theta_z = 0;
     p.brightness = 1.0f;
+    ensureCalibrationTestEllipsoidBounds();
     std::vector<Ellipsoid> cells{ Ellipsoid(p) };
 
     BrightnessCalibration cal = CellUniverse::computeAutoCalibration(cells, frame, cfg);
@@ -125,6 +138,7 @@ TEST(InitializeBrightnessCalibrationTest, ManualOverrideBypassesAutoDetection) {
     p.aRadius = 5; p.bRadius = 5; p.cRadius = 5;
     p.theta_x = 0; p.theta_y = 0; p.theta_z = 0;
     p.brightness = 1.0f;
+    ensureCalibrationTestEllipsoidBounds();
     std::vector<Ellipsoid> cells{ Ellipsoid(p) };
 
     BrightnessCalibration cal = CellUniverse::computeAutoCalibration(cells, frame, cfg);
@@ -174,6 +188,7 @@ TEST(ManualOverrideEndToEndTest, ManualValuesPassThroughPreprocessing) {
     cfg.simulation.manual_cell_intensity = 800.0f;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
 
     auto cal = CellUniverse::computeAutoCalibration({}, {}, cfg);
@@ -208,6 +223,7 @@ TEST(BrightnessCalibrationTest, AutoCalibrationStoresFrameZeroMean) {
     p.aRadius = 10.0f; p.bRadius = 10.0f; p.cRadius = 10.0f;
     p.theta_x = 0; p.theta_y = 0; p.theta_z = 0;
     p.brightness = 1.0f;
+    ensureCalibrationTestEllipsoidBounds();
     std::vector<Ellipsoid> cells{ Ellipsoid(p) };
 
     BrightnessCalibration cal = CellUniverse::computeAutoCalibration(cells, frame, cfg);

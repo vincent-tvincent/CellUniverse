@@ -1,5 +1,6 @@
 #include "../includes/CellUniverse.hpp"
 #include "../includes/ImageHandler.hpp"
+#include "../includes/RangePreprocessor.hpp"
 #include <set>
 #include <cmath>
 #include <algorithm>
@@ -127,7 +128,8 @@ static int cvDepthForExportBitDepth(int bitDepth)
 }
 
 static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice,
-                                           int exportBitDepth = 16)
+                                           int exportBitDepth = 16,
+                                           float normalizedExportMaxBrightness = -1.0f)
 {
     if (slice.empty()) {
         return {};
@@ -157,7 +159,9 @@ static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice,
             gray.convertTo(output, cvDepthForExportBitDepth(exportBitDepth), scale);
         }
     } else {
-        const float exportMaxBrightness = exportMaxForBitDepth(exportBitDepth);
+        const float exportMaxBrightness = normalizedExportMaxBrightness > 0.0f
+            ? normalizedExportMaxBrightness
+            : exportMaxForBitDepth(exportBitDepth);
         const int exportDepth = cvDepthForExportBitDepth(exportBitDepth);
         cv::Mat clipped = gray.clone();
         cv::patchNaNs(clipped, 0.0);
@@ -169,7 +173,8 @@ static cv::Mat makeNapariFriendlyTiffSlice(const cv::Mat &slice,
 }
 
 static cv::Mat makeNormalizedExportSlice(const cv::Mat &slice,
-                                         int exportBitDepth = 16)
+                                         int exportBitDepth = 16,
+                                         float normalizedExportMaxBrightness = -1.0f)
 {
     if (slice.empty()) {
         return {};
@@ -187,7 +192,9 @@ static cv::Mat makeNormalizedExportSlice(const cv::Mat &slice,
         return converted;
     }
 
-    const float exportMaxBrightness = exportMaxForBitDepth(exportBitDepth);
+    const float exportMaxBrightness = normalizedExportMaxBrightness > 0.0f
+        ? normalizedExportMaxBrightness
+        : exportMaxForBitDepth(exportBitDepth);
     const int exportDepth = cvDepthForExportBitDepth(exportBitDepth);
 
     cv::Mat clipped = slice.clone();
@@ -201,14 +208,16 @@ static cv::Mat makeNormalizedExportSlice(const cv::Mat &slice,
 }
 
 static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Mat> &stack,
-                                                        int exportBitDepth = 16)
+                                                        int exportBitDepth = 16,
+                                                        float normalizedExportMaxBrightness = -1.0f)
 {
     std::vector<cv::Mat> output;
     output.reserve(stack.size());
 
     cv::Size expectedSize;
     for (const auto &slice : stack) {
-        cv::Mat converted = makeNapariFriendlyTiffSlice(slice, exportBitDepth);
+        cv::Mat converted = makeNapariFriendlyTiffSlice(
+            slice, exportBitDepth, normalizedExportMaxBrightness);
         if (converted.empty()) {
             continue;
         }
@@ -228,9 +237,11 @@ static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Ma
 
 static void writeNapariFriendlyTiffStack(const std::string &path,
                                          const std::vector<cv::Mat> &stack,
-                                         int exportBitDepth = 16)
+                                         int exportBitDepth = 16,
+                                         float normalizedExportMaxBrightness = -1.0f)
 {
-    std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(stack, exportBitDepth);
+    std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(
+        stack, exportBitDepth, normalizedExportMaxBrightness);
     const std::vector<int> params = {
         cv::IMWRITE_TIFF_COMPRESSION, 1 // COMPRESSION_NONE: easiest for TIFF readers.
     };
@@ -637,10 +648,11 @@ static std::vector<cv::Mat> buildSignalMapStack(const std::vector<cv::Mat> &real
                                                 const fs::path &framePath,
                                                 std::ostream &log)
 {
-    std::vector<cv::Mat> signalMap = cloneMatStack(realFrame);
-    if (!simulation.signal_map_enabled || signalMap.empty()) {
+    if (!simulation.signal_map_enabled || realFrame.empty()) {
         return {};
     }
+
+    std::vector<cv::Mat> signalMap = cloneMatStack(realFrame);
 
     std::vector<float> nonzeroValues;
     for (const auto &slice : realFrame) {
@@ -715,6 +727,12 @@ static std::vector<cv::Mat> buildSignalMapStack(const std::vector<cv::Mat> &real
         << " threshold=" << threshold
         << std::endl;
     return signalMap;
+}
+
+static bool shouldBuildSignalMapForOptimization(const SimulationConfig &simulation)
+{
+    return simulation.signal_map_enabled &&
+           simulation.signal_map_perturb_guidance_enabled;
 }
 
 struct BlackPercentileResult
@@ -1206,7 +1224,8 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
                                 const fs::path &framePath,
                                 bool exportPng,
                                 bool exportTiff,
-                                int exportBitDepth = 16)
+                                int exportBitDepth = 16,
+                                float normalizedExportMaxBrightness = -1.0f)
 {
     const fs::path outputDir = baseOutputDir / subdir;
 
@@ -1219,7 +1238,8 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
                 continue;
             }
 
-            cv::Mat outputImage = makeNormalizedExportSlice(stack[i], exportBitDepth);
+            cv::Mat outputImage = makeNormalizedExportSlice(
+                stack[i], exportBitDepth, normalizedExportMaxBrightness);
 
             const fs::path outputFile = frameOutputDir / (std::to_string(i) + ".png");
             cv::imwrite(outputFile.string(), outputImage);
@@ -1229,7 +1249,8 @@ static void exportStackToSubdir(const std::vector<cv::Mat> &stack,
     if (exportTiff) {
         fs::create_directories(outputDir);
         const fs::path outputFile = outputDir / (framePath.stem().string() + ".tif");
-        writeNapariFriendlyTiffStack(outputFile.string(), stack, exportBitDepth);
+        writeNapariFriendlyTiffStack(
+            outputFile.string(), stack, exportBitDepth, normalizedExportMaxBrightness);
     }
 }
 
@@ -1238,10 +1259,19 @@ static void exportPreprocessedStack(const std::vector<cv::Mat> &stack,
                                     const fs::path &framePath,
                                     bool exportPng,
                                     bool exportTiff,
-                                    int exportBitDepth = 16)
+                                    int exportBitDepth = 16,
+                                    float normalizedExportMaxBrightness = -1.0f)
 {
     exportStackToSubdir(stack, baseOutputDir, "preprocessed", framePath,
-                        exportPng, exportTiff, exportBitDepth);
+                        exportPng, exportTiff, exportBitDepth,
+                        normalizedExportMaxBrightness);
+}
+
+static float preprocessedExportMaxForConfig(const SimulationConfig &simulationConfig)
+{
+    return simulationConfig.range_preprocess_enabled
+        ? simulationConfig.range_preprocess_export_max_brightness
+        : -1.0f;
 }
 
 static std::vector<cv::Mat> makeEmptyDebugStackLike(const std::vector<cv::Mat> &realFrame)
@@ -1827,10 +1857,10 @@ static void exportSignalDebugStacks(const std::vector<cv::Mat> &realFrame,
                         config.simulation.export_bit_depth);
 }
 
-static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
+static float estimateAdaptiveBackgroundFromStack(const std::vector<cv::Mat> &realFrame,
+                                                 const std::vector<Ellipsoid> &cells,
                                                  const SimulationConfig &simulationConfig)
 {
-    const auto &realFrame = frame.getRealFrame();
     if (realFrame.empty()) {
         return 0.0f;  // post-sigmoid background invariant
     }
@@ -1842,7 +1872,7 @@ static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
         exclusionMask.emplace_back(cv::Mat::zeros(slice.size(), CV_32F));
     }
 
-    for (const auto &cell : frame.cells) {
+    for (const auto &cell : cells) {
         auto params = cell.getCellParams();
         params.aRadius *= expandFactor;
         params.bRadius     *= expandFactor;
@@ -1873,6 +1903,20 @@ static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
     }
 
     return computeMeanOfTopFraction(backgroundCandidates, simulationConfig.adaptive_background_top_fraction);
+}
+
+static float estimateAdaptiveBackgroundFromFrame(const Frame &frame,
+                                                 const SimulationConfig &simulationConfig)
+{
+    return estimateAdaptiveBackgroundFromStack(
+        frame.getRealFrame(), frame.cells, simulationConfig);
+}
+
+static bool shouldInitializeRuntimeBackground(int frameIndex,
+                                              const SimulationConfig &simulationConfig)
+{
+    return frameIndex == 0 &&
+           simulationConfig.auto_calibrate_runtime_background_enabled;
 }
 
 static std::size_t countBackgroundVoxelsAfterCells(const Frame &frame,
@@ -1994,12 +2038,21 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
     if (!config.simulation.quit_after_preprocessing) {
         std::ostringstream probeRaw, probePre;
         std::vector<cv::Mat> probe = ImageHandler::loadRawFrame(
-            imagePaths.front().string(), config, &probeRaw);
-        if (config.simulation.frame_intensity_normalization_enabled) {
+            imagePaths.front().string(), config, &probeRaw,
+            !(config.simulation.range_preprocess_enabled &&
+              config.simulation.range_preprocess_bypass_load_blur));
+        if (config.simulation.range_preprocess_enabled) {
+            RangePreprocessStats rangeStats;
+            probe = RangePreprocessor::apply(
+                probe, config, imagePaths.front().string(), &rangeStats, &probePre);
+        } else if (config.simulation.frame_intensity_normalization_enabled) {
             normalizeStackToFrameIntensity(probe, config.simulation);
+            probe = ImageHandler::preprocessLoadedFrame(
+                probe, imagePaths.front().string(), config, &brightnessCalibration, &probePre);
+        } else {
+            probe = ImageHandler::preprocessLoadedFrame(
+                probe, imagePaths.front().string(), config, &brightnessCalibration, &probePre);
         }
-        probe = ImageHandler::preprocessLoadedFrame(
-            probe, imagePaths.front().string(), config, &brightnessCalibration, &probePre);
         config.simulation.z_slices = static_cast<int>(probe.size());
         Ellipsoid::cellConfig.maxZ = static_cast<float>(probe.size()) - 1.0f;
         std::cout << "[M2 Probe] post-preprocess z_slices=" << probe.size()
@@ -2047,43 +2100,62 @@ void CellUniverse::prepareFrame(int frameIndex)
     std::ostringstream preprocessLog;
     std::vector<cv::Mat> real_frame =
         ImageHandler::loadRawFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
-                                   config, &rawLog);
+                                   config, &rawLog,
+                                   !(config.simulation.range_preprocess_enabled &&
+                                     config.simulation.range_preprocess_bypass_load_blur));
     std::cout << rawLog.str();
     const auto tLoadEnd = TClock::now();
 
-    // Skip the percentile-based intensity normalization when auto-calibration
-    // is active and valid — calibration anchors were measured against the
-    // RAW frame, so the calibrated preprocess path expects raw input. Running
-    // normalize first would map raw->normalized, then the calibration anchors
-    // would mismatch and clip everything to 0. Constructor's M2 probe runs
-    // before calibration is installed (Uninitialized), so legacy normalize
-    // still runs there.
-    const bool calibratedActive = config.simulation.auto_calibrate_brightness_enabled
-        && brightnessCalibration.isValid();
-    if (config.simulation.frame_intensity_normalization_enabled && !calibratedActive) {
-        const auto [lowReference, highReference] =
-            normalizeStackToFrameIntensity(real_frame, config.simulation);
+    const bool rangePreprocessActive = config.simulation.range_preprocess_enabled;
+    if (rangePreprocessActive) {
         std::cout << "[Frame Intensity Scale] frame="
                   << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " mean=" << computeStackMean(real_frame)
-                  << " low_ref=" << lowReference
-                  << " high_ref=" << highReference
-                  << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
-    } else {
-        std::cout << "[Frame Intensity Scale] frame="
-                  << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " enabled=" << (calibratedActive ? "skipped_for_calibration" : "0")
+                  << " enabled=skipped_for_range_preprocess"
                   << " mean=" << computeStackMean(real_frame)
                   << '\n';
+        RangePreprocessStats rangeStats;
+        real_frame = RangePreprocessor::apply(
+            real_frame,
+            config,
+            imagePaths[static_cast<size_t>(frameIndex)].string(),
+            &rangeStats,
+            &preprocessLog);
+    } else {
+        // Skip percentile-based intensity normalization only when the calibrated
+        // dynamic-range remap is active. If auto-calibration is measuring anchors
+        // only, keep the normal/global preprocessing scale.
+        const bool calibratedActive = config.simulation.auto_calibrate_brightness_enabled
+            && config.simulation.calibrated_preprocess_dynamic_range_enabled
+            && brightnessCalibration.isValid();
+        if (config.simulation.frame_intensity_normalization_enabled && !calibratedActive) {
+            const auto [lowReference, highReference] =
+                normalizeStackToFrameIntensity(real_frame, config.simulation);
+            std::cout << "[Frame Intensity Scale] frame="
+                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                      << " mean=" << computeStackMean(real_frame)
+                      << " low_ref=" << lowReference
+                      << " high_ref=" << highReference
+                      << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
+        } else {
+            std::cout << "[Frame Intensity Scale] frame="
+                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                      << " enabled=" << (calibratedActive ? "skipped_for_calibration" : "0")
+                      << " mean=" << computeStackMean(real_frame)
+                      << '\n';
+        }
+
+        real_frame = ImageHandler::preprocessLoadedFrame(
+            real_frame,
+            imagePaths[static_cast<size_t>(frameIndex)].string(),
+            config, &brightnessCalibration, &preprocessLog);
     }
 
-    real_frame = ImageHandler::preprocessLoadedFrame(
-        real_frame,
-        imagePaths[static_cast<size_t>(frameIndex)].string(),
-        config, &brightnessCalibration, &preprocessLog);
     std::cout << preprocessLog.str();
     const auto tPreprocessEnd = TClock::now();
-    if (config.simulation.edge_brightness_alignment_enabled &&
+    const bool skipLegacyPostprocess =
+        rangePreprocessActive && config.simulation.range_preprocess_skip_legacy_postprocess;
+    if (!skipLegacyPostprocess &&
+        config.simulation.edge_brightness_alignment_enabled &&
         !edgeBrightnessAlignmentTargetInitialized) {
         edgeBrightnessAlignmentTarget =
             computeEdgeBrightnessMean(real_frame, config.simulation);
@@ -2092,39 +2164,49 @@ void CellUniverse::prepareFrame(int frameIndex)
                   << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
                   << " target=" << edgeBrightnessAlignmentTarget << '\n';
     }
-    alignStackToEdgeBrightness(real_frame,
-                               config.simulation,
-                               edgeBrightnessAlignmentTarget,
-                               imagePaths[static_cast<size_t>(frameIndex)],
-                               std::cout);
-    blackThresholdStackAfterAlignment(real_frame,
-                                      config.simulation,
-                                      imagePaths[static_cast<size_t>(frameIndex)],
-                                      std::cout);
-    const std::vector<cv::Mat> unblackoffedFrame = cloneMatStack(real_frame);
-    blackPercentileStackAfterAlignment(real_frame,
-                                       config.simulation,
-                                       imagePaths[static_cast<size_t>(frameIndex)],
-                                       std::cout);
-    adaptBlackPercentileToChunkCount(real_frame,
-                                     unblackoffedFrame,
-                                     config.simulation,
-                                     imagePaths[static_cast<size_t>(frameIndex)],
-                                     std::cout);
-    removeTinyIsolatedParticles(real_frame,
-                                config,
-                                imagePaths[static_cast<size_t>(frameIndex)],
-                                std::cout);
-    applyFinalPreprocessingBlur(real_frame,
-                                config.simulation,
-                                imagePaths[static_cast<size_t>(frameIndex)],
-                                std::cout);
+    if (!skipLegacyPostprocess) {
+        alignStackToEdgeBrightness(real_frame,
+                                   config.simulation,
+                                   edgeBrightnessAlignmentTarget,
+                                   imagePaths[static_cast<size_t>(frameIndex)],
+                                   std::cout);
+        blackThresholdStackAfterAlignment(real_frame,
+                                          config.simulation,
+                                          imagePaths[static_cast<size_t>(frameIndex)],
+                                          std::cout);
+        const std::vector<cv::Mat> unblackoffedFrame = cloneMatStack(real_frame);
+        blackPercentileStackAfterAlignment(real_frame,
+                                           config.simulation,
+                                           imagePaths[static_cast<size_t>(frameIndex)],
+                                           std::cout);
+        adaptBlackPercentileToChunkCount(real_frame,
+                                         unblackoffedFrame,
+                                         config.simulation,
+                                         imagePaths[static_cast<size_t>(frameIndex)],
+                                         std::cout);
+        removeTinyIsolatedParticles(real_frame,
+                                    config,
+                                    imagePaths[static_cast<size_t>(frameIndex)],
+                                    std::cout);
+        applyFinalPreprocessingBlur(real_frame,
+                                    config.simulation,
+                                    imagePaths[static_cast<size_t>(frameIndex)],
+                                    std::cout);
+    } else {
+        std::cout << "[RangePreprocess] frame="
+                  << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                  << " legacy_postprocess=skipped"
+                  << '\n';
+    }
     const auto tPostProcEnd = TClock::now();
-    std::vector<cv::Mat> signalMap = buildSignalMapStack(
-        real_frame,
-        config.simulation,
-        imagePaths[static_cast<size_t>(frameIndex)],
-        std::cout);
+    std::vector<cv::Mat> signalMap;
+    if (shouldBuildSignalMapForOptimization(config.simulation)) {
+        signalMap = buildSignalMapStack(
+            real_frame,
+            config.simulation,
+            imagePaths[static_cast<size_t>(frameIndex)],
+            std::cout);
+    }
     const auto tSignalMapEnd = TClock::now();
 
     if (config.simulation.export_preprocessed_images) {
@@ -2132,14 +2214,26 @@ void CellUniverse::prepareFrame(int frameIndex)
                                 imagePaths[static_cast<size_t>(frameIndex)],
                                 config.simulation.export_frame_png,
                                 config.simulation.export_frame_tiff,
-                                config.simulation.export_bit_depth);
+                                config.simulation.export_bit_depth,
+                                preprocessedExportMaxForConfig(config.simulation));
+    }
+
+    Frame &frame = frames[static_cast<size_t>(frameIndex)];
+    if (shouldInitializeRuntimeBackground(frameIndex, config.simulation)) {
+        const float initializedBackground = estimateAdaptiveBackgroundFromStack(
+            real_frame, frame.cells, config.simulation);
+        frame.setBackgroundColor(initializedBackground);
+        std::cout << "[Runtime Background Init] frame=" << (firstFrame + frameIndex)
+                  << " background=" << initializedBackground
+                  << " source=preprocessed_frame_background"
+                  << '\n';
     }
 
     // loadImageStacks already generates _synthFrame + refreshes the full-image
     // cost cache. The previous `if (config.cell) regenerateSynthFrame()` was
     // redundant work (2x render + 2x cost cache per frame).
-    frames[frameIndex].loadImageStacks(real_frame);
-    frames[frameIndex].setSignalMap(std::move(signalMap));
+    frame.loadImageStacks(real_frame);
+    frame.setSignalMap(std::move(signalMap));
     prepareSignalCentersForFrame(frameIndex, real_frame, true);
     const auto tEnd = TClock::now();
 
@@ -2475,6 +2569,43 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
     float minimumSampledBackground = std::numeric_limits<float>::infinity();
     const int frameCount = static_cast<int>(imagePaths.size());
     const bool alignmentEnabled = config.simulation.edge_brightness_alignment_enabled;
+    auto finalizeFrameStack = [&](int frameIndex, std::vector<cv::Mat> &stack) {
+        std::vector<cv::Mat> signalMap;
+        if (loadIntoFrames && shouldBuildSignalMapForOptimization(config.simulation)) {
+            signalMap = buildSignalMapStack(
+                stack,
+                config.simulation,
+                imagePaths[static_cast<size_t>(frameIndex)],
+                std::cout);
+        }
+
+        if (config.simulation.export_preprocessed_images) {
+            exportPreprocessedStack(stack, fs::path(outputPath),
+                                    imagePaths[static_cast<size_t>(frameIndex)],
+                                    config.simulation.export_frame_png,
+                                    config.simulation.export_frame_tiff,
+                                    config.simulation.export_bit_depth,
+                                    preprocessedExportMaxForConfig(config.simulation));
+        }
+
+        if (loadIntoFrames) {
+            Frame &frame = frames[static_cast<size_t>(frameIndex)];
+            if (shouldInitializeRuntimeBackground(frameIndex, config.simulation)) {
+                const float initializedBackground = estimateAdaptiveBackgroundFromStack(
+                    stack, frame.cells, config.simulation);
+                frame.setBackgroundColor(initializedBackground);
+                std::cout << "[Runtime Background Init] frame=" << (firstFrame + frameIndex)
+                          << " background=" << initializedBackground
+                          << " source=preprocessed_frame_background"
+                          << '\n';
+            }
+            frame.loadImageStacks(stack);
+            frame.setSignalMap(std::move(signalMap));
+            prepareSignalCentersForFrame(frameIndex, stack, true);
+        } else if (config.simulation.export_signal_debug_images) {
+            prepareSignalCentersForFrame(frameIndex, stack, false);
+        }
+    };
 
     for (int frameIndex = 0; frameIndex < frameCount; ++frameIndex)
     {
@@ -2483,37 +2614,66 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
         std::vector<cv::Mat> realFrame =
             ImageHandler::loadRawFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
                                        config,
-                                       &rawLog);
+                                       &rawLog,
+                                       !(config.simulation.range_preprocess_enabled &&
+                                         config.simulation.range_preprocess_bypass_load_blur));
         std::cout << rawLog.str();
 
-        // See "calibratedActive" comment at the prepareFrame call site —
-        // skip percentile-based normalization when calibrated path is active.
-        const bool calibratedActiveLocal = config.simulation.auto_calibrate_brightness_enabled
-            && brightnessCalibration.isValid();
-        if (config.simulation.frame_intensity_normalization_enabled && !calibratedActiveLocal) {
-            const auto [lowReference, highReference] =
-                normalizeStackToFrameIntensity(realFrame, config.simulation);
+        const bool rangePreprocessActive = config.simulation.range_preprocess_enabled;
+        if (rangePreprocessActive) {
             std::cout << "[Frame Intensity Scale] frame="
                       << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                      << " mean=" << computeStackMean(realFrame)
-                      << " low_ref=" << lowReference
-                      << " high_ref=" << highReference
-                      << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
-        } else {
-            std::cout << "[Frame Intensity Scale] frame="
-                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                      << " enabled=0"
+                      << " enabled=skipped_for_range_preprocess"
                       << " mean=" << computeStackMean(realFrame)
                       << '\n';
+            RangePreprocessStats rangeStats;
+            realFrame = RangePreprocessor::apply(
+                realFrame,
+                config,
+                imagePaths[static_cast<size_t>(frameIndex)].string(),
+                &rangeStats,
+                &preprocessLog);
+        } else {
+            // See "calibratedActive" comment at the prepareFrame call site.
+            const bool calibratedActiveLocal = config.simulation.auto_calibrate_brightness_enabled
+                && config.simulation.calibrated_preprocess_dynamic_range_enabled
+                && brightnessCalibration.isValid();
+            if (config.simulation.frame_intensity_normalization_enabled && !calibratedActiveLocal) {
+                const auto [lowReference, highReference] =
+                    normalizeStackToFrameIntensity(realFrame, config.simulation);
+                std::cout << "[Frame Intensity Scale] frame="
+                          << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                          << " mean=" << computeStackMean(realFrame)
+                          << " low_ref=" << lowReference
+                          << " high_ref=" << highReference
+                          << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
+            } else {
+                std::cout << "[Frame Intensity Scale] frame="
+                          << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                          << " enabled=0"
+                          << " mean=" << computeStackMean(realFrame)
+                          << '\n';
+            }
+
+            realFrame = ImageHandler::preprocessLoadedFrame(
+                realFrame,
+                imagePaths[static_cast<size_t>(frameIndex)].string(),
+                config,
+                &brightnessCalibration,
+                &preprocessLog);
         }
 
-        realFrame = ImageHandler::preprocessLoadedFrame(
-            realFrame,
-            imagePaths[static_cast<size_t>(frameIndex)].string(),
-            config,
-            &brightnessCalibration,
-            &preprocessLog);
         std::cout << preprocessLog.str();
+
+        if (rangePreprocessActive &&
+            config.simulation.range_preprocess_skip_legacy_postprocess) {
+            std::cout << "[RangePreprocess] frame="
+                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                      << " legacy_postprocess=skipped"
+                      << '\n';
+            finalizeFrameStack(frameIndex, realFrame);
+            continue;
+        }
 
         if (!alignmentEnabled) {
             blackThresholdStackAfterAlignment(realFrame,
@@ -2538,23 +2698,37 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                                         config.simulation,
                                         imagePaths[static_cast<size_t>(frameIndex)],
                                         std::cout);
-            std::vector<cv::Mat> signalMap = buildSignalMapStack(
-                realFrame,
-                config.simulation,
-                imagePaths[static_cast<size_t>(frameIndex)],
-                std::cout);
+            std::vector<cv::Mat> signalMap;
+            if (loadIntoFrames && shouldBuildSignalMapForOptimization(config.simulation)) {
+                signalMap = buildSignalMapStack(
+                    realFrame,
+                    config.simulation,
+                    imagePaths[static_cast<size_t>(frameIndex)],
+                    std::cout);
+            }
 
             if (config.simulation.export_preprocessed_images) {
                 exportPreprocessedStack(realFrame, fs::path(outputPath),
                                         imagePaths[static_cast<size_t>(frameIndex)],
                                         config.simulation.export_frame_png,
                                         config.simulation.export_frame_tiff,
-                                        config.simulation.export_bit_depth);
+                                        config.simulation.export_bit_depth,
+                                        preprocessedExportMaxForConfig(config.simulation));
             }
 
             if (loadIntoFrames) {
-                frames[static_cast<size_t>(frameIndex)].loadImageStacks(realFrame);
-                frames[static_cast<size_t>(frameIndex)].setSignalMap(std::move(signalMap));
+                Frame &frame = frames[static_cast<size_t>(frameIndex)];
+                if (shouldInitializeRuntimeBackground(frameIndex, config.simulation)) {
+                    const float initializedBackground = estimateAdaptiveBackgroundFromStack(
+                        realFrame, frame.cells, config.simulation);
+                    frame.setBackgroundColor(initializedBackground);
+                    std::cout << "[Runtime Background Init] frame=" << (firstFrame + frameIndex)
+                              << " background=" << initializedBackground
+                              << " source=preprocessed_frame_background"
+                              << '\n';
+                }
+                frame.loadImageStacks(realFrame);
+                frame.setSignalMap(std::move(signalMap));
                 prepareSignalCentersForFrame(frameIndex, realFrame, true);
             } else if (config.simulation.export_signal_debug_images) {
                 prepareSignalCentersForFrame(frameIndex, realFrame, false);
@@ -2576,6 +2750,11 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                   << " sampled_background=" << sampledBackground
                   << " pending_minimum_background=1"
                   << std::endl;
+    }
+
+    if (config.simulation.range_preprocess_enabled &&
+        config.simulation.range_preprocess_skip_legacy_postprocess) {
+        return;
     }
 
     if (!alignmentEnabled) {
@@ -2624,23 +2803,37 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
                                     config.simulation,
                                     imagePaths[static_cast<size_t>(frameIndex)],
                                     std::cout);
-        std::vector<cv::Mat> signalMap = buildSignalMapStack(
-            item.stack,
-            config.simulation,
-            imagePaths[static_cast<size_t>(frameIndex)],
-            std::cout);
+        std::vector<cv::Mat> signalMap;
+        if (loadIntoFrames && shouldBuildSignalMapForOptimization(config.simulation)) {
+            signalMap = buildSignalMapStack(
+                item.stack,
+                config.simulation,
+                imagePaths[static_cast<size_t>(frameIndex)],
+                std::cout);
+        }
 
         if (config.simulation.export_preprocessed_images) {
             exportPreprocessedStack(item.stack, fs::path(outputPath),
                                     imagePaths[static_cast<size_t>(frameIndex)],
                                     config.simulation.export_frame_png,
                                     config.simulation.export_frame_tiff,
-                                    config.simulation.export_bit_depth);
+                                    config.simulation.export_bit_depth,
+                                    preprocessedExportMaxForConfig(config.simulation));
         }
 
         if (loadIntoFrames) {
-            frames[static_cast<size_t>(frameIndex)].loadImageStacks(item.stack);
-            frames[static_cast<size_t>(frameIndex)].setSignalMap(std::move(signalMap));
+            Frame &frame = frames[static_cast<size_t>(frameIndex)];
+            if (shouldInitializeRuntimeBackground(frameIndex, config.simulation)) {
+                const float initializedBackground = estimateAdaptiveBackgroundFromStack(
+                    item.stack, frame.cells, config.simulation);
+                frame.setBackgroundColor(initializedBackground);
+                std::cout << "[Runtime Background Init] frame=" << (firstFrame + frameIndex)
+                          << " background=" << initializedBackground
+                          << " source=preprocessed_frame_background"
+                          << '\n';
+            }
+            frame.loadImageStacks(item.stack);
+            frame.setSignalMap(std::move(signalMap));
             prepareSignalCentersForFrame(frameIndex, item.stack, true);
         } else if (config.simulation.export_signal_debug_images) {
             prepareSignalCentersForFrame(frameIndex, item.stack, false);
@@ -3144,12 +3337,116 @@ void CellUniverse::optimize(int frameIndex)
             if (!buf.empty()) std::cout << buf;
         }
 
-        // PCA-bridge discovery moved out of this end-of-frame lambda — it
-        // now runs BEFORE the main split loop (see "PCA Bridge Propose"
-        // block earlier in optimize()), so its (left, right) daughter
-        // centroids can be injected as a "bridge_primary" candidate into
-        // trySplitCellPhased and validated by the main path's full gate
-        // stack instead of an independent accepting path.
+        // Optional restored black-bridge shortcut during shape fitting.
+        //
+        // The normal PCA-bridge path runs before the main split loop using
+        // previous-frame fitted shapes. This shortcut runs immediately after
+        // the current frame's PCA shape fit, so a false-long parent with a
+        // dark bridge can split before the fitted oversized shape is captured
+        // into the next frame's snapshot/reference state. It still routes
+        // through trySplitCellPhased, so burn-in, bio gates, overlap, bridge,
+        // and image-cost validation remain in force.
+        if (allowSplits &&
+            config.prob.pca_bridge_split_enabled &&
+            config.prob.pca_bridge_shape_fit_shortcut_enabled) {
+            struct ShapeBridgeCandidate {
+                std::string parentName;
+                BridgeSplitProposal proposal;
+                PreviousFrameSnapshot snapshot;
+            };
+            std::vector<ShapeBridgeCandidate> shortcutCandidates;
+            shortcutCandidates.reserve(frame.cells.size());
+
+            for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+                const Ellipsoid &parent = frame.cells[ci];
+                if (parent.isTrash()) {
+                    continue;
+                }
+
+                BridgeSplitProposal proposal;
+                if (!frame.discoverPcaBridgeProposal(ci, config.prob, proposal, &std::cout)) {
+                    continue;
+                }
+
+                cv::Point3f fitSplitAxisDir;
+                float fitSplitAxisLength = 0.0f;
+                parent.worldSplitAxis(fitSplitAxisDir, fitSplitAxisLength);
+                const auto p = parent.getCellParams();
+
+                PreviousFrameSnapshot snapshot;
+                snapshot.valid = true;
+                snapshot.shapeElongation = parent.shapeElongation();
+                snapshot.splitAxisDir = fitSplitAxisDir;
+                snapshot.splitAxisLength = fitSplitAxisLength;
+                snapshot.position = cv::Point3f(p.x, p.y, p.z);
+                snapshot.aRadius = p.aRadius;
+                snapshot.bRadius = p.bRadius;
+                snapshot.cRadius = p.cRadius;
+                snapshot.thetaX = p.theta_x;
+                snapshot.thetaY = p.theta_y;
+                snapshot.thetaZ = p.theta_z;
+                snapshot.brightness = p.brightness;
+
+                shortcutCandidates.push_back({parent.getName(), proposal, snapshot});
+            }
+
+            int shortcutAccepted = 0;
+            int shortcutRejected = 0;
+            for (const auto &candidate : shortcutCandidates) {
+                auto parentIt = std::find_if(
+                    frame.cells.begin(), frame.cells.end(),
+                    [&](const Ellipsoid &cell) {
+                        return cell.getName() == candidate.parentName;
+                    });
+                if (parentIt == frame.cells.end() || parentIt->isTrash()) {
+                    continue;
+                }
+                const size_t parentIndex = static_cast<size_t>(
+                    std::distance(frame.cells.begin(), parentIt));
+
+                Frame::ClaimSet others;
+                for (const auto &other : frame.cells) {
+                    const std::string otherName = other.getName();
+                    if (otherName == candidate.parentName) {
+                        continue;
+                    }
+                    others[otherName].push_back(cv::Point3f(
+                        other.getX(), other.getY(), other.getZ()));
+                }
+
+                const auto result = frame.trySplitCellPhased(
+                    parentIndex,
+                    candidate.snapshot,
+                    others,
+                    /*useSnapDir=*/true,
+                    config.prob,
+                    nullptr,
+                    nullptr,
+                    config.simulation.perturb_debug_cell_brightness,
+                    &candidate.proposal);
+                const bool accept = result.first < 0.0;
+                result.second(accept);
+                if (accept) {
+                    ++shortcutAccepted;
+                    ++splitAccepted;
+                    previousSnapshots.erase(candidate.parentName);
+                    cellShapeReference.erase(candidate.parentName);
+                    cellShapeBirth.erase(candidate.parentName);
+                    frame.rebuildVoronoiMap();
+                } else {
+                    ++shortcutRejected;
+                }
+            }
+
+            if (!shortcutCandidates.empty()) {
+                std::cout << "[PCA Bridge Shape Shortcut] frame " << displayFrame
+                          << " candidates=" << shortcutCandidates.size()
+                          << " accepted=" << shortcutAccepted
+                          << " rejected=" << shortcutRejected
+                          << std::endl;
+                frame.regenerateSynthFrame();
+            }
+        }
 
         // ---- Fit-side growth cap (anti-bloat within mask) ----
         //
@@ -4262,8 +4559,11 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
         throw std::invalid_argument("Invalid frame index");
     }
 
-    std::vector<Image> realImages = frames[frameIndex].generateOutputFrame();
-    std::vector<Image> synthImages = frames[frameIndex].generateOutputSynthFrame();
+    const float realExportMaxBrightness = preprocessedExportMaxForConfig(config.simulation);
+    std::vector<Image> realImages =
+        frames[frameIndex].generateOutputFrame(realExportMaxBrightness);
+    std::vector<Image> synthImages =
+        frames[frameIndex].generateOutputSynthFrame(realExportMaxBrightness);
     int displayFrame = firstFrame + frameIndex;
     std::cout << "Saving images for frame " << displayFrame << "..." << '\n';
     std::cout << "Real Image Type: " << realImages[0].type() << '\n';
@@ -4306,7 +4606,8 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
 
         writeNapariFriendlyTiffStack(realTiffOutputPath + "/" + std::to_string(displayFrame) + ".tif",
                                      realImages,
-                                     config.simulation.export_bit_depth);
+                                     config.simulation.export_bit_depth,
+                                     realExportMaxBrightness);
         writeNapariFriendlyTiffStack(synthTiffOutputPath + "/" + std::to_string(displayFrame) + ".tif",
                                      synthImages,
                                      config.simulation.export_bit_depth);

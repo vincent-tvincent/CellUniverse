@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <sstream>
+
 #include "CalibrationTypes.hpp"
 #include "ImageHandler.hpp"
 
@@ -44,6 +46,19 @@ TEST(ProcessImageTest, OutputPreservesSourceIntensityScale) {
     EXPECT_NEAR(maxVal, 255.0, 1e-3);
 }
 
+TEST(ProcessImageTest, OptionalLoadBlurCanBeBypassed) {
+    BaseConfig cfg = MakeConfig();
+    cfg.simulation.blur_sigma = 2.0f;
+    cv::Mat gray = cv::Mat::zeros(21, 21, CV_8U);
+    gray.at<unsigned char>(10, 10) = 255;
+
+    cv::Mat blurred = ImageHandler::processImage(gray, cfg, true);
+    cv::Mat raw = ImageHandler::processImage(gray, cfg, false);
+
+    EXPECT_NEAR(raw.at<float>(10, 10), 255.0f, 1e-3f);
+    EXPECT_LT(blurred.at<float>(10, 10), raw.at<float>(10, 10));
+}
+
 TEST(LoadFrameTest, MissingNonTiffFileReturnsEmptyVector) {
     BaseConfig cfg = MakeConfig();
 
@@ -61,6 +76,7 @@ TEST(ApplyCalibratedPreprocessTest, MapsBackgroundToZeroAndCellToOne) {
     BaseConfig cfg;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;  // disable to test the linear mapping cleanly
 
     std::vector<cv::Mat> input;
@@ -85,6 +101,7 @@ TEST(ApplyCalibratedPreprocessTest, ClipsValuesAboveCellAndBelowBackground) {
     BaseConfig cfg;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
 
     std::vector<cv::Mat> input;
@@ -98,6 +115,29 @@ TEST(ApplyCalibratedPreprocessTest, ClipsValuesAboveCellAndBelowBackground) {
     EXPECT_EQ(out[0].at<float>(0, 1), 1.0f);
 }
 
+TEST(ApplyCalibratedPreprocessTest, PreservesDynamicRangeWhenRemapDisabled) {
+    BrightnessCalibration cal;
+    cal.background_intensity = 50.0f;
+    cal.cell_intensity = 800.0f;
+    cal.source = BrightnessCalibrationSource::AutoFrameZero;
+
+    BaseConfig cfg;
+    cfg.simulation.z_scaling = 1;
+    cfg.simulation.simple_preprocess_enabled = false;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = false;
+    cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
+
+    std::vector<cv::Mat> input;
+    cv::Mat slice(5, 5, CV_32F, cv::Scalar(50.0f));
+    slice.at<float>(0, 1) = 2000.0f;
+    input.push_back(slice.clone());
+
+    auto out = ImageHandler::applyCalibratedPreprocess(input, cal, cfg, nullptr);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].at<float>(0, 0), 50.0f);
+    EXPECT_EQ(out[0].at<float>(0, 1), 2000.0f);
+}
+
 TEST(ApplyCalibratedPreprocessTest, InterpolatesZSlicesWhenZScalingGreaterThanOne) {
     BrightnessCalibration cal;
     cal.background_intensity = 0.0f;
@@ -107,6 +147,7 @@ TEST(ApplyCalibratedPreprocessTest, InterpolatesZSlicesWhenZScalingGreaterThanOn
     BaseConfig cfg;
     cfg.simulation.z_scaling = 7;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
 
     std::vector<cv::Mat> input;
@@ -126,6 +167,7 @@ TEST(PreprocessLoadedFrameWithCalibrationTest, UsesCalibratedPathWhenCalibration
     cfg.simulation.auto_calibrate_brightness_enabled = true;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
     cfg.simulation.iterative_max_count = 9999;  // would dominate runtime if hit
 
@@ -137,6 +179,30 @@ TEST(PreprocessLoadedFrameWithCalibrationTest, UsesCalibratedPathWhenCalibration
     auto out = ImageHandler::preprocessLoadedFrame(input, "synthetic.tif", cfg, &cal, nullptr);
     EXPECT_NEAR(out[0].at<float>(5, 5), 1.0f, 1e-3f);
     EXPECT_NEAR(out[0].at<float>(0, 0), 0.0f, 1e-3f);
+}
+
+TEST(PreprocessLoadedFrameWithCalibrationTest, UsesLegacyPathWhenDynamicRangeDisabled) {
+    BrightnessCalibration cal;
+    cal.background_intensity = 50.0f;
+    cal.cell_intensity = 800.0f;
+    cal.source = BrightnessCalibrationSource::AutoFrameZero;
+
+    BaseConfig cfg;
+    cfg.simulation.auto_calibrate_brightness_enabled = true;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = false;
+    cfg.simulation.simple_preprocess_enabled = false;
+    cfg.simulation.z_scaling = 1;
+    cfg.simulation.cube_pooling_enabled = false;
+
+    std::vector<cv::Mat> input;
+    input.push_back(cv::Mat(4, 4, CV_32F, cv::Scalar(0.25f)));
+
+    std::ostringstream log;
+    auto out = ImageHandler::preprocessLoadedFrame(input, "synthetic.tif", cfg, &cal, &log);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_NE(log.str().find("path=unweighted_fallback"), std::string::npos);
+    EXPECT_EQ(log.str().find("path=calibrated"), std::string::npos);
+    EXPECT_NEAR(out[0].at<float>(0, 0), 0.25f, 1e-6f);
 }
 
 TEST(PreprocessLoadedFrameWithCalibrationTest, FallsBackToLegacyWhenCalibrationNullOrInvalid) {
@@ -196,6 +262,7 @@ TEST(ApplyCalibratedPreprocessTest, PerFrameRatioRescalesAnchorsForDimmedFrame) 
     BaseConfig cfg;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
 
     // Simulate frame N after uniform 50% photobleaching: cells at 400 (was
@@ -225,6 +292,7 @@ TEST(ApplyCalibratedPreprocessTest, PerFrameRatioFallsBackTo1WhenFrame0MeanZero)
     BaseConfig cfg;
     cfg.simulation.z_scaling = 1;
     cfg.simulation.blur_sigma = 0.0f;
+    cfg.simulation.calibrated_preprocess_dynamic_range_enabled = true;
     cfg.simulation.calibrated_preprocess_blur_sigma = 0.0f;
 
     std::vector<cv::Mat> input;

@@ -1,4 +1,5 @@
 #include "../includes/ImageHandler.hpp"
+#include "../includes/RangePreprocessor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,37 @@
 
 namespace
 {
+void autoDetectRangePreprocessDynamicRange(BaseConfig &config,
+                                           int rawDepth,
+                                           const std::string &imageFile,
+                                           std::ostream &log)
+{
+    if (!config.simulation.range_preprocess_enabled ||
+        !config.simulation.range_preprocess_auto_dynamic_range) {
+        return;
+    }
+
+    float selectedMax = config.simulation.range_preprocess_max_brightness;
+    const char *source = "manual_fallback";
+    if (rawDepth == CV_8U) {
+        selectedMax = 255.0f;
+        source = "CV_8U";
+    } else if (rawDepth == CV_16U) {
+        selectedMax = 65536.0f;
+        source = "CV_16U";
+    }
+
+    config.simulation.range_preprocess_max_brightness = selectedMax;
+    config.simulation.range_preprocess_export_max_brightness = selectedMax;
+    log << "[RangePreprocess Auto Dynamic Range] file="
+        << fs::path(imageFile).filename().string()
+        << " raw_depth=" << rawDepth
+        << " source=" << source
+        << " selected_max_brightness=" << selectedMax
+        << " selected_export_max_brightness=" << selectedMax
+        << std::endl;
+}
+
 int makeOddAtLeast(int value, int minimum = 3)
 {
     int adjusted = std::max(value, minimum);
@@ -664,7 +696,8 @@ ImageStack applySimpleBlurBlendPreprocess(const ImageStack &sequence,
 }
 } // namespace
 
-Image ImageHandler::processImage(const Image &image, const BaseConfig &config)
+Image ImageHandler::processImage(const Image &image, const BaseConfig &config,
+                                 bool applyLoadBlur)
 {
     Image processedImage;
 
@@ -681,7 +714,7 @@ Image ImageHandler::processImage(const Image &image, const BaseConfig &config)
     // using one shared percentile-based scale across the selected run.
     processedImage.convertTo(processedImage, CV_32F);
 
-    if (config.simulation.blur_sigma > 0.0f)
+    if (applyLoadBlur && config.simulation.blur_sigma > 0.0f)
     {
         cv::GaussianBlur(processedImage,
                          processedImage,
@@ -910,7 +943,8 @@ ImageStack ImageHandler::processPreparedSequence(const ImageStack &sequence,
 
 std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
                                                 BaseConfig &config,
-                                                std::ostream *logSink)
+                                                std::ostream *logSink,
+                                                bool applyLoadBlur)
 {
     std::ostream &log = logSink ? *logSink : std::cout;
     std::vector<cv::Mat> normalizedSlices;
@@ -943,6 +977,8 @@ std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
             << " rawCols=" << firstSlice.cols
             << std::endl;
 
+        autoDetectRangePreprocessDynamicRange(config, firstSlice.depth(), imageFile, log);
+
         if (config.simulation.frame_intensity_auto_hard_max &&
             config.simulation.frame_intensity_fixed_hard_max_scale)
         {
@@ -971,12 +1007,13 @@ std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
             {
                 cv::cvtColor(slice, slice, cv::COLOR_BGR2GRAY);
             }
-            normalizedSlices[static_cast<std::size_t>(i)] = processImage(slice, config);
+            normalizedSlices[static_cast<std::size_t>(i)] =
+                processImage(slice, config, applyLoadBlur);
         }
     }
     else
     {
-        cv::Mat image = cv::imread(imageFile);
+        cv::Mat image = cv::imread(imageFile, cv::IMREAD_ANYDEPTH | cv::IMREAD_COLOR);
         if (image.empty())
         {
             std::cout << "Error: Could not read the image" << '\n';
@@ -987,6 +1024,8 @@ std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
         {
             cv::cvtColor(image, image, cv::COLOR_BGR2GRAY);
         }
+
+        autoDetectRangePreprocessDynamicRange(config, image.depth(), imageFile, log);
 
         if (config.simulation.frame_intensity_auto_hard_max &&
             config.simulation.frame_intensity_fixed_hard_max_scale)
@@ -1001,7 +1040,7 @@ std::vector<cv::Mat> ImageHandler::loadRawFrame(const std::string &imageFile,
                 << std::endl;
         }
 
-        normalizedSlices.push_back(processImage(image, config));
+        normalizedSlices.push_back(processImage(image, config, applyLoadBlur));
     }
 
     printStackStats(log, "normalized_input", imageFile, normalizedSlices);
@@ -1159,24 +1198,35 @@ std::vector<cv::Mat> ImageHandler::applyCalibratedPreprocess(
         << " cell_0=" << calibration.cell_intensity
         << " bg_n=" << bg_n
         << " cell_n=" << cell_n
+        << " dynamic_range="
+        << (config.simulation.calibrated_preprocess_dynamic_range_enabled ? "enabled" : "disabled")
         << "\n";
 
-    // Step 1b: linear normalize via bg/cell anchors → [0, 1].
-    // bg → 0, cell → 1. Mandatory for the L2 cost (synth cells render with
-    // `_brightness` clamped to [0.1, 0.98]) and for the bio gates that
-    // expect cell-edge brightness in absolute terms (e.g., 0.07 floor).
+    // Step 1b: optionally linear normalize via bg/cell anchors to [0, 1].
+    // bg → 0, cell → 1 when enabled. This is the normalized scale expected
+    // by L2 cost (synth cells render with `_brightness` clamped to [0.1,
+    // 0.98]) and by bio gates that expect cell-edge brightness in absolute
+    // terms (e.g., 0.07 floor).
     //
     // Clip to [0, 1] after calibration. If simple preprocessing is also
     // enabled, the weighted raw/blurred blend below expects normalized input,
     // just like the fixed-hard-max branch pipeline.
     std::vector<cv::Mat> linearScaled;
     linearScaled.reserve(normalizedSlices.size());
-    for (const auto &slice : normalizedSlices) {
-        cv::Mat out;
-        slice.convertTo(out, CV_32F, 1.0f / span_n, -bg_n / span_n);
-        cv::min(out, 1.0f, out);
-        cv::max(out, 0.0f, out);
-        linearScaled.push_back(out);
+    if (config.simulation.calibrated_preprocess_dynamic_range_enabled) {
+        for (const auto &slice : normalizedSlices) {
+            cv::Mat out;
+            slice.convertTo(out, CV_32F, 1.0f / span_n, -bg_n / span_n);
+            cv::min(out, 1.0f, out);
+            cv::max(out, 0.0f, out);
+            linearScaled.push_back(out);
+        }
+    } else {
+        for (const auto &slice : normalizedSlices) {
+            cv::Mat out;
+            slice.convertTo(out, CV_32F);
+            linearScaled.push_back(out);
+        }
     }
 
     // Step 2: optional filter. With simple preprocessing enabled, compose the
@@ -1236,6 +1286,7 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(
 {
     std::ostream &log = logSink ? *logSink : std::cout;
     const bool calibratedPath = config.simulation.auto_calibrate_brightness_enabled
+        && config.simulation.calibrated_preprocess_dynamic_range_enabled
         && calibration != nullptr
         && calibration->isValid();
 
@@ -1261,7 +1312,15 @@ std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,
                                              BaseConfig &config,
                                              std::ostream *logSink)
 {
-    const std::vector<cv::Mat> normalizedSlices = loadRawFrame(imageFile, config, logSink);
+    const std::vector<cv::Mat> normalizedSlices = loadRawFrame(
+        imageFile,
+        config,
+        logSink,
+        !(config.simulation.range_preprocess_enabled &&
+          config.simulation.range_preprocess_bypass_load_blur));
+    if (config.simulation.range_preprocess_enabled) {
+        return RangePreprocessor::apply(normalizedSlices, config, imageFile, nullptr, logSink);
+    }
     return preprocessLoadedFrame(normalizedSlices, imageFile, config, logSink);
 }
 

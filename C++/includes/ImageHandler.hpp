@@ -12,10 +12,12 @@
 class ImageHandler
 {
 public:
-    static Image processImage(const Image &image, const BaseConfig &config);
+    static Image processImage(const Image &image, const BaseConfig &config,
+                              bool applyLoadBlur = true);
     static std::vector<cv::Mat> loadRawFrame(const std::string &imageFile,
                                              BaseConfig &config,
-                                             std::ostream *logSink = nullptr);
+                                             std::ostream *logSink = nullptr,
+                                             bool applyLoadBlur = true);
     static std::vector<cv::Mat> preprocessLoadedFrame(const std::vector<cv::Mat> &normalizedSlices,
                                                       const std::string &imageFile,
                                                       const BaseConfig &config,

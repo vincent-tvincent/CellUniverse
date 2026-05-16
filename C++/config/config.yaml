@@ -56,7 +56,7 @@ cell:
 
   brightnessUpdateBlend: 0.95
   brightnessMeanAmplification: 1.1
-  brightnessMeasurementTopPercentile: 0.3
+  brightnessMeasurementTopPercentile: 0.15
 
   # Iterative PCA shape fit (per frame, after perturbation loop).
   # Converges rotation + radii (+ centroid) to the Voronoi-filtered
@@ -139,6 +139,13 @@ simulation:
   iterations_per_cell: 250
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
+  # Global CPU cap. 0 means use OpenMP/OpenCV defaults. On a 10-core /
+  # 20-logical-core CPU, 10 avoids oversubscribing physical cores while still
+  # keeping preprocessing parallel. Keep OpenCV at 1 because this code already
+  # parallelizes over slices/cells with OpenMP; nested OpenCV workers can
+  # overschedule badly.
+  global_thread_cap: 10
+  opencv_thread_cap: 1
   z_scaling: 7
   blur_sigma: 0.0 # 1.1
 
@@ -157,21 +164,45 @@ simulation:
   contrast_penalty_weight: 0.07
   contrast_eps: 0.000001
 
-  frame_intensity_normalization_enabled: true
-  frame_intensity_fixed_hard_max_scale: true
+  frame_intensity_normalization_enabled: false
+  frame_intensity_fixed_hard_max_scale: false
   # Auto-selects 255 for 8-bit-range TIFFs and 65536 for larger-range TIFFs.
   # Set false to force frame_intensity_hard_max manually.
   frame_intensity_auto_hard_max: true
   frame_intensity_hard_max: 65536.0
 
-  # Branch-preferred preprocessing path: fixed hard-max normalize, then
-  # raw/blurred blend matching the Python preprocessing experiment.
-  simple_preprocess_enabled: true
+  # Superseded by the range-filtered preprocessing path below.
+  simple_preprocess_enabled: false
   simple_preprocess_blur_sigma: 5.0
-  simple_preprocess_real_ratio: 0.4
-  simple_preprocess_background_factor: 1.0
-  # Python reference exports the original z pages without interpolation.
-  simple_preprocess_interpolate_z: true
+  simple_preprocess_real_ratio: 0.5
+  simple_preprocess_background_factor: 0.3
+  simple_preprocess_interpolate_z: false
+
+  # Canonical range-filtered preprocessing pipeline from:
+  # /run/media/blue-lobster/vincent/pre-processing experiment/
+  #   range_filtered_preprocessing_pipeline.py
+  # This path performs raw clamp/normalize, intensity-range occupancy
+  # filtering, optional 2D Gaussian blur blend, and final nonzero-percentile
+  # thresholding. Legacy scaling, cube pooling, blackoff, and final blur are
+  # skipped by default when this is enabled. Z interpolation is controlled by
+  # range_preprocess_interpolate_z.
+  range_preprocess_enabled: true
+  range_preprocess_range_count: 100
+  range_preprocess_range_percentile: 99.0
+  range_preprocess_occupancy_threshold_percent: 0.2
+  range_preprocess_final_threshold_percentile: 90.0
+  range_preprocess_bright_boost_fraction: 0.15
+  range_preprocess_bright_boost_factor: 10.0
+  range_preprocess_blur_enabled: true
+  range_preprocess_interpolate_z: true
+  range_preprocess_auto_dynamic_range: true
+  range_preprocess_sigma: 6.0
+  range_preprocess_real_ratio: 0.0
+  range_preprocess_max_brightness: 65536.0
+  range_preprocess_export_max_brightness: 65536.0
+  range_preprocess_skip_legacy_postprocess: true
+  range_preprocess_bypass_load_blur: true
+  range_preprocess_debug_stats: true
 
   # Auto-calibration from frame 0 (2026-05-04). See plan
   # docs/plans/2026-05-04-auto-calibration-from-frame-zero.md.
@@ -199,6 +230,13 @@ simulation:
   # chromatin gaps inside cells stay above 0. Median was breaking cells
   # into fragments. See plan 2026-05-05-auto-derive-geometry-from-initial-csv.md.
   calibration_bg_anchor_percentile: 0.10
+  # When true, calibrated preprocessing remaps raw intensities with the
+  # measured bg/cell anchors and clamps to [0,1]. When false, auto-calibration
+  # still measures/logs anchors but leaves the image dynamic range unchanged.
+  calibrated_preprocess_dynamic_range_enabled: false
+  # Separately initialize runtime synth/PCA background from the preprocessed
+  # frame-0 background pixels. Does not remap image dynamic range.
+  auto_calibrate_runtime_background_enabled: true
   # Gaussian blur in calibrated preprocessing. Smooths chromatin patterns
   # within cells (5-10 px scale) while preserving cell edges (30-40 px).
   # 3.0 = dataset-agnostic noise removal; works for fluo + embryo without
@@ -245,10 +283,10 @@ simulation:
   edge_brightness_alignment_bottom_offset: 0
   edge_brightness_alignment_max_shift: 0.20
 
-  # Disabled for the branch-preferred simple preprocessing path.
+  # Disabled for the range-filtered preprocessing path.
   post_alignment_black_threshold: 0.0
 
-  # Disabled for the branch-preferred simple preprocessing path.
+  # Disabled for the range-filtered preprocessing path.
   post_alignment_black_percentile: 0.0
   # After the initial percentile blackoff, detect isolated nonzero 3D chunks
   # using 26-neighbor connectivity. A chunk is counted when each z/y/x
@@ -271,7 +309,7 @@ simulation:
   post_alignment_tiny_particle_removal_enabled: false
   post_alignment_final_blur_sigma: 0.0
 
-  export_preprocessed_images: true
+  export_preprocessed_images: false
   # Debug signal-guidance localization. When true, exports two stacks per
   # frame under signal_debug/: center cubes on black background and a
   # grayscale perturb-probability field on black background.
@@ -287,8 +325,8 @@ simulation:
   # Output bit depth for normalized float images: 8 or 16.
   # This is independent from input normalization hard max.
   export_bit_depth: 8
-  quit_after_preprocessing: true
-  prepare_analyze_one_frame: false
+  quit_after_preprocessing: false
+  prepare_analyze_one_frame: true
   # When true, after a frame has been optimized and exported, release its
   # image-heavy stacks from memory while keeping cells, cached summaries,
   # checkpoints, and other state needed by later frames.
@@ -322,7 +360,7 @@ simulation:
   cube_pooling_enabled: false
   cube_pooling_cost_comparison_enabled: false
   cube_pooling_cube_size: 4
-  cube_pooling_mode: low_percentile
+  cube_pooling_mode: min
   # For top_percentile mode, each cube is filled with the mean of its
   # brightest fraction of voxels. 0.10 means top 10%.
   cube_pooling_top_fraction: 0.10
@@ -332,6 +370,32 @@ simulation:
 
   adaptive_background_expand_factor: 1.1
   adaptive_background_top_fraction: 0.2
+  # PCA shape body-pixel selection. The body cutoff is the stricter of
+  # local-bg percentile + margin and local-bg median + sigma_k * robust_sigma
+  # + margin. Increase percentile or sigma_k if cells absorb noisy background.
+  # Range preprocessing keeps real signal near 1e-4..1e-3, so the old 0.01
+  # floor / 0.02 margin would reject every real voxel.
+  pca_shape_bg_floor: 0.00002
+  pca_shape_bg_margin: 0.00002
+  pca_shape_use_local_bg_estimation: true
+  pca_shape_bg_shell_inner_scale: 1.2
+  pca_shape_bg_shell_outer_scale: 1.5
+  pca_shape_bg_percentile: 0.50
+  pca_shape_bg_sigma_k: 2.0
+  # Synthetic background noise used inside optimization and synth export.
+  # Modes:
+  #   empirical_inpaint: deterministic real-background residual texture from
+  #     pixels outside expanded cell masks.
+  #   random_gaussian: deterministic random synth-space noise with robust sigma
+  #     matched to real non-cell background pixels.
+  synth_background_noise_enabled: false
+  synth_background_noise_mode: random_gaussian
+  synth_background_noise_cell_mask_expand_factor: 1.2
+  synth_background_noise_scale: 1.0
+  # Multiply synth background brightness relative to the measured runtime
+  # background. >1 makes synth background brighter than real background.
+  synth_background_brightness_factor: 1.0
+  synth_background_noise_seed: 12345
 
   asymmetric_cost_weight: 8.0
   # Minimum overshoot (synth - real) to activate asymK. Below this,
@@ -434,6 +498,19 @@ prob:
   # Translation = 0.5 × daughterR; for daughterR=30 that's ±15px instead
   # of ±6px. Pairs with split_burn_in_pos_sigma_scale: 0.8.
   split_candidate_translation_delta_fraction: 0.5
+  # Candidate family switches. Labels are composed as:
+  #   {data,snap}_{axC/imgPca}_{primary,rot-/rot+,trans-/trans+}
+  # plus bridge_primary when a PCA bridge proposal is injected.
+  split_candidate_enable_shortest_axis: true
+  split_candidate_enable_image_pca_axis: true
+  split_candidate_enable_data_midpoint: true
+  split_candidate_enable_snapshot_midpoint: true
+  split_candidate_enable_primary_variant: true
+  split_candidate_enable_rotation_minus_variant: true
+  split_candidate_enable_rotation_plus_variant: true
+  split_candidate_enable_translation_minus_variant: true
+  split_candidate_enable_translation_plus_variant: true
+  split_candidate_enable_bridge_candidate: true
 
   # Reject split candidates whose daughters only fit by walking far away from
   # the proposed split geometry. This catches false splits where an elongated
@@ -494,6 +571,10 @@ prob:
   # the center, two daughters are fit from nonblack voxels on either side and
   # accepted only when image+overlap cost improves.
   pca_bridge_split_enabled: true
+  # Restored shape-fit-time shortcut: after the end-of-frame PCA shape fit,
+  # immediately try a black-bridge split for elongated cells instead of
+  # waiting for the next frame's normal split pre-pass.
+  pca_bridge_shape_fit_shortcut_enabled: true
   pca_bridge_elongation_ratio: 2.0
   # Require a prolate bridge shape: one clearly long axis, and the two
   # non-long axes close to each other. This blocks triaxial false bridges
@@ -501,7 +582,11 @@ prob:
   # collapsed.
   pca_bridge_min_long_mid_ratio: 1.35
   pca_bridge_max_mid_short_ratio: 1.35
-  pca_bridge_black_threshold: 0.05
+  # Background-relative black bridge. A bridge voxel is "black" when it is
+  # close to the runtime background, not literal zero.
+  pca_bridge_black_threshold: 0.0
+  pca_bridge_black_bg_multiplier: 1.0
+  pca_bridge_black_bg_margin: 0.0
   pca_bridge_min_black_fraction: 0.75
   pca_bridge_gap_center_fraction: 0.35
   pca_bridge_profile_bins: 21

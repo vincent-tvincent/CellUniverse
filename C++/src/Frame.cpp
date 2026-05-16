@@ -476,6 +476,7 @@ Frame::Frame(const std::vector<cv::Mat> &realFrame, const SimulationConfig &simu
         double zValue = i;
         z_slices.push_back(zValue);
     }
+    rebuildSynthBackgroundNoise();
     _synthFrame = generateSynthFrame();
     refreshFullCostCache();
 }
@@ -508,8 +509,185 @@ void Frame::loadImageStacks(const std::vector<cv::Mat> &realFrame)
             z_slices.push_back(static_cast<double>(i));
         }
     }
+    rebuildSynthBackgroundNoise();
     _synthFrame = generateSynthFrame();
     refreshFullCostCache();
+}
+
+void Frame::rebuildSynthBackgroundNoise()
+{
+    _synthBackgroundNoise.clear();
+    if (!simulationConfig.synth_background_noise_enabled ||
+        _realFrame.empty()) {
+        return;
+    }
+    const bool empiricalInpaint =
+        simulationConfig.synth_background_noise_mode == "empirical_inpaint";
+    const bool randomGaussian =
+        simulationConfig.synth_background_noise_mode == "random_gaussian";
+    if (!empiricalInpaint && !randomGaussian) {
+        return;
+    }
+
+    struct MaskCell
+    {
+        cv::Point3f pos;
+        std::array<double, 9> rotationT;
+        double invA2 = 1.0;
+        double invB2 = 1.0;
+        double invC2 = 1.0;
+        float maxR = 0.0f;
+    };
+
+    const float expand = std::max(1.0f, simulationConfig.synth_background_noise_cell_mask_expand_factor);
+    std::vector<MaskCell> maskCells;
+    maskCells.reserve(cells.size());
+    for (const auto &cell : cells) {
+        MaskCell item;
+        item.pos = cv::Point3f(cell.getX(), cell.getY(), cell.getZ());
+        cell.generateInverseRotationMatrix(item.rotationT);
+        const double aR = std::max(1e-3, static_cast<double>(cell.getARadius() * expand));
+        const double bR = std::max(1e-3, static_cast<double>(cell.getBRadius() * expand));
+        const double cR = std::max(1e-3, static_cast<double>(cell.getCRadius() * expand));
+        item.invA2 = 1.0 / (aR * aR);
+        item.invB2 = 1.0 / (bR * bR);
+        item.invC2 = 1.0 / (cR * cR);
+        item.maxR = static_cast<float>(std::max({aR, bR, cR}));
+        maskCells.push_back(item);
+    }
+
+    auto insideAnyExpandedCell = [&](int x, int y, size_t zIndex) {
+        const float z = static_cast<float>(z_slices.empty()
+            ? static_cast<double>(zIndex)
+            : z_slices[std::min(zIndex, z_slices.size() - 1)]);
+        for (const auto &cell : maskCells) {
+            if (std::abs(z - cell.pos.z) > cell.maxR) continue;
+            const double dx = static_cast<double>(x) - cell.pos.x;
+            const double dy = static_cast<double>(y) - cell.pos.y;
+            const double dz = static_cast<double>(z) - cell.pos.z;
+            const double lx = cell.rotationT[0] * dx + cell.rotationT[1] * dy + cell.rotationT[2] * dz;
+            const double ly = cell.rotationT[3] * dx + cell.rotationT[4] * dy + cell.rotationT[5] * dz;
+            const double lz = cell.rotationT[6] * dx + cell.rotationT[7] * dy + cell.rotationT[8] * dz;
+            const double v = lx * lx * cell.invA2 +
+                             ly * ly * cell.invB2 +
+                             lz * lz * cell.invC2;
+            if (v <= 1.0) return true;
+        }
+        return false;
+    };
+
+    std::vector<float> backgroundValues;
+    for (size_t z = 0; z < _realFrame.size(); ++z) {
+        const cv::Mat &slice = _realFrame[z];
+        if (slice.type() != CV_32F) continue;
+        for (int y = 0; y < slice.rows; ++y) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = 0; x < slice.cols; ++x) {
+                const float value = row[x];
+                if (std::isfinite(value) && !insideAnyExpandedCell(x, y, z)) {
+                    backgroundValues.push_back(value);
+                }
+            }
+        }
+    }
+
+    if (backgroundValues.empty()) {
+        return;
+    }
+
+    double sum = 0.0;
+    for (float v : backgroundValues) sum += v;
+    const float backgroundMean = static_cast<float>(sum / static_cast<double>(backgroundValues.size()));
+    std::vector<float> sortedBackground = backgroundValues;
+    const size_t medianIndex = sortedBackground.size() / 2;
+    std::nth_element(sortedBackground.begin(),
+                     sortedBackground.begin() + static_cast<std::ptrdiff_t>(medianIndex),
+                     sortedBackground.end());
+    const float backgroundMedian = sortedBackground[medianIndex];
+    std::vector<float> absDeviations;
+    absDeviations.reserve(backgroundValues.size());
+    for (float v : backgroundValues) {
+        absDeviations.push_back(std::abs(v - backgroundMedian));
+    }
+    std::nth_element(absDeviations.begin(),
+                     absDeviations.begin() + static_cast<std::ptrdiff_t>(medianIndex),
+                     absDeviations.end());
+    const float robustSigma = 1.4826f * absDeviations[medianIndex];
+    std::vector<float> residualSamples;
+    residualSamples.reserve(backgroundValues.size());
+    const float scale = std::max(0.0f, simulationConfig.synth_background_noise_scale);
+    for (float v : backgroundValues) {
+        residualSamples.push_back((v - backgroundMean) * scale);
+    }
+
+    const std::size_t seed = static_cast<std::size_t>(std::max(0, simulationConfig.synth_background_noise_seed));
+    auto sampleResidual = [&](size_t z, int y, int x) {
+        std::size_t h = seed;
+        h ^= (z + 0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2);
+        h ^= (static_cast<std::size_t>(y) + 0xbf58476d1ce4e5b9ULL) + (h << 6) + (h >> 2);
+        h ^= (static_cast<std::size_t>(x) + 0x94d049bb133111ebULL) + (h << 6) + (h >> 2);
+        return residualSamples[h % residualSamples.size()];
+    };
+    auto hashUnit = [](std::size_t h) {
+        h ^= h >> 30;
+        h *= 0xbf58476d1ce4e5b9ULL;
+        h ^= h >> 27;
+        h *= 0x94d049bb133111ebULL;
+        h ^= h >> 31;
+        const double denom = static_cast<double>(std::numeric_limits<std::size_t>::max());
+        return std::clamp(static_cast<double>(h) / denom, 1e-12, 1.0 - 1e-12);
+    };
+    auto sampleGaussianResidual = [&](size_t z, int y, int x) {
+        std::size_t h = seed;
+        h ^= (z + 0x9e3779b97f4a7c15ULL) + (h << 6) + (h >> 2);
+        h ^= (static_cast<std::size_t>(y) + 0xbf58476d1ce4e5b9ULL) + (h << 6) + (h >> 2);
+        h ^= (static_cast<std::size_t>(x) + 0x94d049bb133111ebULL) + (h << 6) + (h >> 2);
+        const double u1 = hashUnit(h);
+        const double u2 = hashUnit(h ^ 0xd2b74407b1ce6e93ULL);
+        const double z0 = std::sqrt(-2.0 * std::log(u1)) *
+                          std::cos(2.0 * M_PI * u2);
+        return static_cast<float>(z0) * robustSigma * scale;
+    };
+
+    _synthBackgroundNoise.reserve(_realFrame.size());
+    for (size_t z = 0; z < _realFrame.size(); ++z) {
+        const cv::Mat &slice = _realFrame[z];
+        cv::Mat residual = cv::Mat::zeros(slice.size(), CV_32F);
+        for (int y = 0; y < slice.rows; ++y) {
+            const float *src = slice.ptr<float>(y);
+            float *dst = residual.ptr<float>(y);
+            for (int x = 0; x < slice.cols; ++x) {
+                if (!std::isfinite(src[x])) {
+                    dst[x] = 0.0f;
+                } else if (randomGaussian) {
+                    dst[x] = sampleGaussianResidual(z, y, x);
+                } else if (insideAnyExpandedCell(x, y, z)) {
+                    dst[x] = sampleResidual(z, y, x);
+                } else {
+                    dst[x] = (src[x] - backgroundMean) * scale;
+                }
+            }
+        }
+        _synthBackgroundNoise.push_back(std::move(residual));
+    }
+}
+
+cv::Mat Frame::makeSynthBackgroundSlice(size_t sliceIndex, const cv::Size &shape) const
+{
+    const float backgroundFactor =
+        std::max(0.0f, simulationConfig.synth_background_brightness_factor);
+    const float synthBackground =
+        std::clamp(_backgroundValue * backgroundFactor, 0.0f, 1.0f);
+    if (sliceIndex < _synthBackgroundNoise.size() &&
+        !_synthBackgroundNoise[sliceIndex].empty() &&
+        _synthBackgroundNoise[sliceIndex].size() == shape) {
+        cv::Mat out = _synthBackgroundNoise[sliceIndex].clone();
+        out += synthBackground;
+        cv::min(out, 1.0f, out);
+        cv::max(out, 0.0f, out);
+        return out;
+    }
+    return cv::Mat(shape, CV_32F, cv::Scalar(synthBackground));
 }
 
 void Frame::refreshFullCostCache()
@@ -595,9 +773,10 @@ std::vector<cv::Mat> Frame::generateSynthFrame()
         cellZ[c] = cells[c].getZ();
     }
 
-    for (double z : z_slices)
+    for (size_t zi = 0; zi < z_slices.size(); ++zi)
     {
-        Image synthImage = cv::Mat(shape, CV_32F, cv::Scalar(_backgroundValue));
+        const double z = z_slices[zi];
+        Image synthImage = makeSynthBackgroundSlice(zi, shape);
         const float zf = static_cast<float>(z);
         for (size_t c = 0; c < nCells; ++c)
         {
@@ -1038,7 +1217,7 @@ std::vector<cv::Mat> Frame::generateSynthFrameFast(Ellipsoid &oldCell, Ellipsoid
         if (affectedMin < 0) affectedMin = static_cast<int>(i);
         affectedMax = static_cast<int>(i);
 
-        cv::Mat synthImage = cv::Mat(shape, CV_32F, cv::Scalar(_backgroundValue));
+        cv::Mat synthImage = makeSynthBackgroundSlice(i, shape);
 
         for (size_t c = 0; c < nCells; ++c)
         {
@@ -1062,7 +1241,7 @@ std::vector<cv::Mat> Frame::generateSynthFrameFast(Ellipsoid &oldCell, Ellipsoid
     return synthFrame;
 }
 
-std::vector<cv::Mat> Frame::generateOutputFrame()
+std::vector<cv::Mat> Frame::generateOutputFrame(float normalizedExportMaxBrightness)
 {
     std::vector<cv::Mat> realFrameWithOutlines;
 
@@ -1089,7 +1268,9 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
         if (outputFrame.depth() != CV_8U && outputFrame.depth() != CV_16U)
         {
             const bool export8Bit = simulationConfig.export_bit_depth == 8;
-            const float exportMaxBrightness = export8Bit ? 255.0f : 65535.0f;
+            const float exportMaxBrightness = normalizedExportMaxBrightness > 0.0f
+                ? normalizedExportMaxBrightness
+                : (export8Bit ? 255.0f : 65535.0f);
             const int exportDepth = export8Bit ? CV_8U : CV_16U;
             outputFrame.convertTo(outputFrame, exportDepth, exportMaxBrightness);
         }
@@ -1100,21 +1281,21 @@ std::vector<cv::Mat> Frame::generateOutputFrame()
     return realFrameWithOutlines;
 }
 
-std::vector<cv::Mat> Frame::generateOutputSynthFrame()
+std::vector<cv::Mat> Frame::generateOutputSynthFrame(float normalizedExportMaxBrightness)
 {
     std::vector<cv::Mat> outputSynthFrame;
 
     for (const auto &synthImage : _synthFrame)
     {
-        cv::Mat outputImage;
-        if (synthImage.depth() != CV_8U)
-        {
-            // Convert to 8-bit image if necessary, scaling pixel values by 255
-            synthImage.convertTo(outputImage, CV_8U, 255.0);
-        }
-        else
-        {
-            outputImage = synthImage.clone();
+        cv::Mat outputImage = synthImage.clone();
+        if (outputImage.depth() != CV_8U && outputImage.depth() != CV_16U) {
+            cv::patchNaNs(outputImage, 0.0);
+            const bool export8Bit = simulationConfig.export_bit_depth == 8;
+            const float exportMaxBrightness = normalizedExportMaxBrightness > 0.0f
+                ? normalizedExportMaxBrightness
+                : (export8Bit ? 255.0f : 65535.0f);
+            const int exportDepth = export8Bit ? CV_8U : CV_16U;
+            outputImage.convertTo(outputImage, exportDepth, exportMaxBrightness);
         }
 
         outputSynthFrame.push_back(outputImage);
@@ -1686,11 +1867,13 @@ struct GatherStats
 // outside the cell. Used by PCA-shape calibration to drive an adaptive
 // brightness cutoff that handles datasets where the global per-frame
 // `_backgroundValue` is misleading (vignetting, halos near other cells,
-// raw-mode pixels with positive bg variance). Returns
-// {p_percentile, p_p99} of pixel values in the shell, Voronoi-filtered
-// to this cell's claim set. Returns {0,0} if not enough samples.
+// raw-mode pixels with positive bg variance). Returns local background
+// percentiles and a robust noise estimate from pixel values in the shell,
+// Voronoi-filtered to this cell's claim set.
 struct LocalBgEstimate {
     float percentile{0.0f};
+    float median{0.0f};
+    float robustSigma{0.0f};
     float p99{0.0f};
     int   sampleCount{0};
 };
@@ -1775,9 +1958,25 @@ LocalBgEstimate estimateLocalBgInShell(
     const size_t pIdx = std::min(
         shellValues.size() - 1,
         static_cast<size_t>(std::floor(clampedP * (shellValues.size() - 1))));
+    const size_t medianIdx = std::min(
+        shellValues.size() - 1,
+        static_cast<size_t>(std::floor(0.50f * (shellValues.size() - 1))));
     const size_t p99Idx = std::min(
         shellValues.size() - 1,
         static_cast<size_t>(std::floor(0.99f * (shellValues.size() - 1))));
+
+    std::nth_element(shellValues.begin(), shellValues.begin() + medianIdx, shellValues.end());
+    out.median = shellValues[medianIdx];
+
+    std::vector<float> absDeviations;
+    absDeviations.reserve(shellValues.size());
+    for (float value : shellValues) {
+        absDeviations.push_back(std::abs(value - out.median));
+    }
+    std::nth_element(absDeviations.begin(),
+                     absDeviations.begin() + medianIdx,
+                     absDeviations.end());
+    out.robustSigma = 1.4826f * absDeviations[medianIdx];
 
     std::nth_element(shellValues.begin(), shellValues.begin() + p99Idx, shellValues.end());
     out.p99 = shellValues[p99Idx];
@@ -1794,7 +1993,9 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
     const std::vector<cv::Point3f> &selfClaimPoints,
     const Frame::ClaimSet &otherClaimSets,
     GatherStats *stats = nullptr,
-    float explicitCutoff = -1.0f)
+    float explicitCutoff = -1.0f,
+    float brightnessFloor = 0.01f,
+    float brightnessMargin = 0.02f)
 {
     std::vector<BrightPixel> kept;
     if (realFrame.empty() || radius <= 0.0f || selfClaimPoints.empty()) {
@@ -1831,10 +2032,12 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
     // `explicitCutoff >= 0` the caller has computed a per-cell adaptive
     // cutoff (e.g., from local-bg shell estimation in
     // calibrateCellShapeViaPca) — use it directly. Otherwise fall back to
-    // the per-frame `_backgroundValue + 0.02`, with a 0.01 noise floor.
+    // the per-frame `_backgroundValue + brightnessMargin`, with a configurable
+    // noise floor.
     const float brightnessCutoff = (explicitCutoff >= 0.0f)
         ? explicitCutoff
-        : std::max(0.01f, backgroundValue + 0.02f);
+        : std::max(std::max(0.0f, brightnessFloor),
+                   backgroundValue + std::max(0.0f, brightnessMargin));
 
     for (int z = minZ; z <= maxZ; ++z) {
         const cv::Mat &slice = realFrame[z];
@@ -2380,7 +2583,10 @@ bool Frame::imageGroundExpectedDaughters(
         boxRadius,
         selfClaim,
         otherCellsClaimSets,
-        &gstats);
+        &gstats,
+        -1.0f,
+        simulationConfig.pca_shape_bg_floor,
+        simulationConfig.pca_shape_bg_margin);
 
     if (outKeptPixels) *outKeptPixels = gstats.voronoiKept;
     if (pixels.size() < 20) return false;
@@ -2441,7 +2647,10 @@ bool Frame::calibrateCellPositionViaCentroid(
         boxRadius,
         selfClaim,
         otherCellsClaimSets,
-        &gstats);
+        &gstats,
+        -1.0f,
+        simulationConfig.pca_shape_bg_floor,
+        simulationConfig.pca_shape_bg_margin);
 
     if (pixels.size() < 20) {
         std::cout << "  [Centroid Calibration] cell=" << cells[cellIndex].getName()
@@ -2674,12 +2883,21 @@ bool Frame::calibrateCellShapeViaPca(
                     simCfg.pca_shape_bg_percentile,
                     selfClaim, otherCellsClaimSets);
                 if (bgEst.sampleCount >= 8) {
-                    const float margin = 0.02f;
+                    const float margin = std::max(0.0f, simCfg.pca_shape_bg_margin);
                     adaptiveCutoff = bgEst.percentile + margin;
+                    if (simCfg.pca_shape_bg_sigma_k > 0.0f && bgEst.robustSigma > 0.0f) {
+                        const float noiseCutoff = bgEst.median
+                            + simCfg.pca_shape_bg_sigma_k * bgEst.robustSigma
+                            + margin;
+                        adaptiveCutoff = std::max(adaptiveCutoff, noiseCutoff);
+                    }
                     log << "  [PCA Shape LocalBg] cell=" << cell.getName()
                         << " innerR=" << innerR << " outerR=" << outerR
                         << " p" << static_cast<int>(simCfg.pca_shape_bg_percentile * 100)
                         << "=" << bgEst.percentile
+                        << " median=" << bgEst.median
+                        << " robust_sigma=" << bgEst.robustSigma
+                        << " sigma_k=" << simCfg.pca_shape_bg_sigma_k
                         << " p99=" << bgEst.p99
                         << " adaptiveCutoff=" << adaptiveCutoff
                         << " samples=" << bgEst.sampleCount
@@ -2689,7 +2907,9 @@ bool Frame::calibrateCellShapeViaPca(
 
             cachedRaw = gatherBrightPixelsVoronoi(
                 _realFrame, _backgroundValue, center, sphereR,
-                selfClaim, otherCellsClaimSets, &gstats, adaptiveCutoff);
+                selfClaim, otherCellsClaimSets, &gstats, adaptiveCutoff,
+                simCfg.pca_shape_bg_floor,
+                simCfg.pca_shape_bg_margin);
             cachedCenter = center;
             ++cachedMisses;
 
@@ -2943,6 +3163,27 @@ bool Frame::calibrateCellShapeViaPca(
             }
         }
 
+        const bool finiteCandidate =
+            std::isfinite(targetA) && std::isfinite(targetB) && std::isfinite(targetC) &&
+            std::isfinite(targetTx) && std::isfinite(targetTy) && std::isfinite(targetTz) &&
+            std::isfinite(newCenter.x) && std::isfinite(newCenter.y) && std::isfinite(newCenter.z);
+        const bool collapsedCandidate =
+            targetA <= 1e-3f || targetB <= 1e-3f || targetC <= 1e-3f;
+        if (!finiteCandidate || collapsedCandidate) {
+            log << "  [PCA Shape] cell=" << cell.getName()
+                << " iter=" << iter
+                << " reject_invalid_fit=1"
+                << " n=" << pixels.size()
+                << " degen=" << degenerate
+                << " R=(" << targetA << "," << targetB << "," << targetC << ")"
+                << " center=(" << newCenter.x << "," << newCenter.y << "," << newCenter.z << ")"
+                << " finite=" << finiteCandidate
+                << " collapsed=" << collapsedCandidate
+                << " keep_previous=1"
+                << std::endl;
+            break;
+        }
+
         // Apply.
         cell.setRadii(targetA, targetB, targetC);
         cell.setRotation(static_cast<float>(targetTx),
@@ -3066,17 +3307,12 @@ bool Frame::discoverPcaBridgeProposal(size_t cellIndex,
     std::vector<int> binBlack(bins, 0);
     std::vector<std::pair<BrightPixel, float>> nonblackWithProj;
 
-    // Adaptive PCA-bridge black threshold (2026-05-06): bridge "dark gap"
-    // pixels are bg pixels by definition, so anchor the threshold to the
-    // per-frame `_backgroundValue` (already set per frame via
-    // estimateAdaptiveBackgroundFromFrame). When `pca_bridge_black_bg_multiplier > 0`,
-    // the effective threshold becomes
-    //   max(pca_bridge_black_threshold, _backgroundValue + 0.02 × multiplier)
-    // matching the PCA-shape gather's per-frame adaptive cutoff so the same
-    // bg estimate drives both. Absolute value is the noise floor.
+    // Background-relative PCA-bridge threshold. "Black bridge" means close
+    // to the current runtime background, not literal zero.
     const float bridgeBgMult = probConfig.pca_bridge_black_bg_multiplier;
+    const float bridgeBgMargin = std::max(0.0f, probConfig.pca_bridge_black_bg_margin);
     const float bridgeBgAdaptive = (bridgeBgMult > 0.0f)
-        ? (_backgroundValue + 0.02f * bridgeBgMult)
+        ? (_backgroundValue + bridgeBgMargin * bridgeBgMult)
         : 0.0f;
     const float blackThreshold = std::max(
         std::max(0.0f, probConfig.pca_bridge_black_threshold),
@@ -3545,7 +3781,10 @@ CostCallbackPair Frame::trySplitCellPhased(
         boxRadius,
         selfClaim,
         otherCellsClaimSets,
-        &gstats);
+        &gstats,
+        -1.0f,
+        simulationConfig.pca_shape_bg_floor,
+        simulationConfig.pca_shape_bg_margin);
 
     std::cout << "  [Voronoi Out] " << parentName
               << " box=" << gstats.boxVoxels
@@ -3628,8 +3867,12 @@ CostCallbackPair Frame::trySplitCellPhased(
     for (int i = 1; i < 3; ++i) {
         if (radii3[i] < radii3[shortIdx]) shortIdx = i;
     }
-    std::vector<cv::Point3f> primaryDirs{axes3[shortIdx]};
-    std::vector<std::string> primaryNames{names3[shortIdx]};
+    std::vector<cv::Point3f> primaryDirs;
+    std::vector<std::string> primaryNames;
+    if (probConfig.split_candidate_enable_shortest_axis) {
+        primaryDirs.push_back(axes3[shortIdx]);
+        primaryNames.push_back(names3[shortIdx]);
+    }
 
     // Add the image-PCA direction (from pre-pass, supplied via
     // snapshot.splitAxisDir) as an additional primary axis. For near-round
@@ -3637,7 +3880,8 @@ CostCallbackPair Frame::trySplitCellPhased(
     // real direction connecting the two bright blobs in the current frame.
     // Only add if it's sufficiently different from the existing axes
     // (|dot| < 0.95 against all).
-    if (useSnapshotDirection && snapshotValid) {
+    if (probConfig.split_candidate_enable_image_pca_axis &&
+        useSnapshotDirection && snapshotValid) {
         const cv::Point3f pcaDir = snapshot.splitAxisDir;
         const double pcaNorm = cv::norm(pcaDir);
         if (pcaNorm > 1e-3) {
@@ -3675,8 +3919,17 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " shortestR=" << radii3[shortIdx]
                   << " selected=[" << selAxes.str() << "]"
                   << " nPrimaries=" << primaryDirs.size()
-                  << " (expect 2 midpoints × 5 variants each = "
-                  << (primaryDirs.size() * 10) << " candidates before cap)"
+                  << " toggles="
+                  << " shortestAxis=" << probConfig.split_candidate_enable_shortest_axis
+                  << " imgPca=" << probConfig.split_candidate_enable_image_pca_axis
+                  << " dataMid=" << probConfig.split_candidate_enable_data_midpoint
+                  << " snapMid=" << probConfig.split_candidate_enable_snapshot_midpoint
+                  << " primary=" << probConfig.split_candidate_enable_primary_variant
+                  << " rot-=" << probConfig.split_candidate_enable_rotation_minus_variant
+                  << " rot+=" << probConfig.split_candidate_enable_rotation_plus_variant
+                  << " trans-=" << probConfig.split_candidate_enable_translation_minus_variant
+                  << " trans+=" << probConfig.split_candidate_enable_translation_plus_variant
+                  << " bridge=" << probConfig.split_candidate_enable_bridge_candidate
                   << " nPixels=" << pixels.size()
                   << std::endl;
     }
@@ -3756,9 +4009,12 @@ CostCallbackPair Frame::trySplitCellPhased(
         };
         std::vector<AxisMidOption> axisMids;
         const auto &ap = axisPlace[di];
-        axisMids.push_back({ap.midpoint, ap.separation, "data_" + axLabel});
+        if (probConfig.split_candidate_enable_data_midpoint) {
+            axisMids.push_back({ap.midpoint, ap.separation, "data_" + axLabel});
+        }
 
-        if (snapshotValid && snapshot.splitAxisLength > 1e-3f) {
+        if (probConfig.split_candidate_enable_snapshot_midpoint &&
+            snapshotValid && snapshot.splitAxisLength > 1e-3f) {
             const float dist = static_cast<float>(cv::norm(ap.midpoint - snapshot.position));
             if (dist > 0.5f) {
                 axisMids.push_back({snapshot.position, ap.separation, "snap_" + axLabel});
@@ -3778,31 +4034,55 @@ CostCallbackPair Frame::trySplitCellPhased(
             cv::Point3f d2(midpoint.x + half * dir0.x,
                            midpoint.y + half * dir0.y,
                            midpoint.z + half * dir0.z);
-            candidates.push_back({d1, d2, baseLabel + "_primary"});
+            if (probConfig.split_candidate_enable_primary_variant) {
+                candidates.push_back({d1, d2, baseLabel + "_primary"});
+            }
 
             // Rotation variants around an axis perpendicular to dir0.
-            for (float sign : {-1.0f, 1.0f}) {
-                const float angle = sign * rotDeltaRad;
-                const cv::Point3f rDir = rotateAroundAxis(dir0, perpU, angle);
-                candidates.push_back({
-                    cv::Point3f(midpoint.x - half * rDir.x,
-                                midpoint.y - half * rDir.y,
-                                midpoint.z - half * rDir.z),
-                    cv::Point3f(midpoint.x + half * rDir.x,
-                                midpoint.y + half * rDir.y,
-                                midpoint.z + half * rDir.z),
-                    baseLabel + (sign < 0 ? "_rot-" : "_rot+")
-                });
+            if (probConfig.split_candidate_enable_rotation_minus_variant ||
+                probConfig.split_candidate_enable_rotation_plus_variant) {
+                for (float sign : {-1.0f, 1.0f}) {
+                    if (sign < 0.0f &&
+                        !probConfig.split_candidate_enable_rotation_minus_variant) {
+                        continue;
+                    }
+                    if (sign > 0.0f &&
+                        !probConfig.split_candidate_enable_rotation_plus_variant) {
+                        continue;
+                    }
+                    const float angle = sign * rotDeltaRad;
+                    const cv::Point3f rDir = rotateAroundAxis(dir0, perpU, angle);
+                    candidates.push_back({
+                        cv::Point3f(midpoint.x - half * rDir.x,
+                                    midpoint.y - half * rDir.y,
+                                    midpoint.z - half * rDir.z),
+                        cv::Point3f(midpoint.x + half * rDir.x,
+                                    midpoint.y + half * rDir.y,
+                                    midpoint.z + half * rDir.z),
+                        baseLabel + (sign < 0 ? "_rot-" : "_rot+")
+                    });
+                }
             }
 
             // Translation variants along dir0.
-            for (float sign : {-1.0f, 1.0f}) {
-                const float t = sign * transDelta;
-                candidates.push_back({
-                    cv::Point3f(d1.x + t * dir0.x, d1.y + t * dir0.y, d1.z + t * dir0.z),
-                    cv::Point3f(d2.x + t * dir0.x, d2.y + t * dir0.y, d2.z + t * dir0.z),
-                    baseLabel + (sign < 0 ? "_trans-" : "_trans+")
-                });
+            if (probConfig.split_candidate_enable_translation_minus_variant ||
+                probConfig.split_candidate_enable_translation_plus_variant) {
+                for (float sign : {-1.0f, 1.0f}) {
+                    if (sign < 0.0f &&
+                        !probConfig.split_candidate_enable_translation_minus_variant) {
+                        continue;
+                    }
+                    if (sign > 0.0f &&
+                        !probConfig.split_candidate_enable_translation_plus_variant) {
+                        continue;
+                    }
+                    const float t = sign * transDelta;
+                    candidates.push_back({
+                        cv::Point3f(d1.x + t * dir0.x, d1.y + t * dir0.y, d1.z + t * dir0.z),
+                        cv::Point3f(d2.x + t * dir0.x, d2.y + t * dir0.y, d2.z + t * dir0.z),
+                        baseLabel + (sign < 0 ? "_trans-" : "_trans+")
+                    });
+                }
             }
         }
     }
@@ -3813,7 +4093,8 @@ CostCallbackPair Frame::trySplitCellPhased(
     // long-axis dark-bridge bin analysis. It competes against the standard
     // data_/snap_ candidates under the same burn-in + bio + bridge + cost
     // gates — the bridge no longer has its own accepting path.
-    if (bridgeProposal != nullptr) {
+    if (bridgeProposal != nullptr &&
+        probConfig.split_candidate_enable_bridge_candidate) {
         Candidate bridgeCand;
         bridgeCand.d1Pos = bridgeProposal->d1Pos;
         bridgeCand.d2Pos = bridgeProposal->d2Pos;
@@ -3828,6 +4109,24 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " gapBins=" << bridgeProposal->gapStartBin << "-"
                   << bridgeProposal->gapEndBin
                   << std::endl;
+    }
+
+    if (candidates.empty()) {
+        std::cout << "[Split Reject bio] " << parentName
+                  << " reason=no_enabled_split_candidates"
+                  << " shortestAxis=" << probConfig.split_candidate_enable_shortest_axis
+                  << " imgPca=" << probConfig.split_candidate_enable_image_pca_axis
+                  << " dataMid=" << probConfig.split_candidate_enable_data_midpoint
+                  << " snapMid=" << probConfig.split_candidate_enable_snapshot_midpoint
+                  << " primary=" << probConfig.split_candidate_enable_primary_variant
+                  << " rot-=" << probConfig.split_candidate_enable_rotation_minus_variant
+                  << " rot+=" << probConfig.split_candidate_enable_rotation_plus_variant
+                  << " trans-=" << probConfig.split_candidate_enable_translation_minus_variant
+                  << " trans+=" << probConfig.split_candidate_enable_translation_plus_variant
+                  << " bridge=" << probConfig.split_candidate_enable_bridge_candidate
+                  << std::endl;
+        restoreLiveParent();
+        return {0.0, noop};
     }
 
     const int Kmax = std::max(1, probConfig.split_candidates_per_attempt);
@@ -4133,8 +4432,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             // the savedSynth reference (cv::Mat shallow copy = free).
             const cv::Size shape = getImageShape();
             for (int z = zLo; z <= zHi; ++z) {
-                cv::Mat synthImage = cv::Mat(shape, CV_32F,
-                                            cv::Scalar(_backgroundValue));
+                cv::Mat synthImage = makeSynthBackgroundSlice(static_cast<size_t>(z), shape);
                 const float zf = static_cast<float>(z_slices[z]);
                 for (const auto &cell : cells) {
                     const float cmr = std::max({cell.getARadius(),
@@ -4539,8 +4837,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                     std::max(rd1.getZ(), rd2.getZ()) + extentR)));
                 const cv::Size shape = getImageShape();
                 for (int z = zLo; z <= zHi; ++z) {
-                    cv::Mat synthImage = cv::Mat(shape, CV_32F,
-                                                cv::Scalar(_backgroundValue));
+                    cv::Mat synthImage = makeSynthBackgroundSlice(static_cast<size_t>(z), shape);
                     const float zf = static_cast<float>(z_slices[z]);
                     for (const auto &cell : cells) {
                         const float cmr = std::max({cell.getARadius(),

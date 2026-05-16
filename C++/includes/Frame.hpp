@@ -96,8 +96,8 @@ public:
     std::vector<cv::Mat> generateSynthFrameFast(Ellipsoid &oldCell, Ellipsoid &newCell,
                                                 int *outAffectedZMin = nullptr,
                                                 int *outAffectedZMax = nullptr);
-    std::vector<cv::Mat> generateOutputFrame();
-    std::vector<cv::Mat> generateOutputSynthFrame();
+    std::vector<cv::Mat> generateOutputFrame(float normalizedExportMaxBrightness = -1.0f);
+    std::vector<cv::Mat> generateOutputSynthFrame(float normalizedExportMaxBrightness = -1.0f);
 
     // Cost and optimization
     Cost calculateCost(const std::vector<cv::Mat> &synthFrame);
@@ -308,6 +308,8 @@ public:
         _realFrame.shrink_to_fit();
         _synthFrame.clear();
         _synthFrame.shrink_to_fit();
+        _synthBackgroundNoise.clear();
+        _synthBackgroundNoise.shrink_to_fit();
         _signalProbability.clear();
         _signalProbability.shrink_to_fit();
         _signalMap.clear();
@@ -397,6 +399,9 @@ private:
     std::string imageName;
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
+    // Cached zero-mean empirical background residuals. When enabled, synth
+    // renders start from `_backgroundValue + residual` instead of a flat image.
+    std::vector<cv::Mat> _synthBackgroundNoise;
     // Signal centers (yp ffc1917) — bright clusters in the real image that
     // signal-guided perturbation snaps cells onto.
     std::vector<SignalCenter> _signalCenters;
@@ -458,6 +463,8 @@ private:
     // Voronoi territory during perturbation cost computation.
     float _voronoiBleedWeight = 0.0f;
     cv::Size getImageShape();
+    void rebuildSynthBackgroundNoise();
+    cv::Mat makeSynthBackgroundSlice(size_t sliceIndex, const cv::Size &shape) const;
 
     // Rebuild _currentCostPerSlice and _currentCost from scratch by walking
     // every slice of _synthFrame vs _realFrame. Used after a full render

@@ -15,6 +15,9 @@
 #include "GeometryDerivation.hpp"
 #include <chrono>
 #include <algorithm>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 
 class Args
@@ -40,6 +43,46 @@ void loadConfig(const std::string &path, BaseConfig &config)
 {
     YAML::Node node = YAML::LoadFile(path);
     config.explodeConfig(node);
+}
+
+void applyThreadCaps(const SimulationConfig &simulation)
+{
+    const int requestedGlobal = simulation.global_thread_cap;
+    const int requestedOpenCv = simulation.opencv_thread_cap;
+
+    if (requestedGlobal > 0) {
+#ifdef _OPENMP
+        const int hardwareThreads = std::max(1, omp_get_num_procs());
+        const int ompThreads = std::clamp(requestedGlobal, 1, hardwareThreads);
+        omp_set_dynamic(0);
+        omp_set_num_threads(ompThreads);
+        std::cout << "[ThreadConfig] OpenMP cap requested=" << requestedGlobal
+                  << " applied=" << omp_get_max_threads()
+                  << " hardware_threads=" << hardwareThreads
+                  << '\n';
+#else
+        std::cout << "[ThreadConfig] OpenMP unavailable; global_thread_cap="
+                  << requestedGlobal << " ignored\n";
+#endif
+    } else {
+#ifdef _OPENMP
+        std::cout << "[ThreadConfig] OpenMP cap disabled; max_threads="
+                  << omp_get_max_threads() << '\n';
+#else
+        std::cout << "[ThreadConfig] OpenMP unavailable\n";
+#endif
+    }
+
+    if (requestedOpenCv > 0) {
+        cv::setNumThreads(requestedOpenCv);
+        std::cout << "[ThreadConfig] OpenCV threads requested=" << requestedOpenCv
+                  << " applied=" << cv::getNumThreads()
+                  << '\n';
+    } else {
+        std::cout << "[ThreadConfig] OpenCV thread cap disabled; current="
+                  << cv::getNumThreads()
+                  << '\n';
+    }
 }
 
 Args initArgs(int argc, char *argv[]) {
@@ -122,6 +165,7 @@ int main(int argc, char *argv[])
         config.simulation.resume_source_dir = args.resumeSourceDir;
     }
 
+    applyThreadCaps(config.simulation);
     config.printConfig();
 
     if (config.cellType == "ellipsoid" && config.cell) {

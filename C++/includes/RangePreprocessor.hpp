@@ -16,6 +16,7 @@ struct RangePreprocessStats {
     int excludedRanges = 0;
     float finalThreshold = 0.0f;
     float brightBoostThreshold = 0.0f;
+    float brightBoostEffectiveFactor = 1.0f;
     std::size_t brightBoostedVoxels = 0;
     std::size_t outputNonzero = 0;
 };

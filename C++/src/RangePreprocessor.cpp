@@ -396,6 +396,7 @@ ImageStack RangePreprocessor::apply(const ImageStack &rawSlices,
     }
 
     float brightBoostThreshold = 0.0f;
+    float brightBoostEffectiveFactor = 1.0f;
     std::size_t brightBoostedVoxels = 0;
     const float brightBoostFraction = simulation.range_preprocess_bright_boost_fraction;
     const float brightBoostFactor = simulation.range_preprocess_bright_boost_factor;
@@ -406,7 +407,21 @@ ImageStack RangePreprocessor::apply(const ImageStack &rawSlices,
         const float boostPercentile =
             std::clamp((1.0f - brightBoostFraction) * 100.0f, 0.0f, 100.0f);
         brightBoostThreshold =
-            percentileLinear(std::move(nonzeroThresholded), boostPercentile);
+            percentileLinear(nonzeroThresholded, boostPercentile);
+
+        constexpr float kNormalizedSaturation = 1.0f;
+        float maxBoostInput = 0.0f;
+        for (float value : nonzeroThresholded) {
+            if (std::isfinite(value) && value > 0.0f &&
+                value >= brightBoostThreshold) {
+                maxBoostInput = std::max(maxBoostInput, value);
+            }
+        }
+        brightBoostEffectiveFactor = brightBoostFactor;
+        while (maxBoostInput > 0.0f &&
+               maxBoostInput * brightBoostEffectiveFactor > kNormalizedSaturation) {
+            brightBoostEffectiveFactor *= 0.5f;
+        }
 
         #pragma omp parallel for schedule(static) reduction(+:brightBoostedVoxels)
         for (int z = 0; z < shape.depth; ++z) {
@@ -416,7 +431,7 @@ ImageStack RangePreprocessor::apply(const ImageStack &rawSlices,
                 for (int x = 0; x < shape.cols; ++x) {
                     if (std::isfinite(row[x]) && row[x] > 0.0f &&
                         row[x] >= brightBoostThreshold) {
-                        row[x] *= brightBoostFactor;
+                        row[x] *= brightBoostEffectiveFactor;
                         ++brightBoostedVoxels;
                     }
                 }
@@ -438,6 +453,7 @@ ImageStack RangePreprocessor::apply(const ImageStack &rawSlices,
         stats->excludedRanges = excludedRanges;
         stats->finalThreshold = finalThreshold;
         stats->brightBoostThreshold = brightBoostThreshold;
+        stats->brightBoostEffectiveFactor = brightBoostEffectiveFactor;
         stats->brightBoostedVoxels = brightBoostedVoxels;
         stats->outputNonzero = outputNonzero;
     }
@@ -464,6 +480,7 @@ ImageStack RangePreprocessor::apply(const ImageStack &rawSlices,
             << " final_threshold=" << finalThreshold
             << " bright_boost_fraction=" << brightBoostFraction
             << " bright_boost_factor=" << brightBoostFactor
+            << " bright_boost_effective_factor=" << brightBoostEffectiveFactor
             << " bright_boost_threshold=" << brightBoostThreshold
             << " bright_boosted_voxels=" << brightBoostedVoxels
             << " output_slices=" << preprocessed.size()

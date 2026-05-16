@@ -151,9 +151,33 @@ TEST(RangePreprocessorTest, BoostsBrightestNonzeroValuesBeforeInterpolation)
     ASSERT_EQ(out.size(), 1u);
     EXPECT_FLOAT_EQ(out[0].at<float>(0, 0), 0.1f);
     EXPECT_FLOAT_EQ(out[0].at<float>(0, 1), 0.2f);
-    EXPECT_FLOAT_EQ(out[0].at<float>(0, 2), 1.5f);
-    EXPECT_FLOAT_EQ(out[0].at<float>(0, 3), 2.0f);
+    EXPECT_FLOAT_EQ(out[0].at<float>(0, 2), 0.75f);
+    EXPECT_FLOAT_EQ(out[0].at<float>(0, 3), 1.0f);
     EXPECT_NEAR(stats.brightBoostThreshold, 0.25f, 1e-6f);
+    EXPECT_FLOAT_EQ(stats.brightBoostEffectiveFactor, 2.5f);
+    EXPECT_EQ(stats.brightBoostedVoxels, 2u);
+    EXPECT_EQ(stats.outputNonzero, 4u);
+}
+
+TEST(RangePreprocessorTest, HalvesBrightBoostFactorUntilTopValuesDoNotSaturate)
+{
+    BaseConfig cfg = makeRangeConfig();
+    cfg.simulation.range_preprocess_range_count = 1;
+    cfg.simulation.range_preprocess_bright_boost_fraction = 0.50f;
+    cfg.simulation.range_preprocess_bright_boost_factor = 8.0f;
+    const ImageStack input = singleSlice(1, 4, {10.0f, 20.0f, 30.0f, 40.0f});
+    RangePreprocessStats stats;
+    std::ostringstream log;
+
+    const ImageStack out = RangePreprocessor::apply(input, cfg, "synthetic.tif", &stats, &log);
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_FLOAT_EQ(out[0].at<float>(0, 0), 0.1f);
+    EXPECT_FLOAT_EQ(out[0].at<float>(0, 1), 0.2f);
+    EXPECT_FLOAT_EQ(out[0].at<float>(0, 2), 0.6f);
+    EXPECT_FLOAT_EQ(out[0].at<float>(0, 3), 0.8f);
+    EXPECT_NEAR(stats.brightBoostThreshold, 0.25f, 1e-6f);
+    EXPECT_FLOAT_EQ(stats.brightBoostEffectiveFactor, 2.0f);
     EXPECT_EQ(stats.brightBoostedVoxels, 2u);
     EXPECT_EQ(stats.outputNonzero, 4u);
 }

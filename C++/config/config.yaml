@@ -46,7 +46,7 @@ cell:
 
   initialRadiusScale: 1.0
   initialBrightness: 1.0
-  backgroundColor: 0.0
+  backgroundColor: 0.2
 
   minBrightness: 0.1
   maxBrightness: 0.98
@@ -191,7 +191,7 @@ simulation:
   range_preprocess_range_percentile: 99.0
   range_preprocess_occupancy_threshold_percent: 0.2
   range_preprocess_final_threshold_percentile: 90.0
-  range_preprocess_bright_boost_fraction: 0.15
+  range_preprocess_bright_boost_fraction: 0.6
   range_preprocess_bright_boost_factor: 5.0
   range_preprocess_blur_enabled: true
   range_preprocess_interpolate_z: true
@@ -309,7 +309,7 @@ simulation:
   post_alignment_tiny_particle_removal_enabled: false
   post_alignment_final_blur_sigma: 0.0
 
-  export_preprocessed_images: false
+  
   # Debug signal-guidance localization. When true, exports two stacks per
   # frame under signal_debug/: center cubes on black background and a
   # grayscale perturb-probability field on black background.
@@ -322,6 +322,7 @@ simulation:
   export_perturb_cell_center_debug_images: true
   export_frame_png: false
   export_frame_tiff: true
+  export_preprocessed_images: false
   # Output bit depth for normalized float images: 8 or 16.
   # This is independent from input normalization hard max.
   export_bit_depth: 8
@@ -569,7 +570,11 @@ prob:
   split_axis_alignment_gate_enabled: true
   split_axis_alignment_sphere_angle_degrees: 120.0
   # allowed = max(min_angle, sphere_angle / (1 + shrink * max(0, elongation - 1)))
-  split_axis_alignment_elongation_shrink: 0.75
+  # Relaxed 0.75 -> 0.30 after fluo frame-20/21 cell_21: the best split
+  # satisfied cost/bridge cues but was rejected because one daughter short
+  # axis was 79.9 deg from the parent while the old elongation-shrunk limit
+  # was 57.8 deg. At parent elongation 2.44 this gives ~83.9 deg.
+  split_axis_alignment_elongation_shrink: 0.30
   split_axis_alignment_min_angle_degrees: 20.0
   # Reject if generated daughters overlap each other by more than this
   # fraction of either daughter's voxel body.

@@ -925,6 +925,312 @@ BoundingBox3D Frame::computeUnionBboxWithPoints(
     return result;
 }
 
+float Frame::estimateBboxLocalBackground(const BoundingBox3D &bbox) const
+{
+    if (!bbox.isValid() || _realFrame.empty() ||
+        !simulationConfig.bbox_local_background_enabled) {
+        return _backgroundValue;
+    }
+
+    const float exclusionScale = std::max(
+        1.0f, simulationConfig.bbox_local_background_cell_exclusion_scale);
+    const float percentile = std::clamp(
+        simulationConfig.bbox_local_background_percentile, 0.0f, 1.0f);
+    const int minSamples = std::max(1, simulationConfig.bbox_local_background_min_samples);
+
+    std::vector<float> values;
+    values.reserve(static_cast<size_t>(std::min<long long>(
+        static_cast<long long>(bbox.volume()), 1000000LL)));
+
+    for (int z = bbox.zMin; z <= bbox.zMax; ++z) {
+        if (z < 0 || z >= static_cast<int>(_realFrame.size())) continue;
+        const cv::Mat &slice = _realFrame[z];
+        if (slice.empty() || slice.type() != CV_32F) continue;
+        for (int y = bbox.yMin; y <= bbox.yMax; ++y) {
+            if (y < 0 || y >= slice.rows) continue;
+            const float *row = slice.ptr<float>(y);
+            for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
+                if (x < 0 || x >= slice.cols) continue;
+                const cv::Point3f p(
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(z));
+                bool insideExpandedCell = false;
+                for (const auto &cell : cells) {
+                    if (cell.isPointInsideEllipsoid(p, exclusionScale)) {
+                        insideExpandedCell = true;
+                        break;
+                    }
+                }
+                if (!insideExpandedCell) {
+                    const float v = row[x];
+                    if (std::isfinite(v)) values.push_back(v);
+                }
+            }
+        }
+    }
+
+    if (static_cast<int>(values.size()) < minSamples) {
+        if (simulationConfig.bbox_local_background_debug) {
+            std::cout << "[Bbox Local Background] samples=" << values.size()
+                      << " minSamples=" << minSamples
+                      << " fallback=" << _backgroundValue
+                      << " reason=too_few_samples" << std::endl;
+        }
+        return _backgroundValue;
+    }
+
+    const size_t idx = std::min(
+        values.size() - 1,
+        static_cast<size_t>(std::floor(percentile * static_cast<float>(values.size() - 1))));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(idx), values.end());
+    const float rawLocal = values[idx];
+
+    const float frameBlend = std::clamp(
+        simulationConfig.bbox_local_background_blend_with_frame, 0.0f, 1.0f);
+    const float blended = frameBlend * _backgroundValue + (1.0f - frameBlend) * rawLocal;
+    const float minDelta = simulationConfig.bbox_local_background_min_delta;
+    const float maxDelta = std::max(minDelta, simulationConfig.bbox_local_background_max_delta);
+    const float lo = _backgroundValue + minDelta;
+    const float hi = _backgroundValue + maxDelta;
+    const float local = std::clamp(blended, lo, hi);
+
+    if (simulationConfig.bbox_local_background_debug) {
+        std::cout << "[Bbox Local Background]"
+                  << " bboxXYZ=(" << bbox.xMin << "-" << bbox.xMax
+                  << "," << bbox.yMin << "-" << bbox.yMax
+                  << "," << bbox.zMin << "-" << bbox.zMax << ")"
+                  << " samples=" << values.size()
+                  << " percentile=" << percentile
+                  << " frame_bg=" << _backgroundValue
+                  << " raw=" << rawLocal
+                  << " blend=" << frameBlend
+                  << " local=" << local
+                  << " clamp=(" << lo << "," << hi << ")"
+                  << " exclusionScale=" << exclusionScale
+                  << std::endl;
+    }
+
+    return local;
+}
+
+void Frame::burnBboxLocalBackgroundIntoSynth()
+{
+    if (!simulationConfig.bbox_local_background_enabled ||
+        !simulationConfig.bbox_local_background_burn_into_synth ||
+        _realFrame.empty() || _synthFrame.empty() ||
+        _realFrame.size() != _synthFrame.size() ||
+        cells.empty()) {
+        return;
+    }
+
+    const float exclusionScale = std::max(
+        1.0f, simulationConfig.bbox_local_background_burn_cell_exclusion_scale);
+    const float percentile = std::clamp(
+        simulationConfig.bbox_local_background_percentile, 0.0f, 1.0f);
+    const int minSamples = std::max(1, simulationConfig.bbox_local_background_min_samples);
+    const float frameBlend = std::clamp(
+        simulationConfig.bbox_local_background_blend_with_frame, 0.0f, 1.0f);
+    const float minDelta = simulationConfig.bbox_local_background_min_delta;
+    const float maxDelta = std::max(minDelta, simulationConfig.bbox_local_background_max_delta);
+    const float lo = _backgroundValue + minDelta;
+    const float hi = _backgroundValue + maxDelta;
+    const float burnMargin =
+        std::max(0.0f, simulationConfig.bbox_local_background_burn_margin);
+    const float featherRadius =
+        std::max(0.0f, simulationConfig.bbox_local_background_burn_feather_radius);
+    const float globalFallbackWeight = std::max(
+        0.0f, simulationConfig.bbox_local_background_burn_global_fallback_weight);
+
+    std::vector<cv::Mat> exclusionMask;
+    exclusionMask.reserve(_realFrame.size());
+    for (const auto &slice : _realFrame) {
+        exclusionMask.emplace_back(cv::Mat::zeros(slice.size(), CV_32F));
+    }
+
+    for (const auto &cell : cells) {
+        EllipsoidParams params = cell.getCellParams();
+        params.aRadius *= exclusionScale;
+        params.bRadius *= exclusionScale;
+        params.cRadius *= exclusionScale;
+        params.brightness = 1.0f;
+        Ellipsoid expandedCell(params);
+        for (size_t z = 0; z < exclusionMask.size(); ++z) {
+            expandedCell.draw(exclusionMask[z], simulationConfig, static_cast<float>(z));
+        }
+    }
+
+    auto estimateFromMaskedBbox = [&](const BoundingBox3D &bbox) -> std::pair<float, size_t> {
+        std::vector<float> values;
+        values.reserve(static_cast<size_t>(std::min<long long>(
+            static_cast<long long>(bbox.volume()), 1000000LL)));
+
+        for (int z = bbox.zMin; z <= bbox.zMax; ++z) {
+            if (z < 0 || z >= static_cast<int>(_realFrame.size())) continue;
+            const cv::Mat &realSlice = _realFrame[z];
+            const cv::Mat &maskSlice = exclusionMask[z];
+            if (realSlice.empty() || realSlice.type() != CV_32F) continue;
+            for (int y = bbox.yMin; y <= bbox.yMax; ++y) {
+                if (y < 0 || y >= realSlice.rows) continue;
+                const float *realRow = realSlice.ptr<float>(y);
+                const float *maskRow = maskSlice.ptr<float>(y);
+                for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
+                    if (x < 0 || x >= realSlice.cols) continue;
+                    if (maskRow[x] > 0.0f) continue;
+                    const float v = realRow[x];
+                    if (std::isfinite(v)) values.push_back(v);
+                }
+            }
+        }
+
+        if (static_cast<int>(values.size()) < minSamples) {
+            return {_backgroundValue, values.size()};
+        }
+
+        const size_t idx = std::min(
+            values.size() - 1,
+            static_cast<size_t>(std::floor(percentile * static_cast<float>(values.size() - 1))));
+        std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(idx), values.end());
+        const float rawLocal = values[idx];
+        const float blended = frameBlend * _backgroundValue + (1.0f - frameBlend) * rawLocal;
+        return {std::clamp(blended, lo, hi), values.size()};
+    };
+
+    struct LocalBackgroundEntry {
+        BoundingBox3D bbox;
+        cv::Point3f center;
+        float background = 0.0f;
+        size_t samples = 0;
+    };
+
+    std::vector<LocalBackgroundEntry> entries;
+    entries.reserve(cells.size());
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const BoundingBox3D bbox = computeCellBbox(i, _bboxMarginScale);
+        if (!bbox.isValid()) continue;
+        const auto estimate = estimateFromMaskedBbox(bbox);
+        entries.push_back(LocalBackgroundEntry{
+            bbox,
+            cv::Point3f(cells[i].getX(), cells[i].getY(), cells[i].getZ()),
+            estimate.first,
+            estimate.second});
+    }
+
+    if (entries.empty()) {
+        return;
+    }
+
+    std::vector<cv::Mat> bgSum;
+    std::vector<cv::Mat> weightSum;
+    bgSum.reserve(_synthFrame.size());
+    weightSum.reserve(_synthFrame.size());
+    for (const auto &slice : _synthFrame) {
+        bgSum.emplace_back(cv::Mat::zeros(slice.size(), CV_32F));
+        weightSum.emplace_back(cv::Mat::zeros(slice.size(), CV_32F));
+    }
+
+    auto smoothStep = [](float t) -> float {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+
+    auto bboxFeatherWeight = [&](const BoundingBox3D &bbox, int x, int y, int z) -> float {
+        if (featherRadius <= 1e-6f) {
+            return 1.0f;
+        }
+        const int dx = std::min(x - bbox.xMin, bbox.xMax - x);
+        const int dy = std::min(y - bbox.yMin, bbox.yMax - y);
+        const int dz = std::min(z - bbox.zMin, bbox.zMax - z);
+        const float edgeDistance = static_cast<float>(std::max(0, std::min({dx, dy, dz})));
+        return smoothStep(edgeDistance / featherRadius);
+    };
+
+    size_t accumulatedVoxels = 0;
+    for (const auto &entry : entries) {
+        for (int z = entry.bbox.zMin; z <= entry.bbox.zMax; ++z) {
+            if (z < 0 || z >= static_cast<int>(_synthFrame.size())) continue;
+            cv::Mat &sumSlice = bgSum[z];
+            cv::Mat &weightSlice = weightSum[z];
+            const cv::Mat &maskSlice = exclusionMask[z];
+            const cv::Mat &synthSlice = _synthFrame[z];
+            for (int y = entry.bbox.yMin; y <= entry.bbox.yMax; ++y) {
+                if (y < 0 || y >= synthSlice.rows) continue;
+                float *sumRow = sumSlice.ptr<float>(y);
+                float *weightRow = weightSlice.ptr<float>(y);
+                const float *maskRow = maskSlice.ptr<float>(y);
+                const float *synthRow = synthSlice.ptr<float>(y);
+                for (int x = entry.bbox.xMin; x <= entry.bbox.xMax; ++x) {
+                    if (x < 0 || x >= synthSlice.cols) continue;
+                    if (maskRow[x] > 0.0f) continue;
+                    if (synthRow[x] > _backgroundValue + burnMargin) continue;
+                    const float w = bboxFeatherWeight(entry.bbox, x, y, z);
+                    if (w <= 0.0f) continue;
+                    sumRow[x] += w * entry.background;
+                    weightRow[x] += w;
+                    ++accumulatedVoxels;
+                }
+            }
+        }
+    }
+
+    size_t burnedVoxels = 0;
+    const int nSlices = static_cast<int>(_synthFrame.size());
+    #pragma omp parallel for reduction(+:burnedVoxels) schedule(static)
+    for (int z = 0; z < nSlices; ++z) {
+        cv::Mat &synthSlice = _synthFrame[static_cast<size_t>(z)];
+        const cv::Mat &sumSlice = bgSum[static_cast<size_t>(z)];
+        const cv::Mat &weightSlice = weightSum[static_cast<size_t>(z)];
+        const cv::Mat &maskSlice = exclusionMask[static_cast<size_t>(z)];
+        for (int y = 0; y < synthSlice.rows; ++y) {
+            float *synthRow = synthSlice.ptr<float>(y);
+            const float *sumRow = sumSlice.ptr<float>(y);
+            const float *weightRow = weightSlice.ptr<float>(y);
+            const float *maskRow = maskSlice.ptr<float>(y);
+            for (int x = 0; x < synthSlice.cols; ++x) {
+                if (maskRow[x] > 0.0f) continue;
+                if (synthRow[x] > _backgroundValue + burnMargin) continue;
+                const float localWeight = weightRow[x];
+                if (localWeight <= 0.0f) continue;
+                const float totalWeight = localWeight + globalFallbackWeight;
+                const float background = (totalWeight > 0.0f)
+                    ? ((sumRow[x] + globalFallbackWeight * _backgroundValue) / totalWeight)
+                    : _backgroundValue;
+                synthRow[x] = std::clamp(background, 0.0f, 1.0f);
+                ++burnedVoxels;
+            }
+        }
+    }
+
+    if (!_useBboxCost) {
+        refreshFullCostCache();
+    }
+
+    if (simulationConfig.bbox_local_background_burn_debug ||
+        simulationConfig.bbox_local_background_debug) {
+        std::cout << "[Bbox Local Background Burn]"
+                  << " cells=" << cells.size()
+                  << " bboxes=" << entries.size()
+                  << " accumulatedVoxels=" << accumulatedVoxels
+                  << " burnedVoxels=" << burnedVoxels
+                  << " exclusionScale=" << exclusionScale
+                  << " featherRadius=" << featherRadius
+                  << " burnMargin=" << burnMargin
+                  << " fallbackWeight=" << globalFallbackWeight
+                  << std::endl;
+        for (const auto &entry : entries) {
+            std::cout << "  [Bbox Local Background Burn Box]"
+                      << " center=(" << entry.center.x << "," << entry.center.y
+                      << "," << entry.center.z << ")"
+                      << " bboxXYZ=(" << entry.bbox.xMin << "-" << entry.bbox.xMax
+                      << "," << entry.bbox.yMin << "-" << entry.bbox.yMax
+                      << "," << entry.bbox.zMin << "-" << entry.bbox.zMax << ")"
+                      << " samples=" << entry.samples
+                      << " background=" << entry.background
+                      << std::endl;
+        }
+    }
+}
+
 std::size_t Frame::computeVoronoiBleedVoxels(const Ellipsoid &cell,
                                              int cellIdx) const
 {
@@ -1054,7 +1360,8 @@ double Frame::calculateBboxCost(
     const BoundingBox3D &bbox,
     const std::vector<cv::Mat> &synthFrame,
     const std::vector<uint8_t> &mask,
-    int voronoiCellIdx) const
+    int voronoiCellIdx,
+    float localBackground) const
 {
     if (!bbox.isValid()) return 0.0;
     if (synthFrame.size() != _realFrame.size()) {
@@ -1083,6 +1390,19 @@ double Frame::calculateBboxCost(
     const int nx = bbox.nx();
     const int ny = bbox.ny();
     const bool useAsym = asymK > 1.0f + 1e-6f;
+    const bool useLocalSynthBackground =
+        simulationConfig.bbox_local_background_enabled &&
+        simulationConfig.bbox_local_background_apply_to_synth_cost &&
+        std::isfinite(localBackground);
+    const float synthBgMargin =
+        std::max(0.0f, simulationConfig.bbox_local_background_synth_margin);
+    auto evalSynthPixel = [&](float synthValue) -> float {
+        if (!useLocalSynthBackground) return synthValue;
+        if (synthValue <= _backgroundValue + synthBgMargin) {
+            return localBackground;
+        }
+        return synthValue;
+    };
     // When mask is empty, ALL voxels in the bbox contribute to cost —
     // no Voronoi neighbor exclusion. This is intentional: during any
     // single perturbCell call, neighbors' synth is constant between old
@@ -1116,7 +1436,7 @@ double Frame::calculateBboxCost(
                 if (useAsym) {
                     for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
                         if (useVoronoi && vorRow[x] != voronoiCellIdx) continue;
-                        const float d = ss[x] - rr[x];
+                        const float d = evalSynthPixel(ss[x]) - rr[x];
                         const float d2 = d * d;
                         const float mul = (d > asymThreshold) ? asymK : 1.0f;
                         sliceCost += d2 * mul;
@@ -1124,7 +1444,7 @@ double Frame::calculateBboxCost(
                 } else {
                     for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
                         if (useVoronoi && vorRow[x] != voronoiCellIdx) continue;
-                        const float d = ss[x] - rr[x];
+                        const float d = evalSynthPixel(ss[x]) - rr[x];
                         sliceCost += d * d;
                     }
                 }
@@ -1145,7 +1465,7 @@ double Frame::calculateBboxCost(
                 const int yOff = zOff + (y - bbox.yMin) * nx;
                 for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
                     if (!mask[yOff + (x - bbox.xMin)]) continue;
-                    const float d = ss[x] - rr[x];
+                    const float d = evalSynthPixel(ss[x]) - rr[x];
                     float d2 = d * d;
                     if (useAsym && d > asymThreshold) d2 *= asymK;
                     sliceCost += d2;
@@ -1645,6 +1965,20 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight,
                 bboxUnion.zMax = std::max(bboxUnion.zMax, b.zMax);
             }
         }
+        float bboxLocalBackground = std::numeric_limits<float>::quiet_NaN();
+        if (simulationConfig.bbox_local_background_enabled) {
+            if (haveSnapBbox) {
+                auto bgIt = _snapBboxLocalBackgrounds.find(cellName);
+                if (bgIt != _snapBboxLocalBackgrounds.end()) {
+                    bboxLocalBackground = bgIt->second;
+                } else {
+                    bboxLocalBackground = estimateBboxLocalBackground(bboxUnion);
+                    _snapBboxLocalBackgrounds[cellName] = bboxLocalBackground;
+                }
+            } else {
+                bboxLocalBackground = estimateBboxLocalBackground(bboxUnion);
+            }
+        }
 
         // No Voronoi exclusion mask for bbox cost. Neighbors' synth is
         // constant between old and new (only the perturbed cell changed)
@@ -1659,8 +1993,10 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight,
         // Voronoi cost is disabled (empty _voronoiMap) calculateBboxCost
         // ignores voronoiCellIdx and behaves identically to the legacy path.
         const int vorIdx = static_cast<int>(index);
-        oldImageCost = calculateBboxCost(bboxUnion, _synthFrame, noMask, vorIdx);
-        newImageCost = calculateBboxCost(bboxUnion, newSynthFrame, noMask, vorIdx);
+        oldImageCost = calculateBboxCost(
+            bboxUnion, _synthFrame, noMask, vorIdx, bboxLocalBackground);
+        newImageCost = calculateBboxCost(
+            bboxUnion, newSynthFrame, noMask, vorIdx, bboxLocalBackground);
     } else {
         // Legacy full-image path.
         newImageCost = calculateIncrementalCost(newSynthFrame,
@@ -2762,6 +3098,97 @@ static void rotationMatrixToEulerZYX(const cv::Matx33d &R,
     }
 }
 
+struct ShapeShellBrightness {
+    float innerMean{0.0f};
+    float outerMean{0.0f};
+    int innerCount{0};
+    int outerCount{0};
+};
+
+static ShapeShellBrightness measureShapeShellBrightness(
+    const std::vector<cv::Mat> &realFrame,
+    const std::string &name,
+    const cv::Point3f &center,
+    float aRadius,
+    float bRadius,
+    float cRadius,
+    float thetaX,
+    float thetaY,
+    float thetaZ,
+    float innerScale,
+    int sampleStride)
+{
+    ShapeShellBrightness out;
+    if (realFrame.empty() || realFrame[0].empty() ||
+        aRadius <= 1e-3f || bRadius <= 1e-3f || cRadius <= 1e-3f) {
+        return out;
+    }
+
+    EllipsoidParams params(
+        name,
+        center.x,
+        center.y,
+        center.z,
+        aRadius,
+        cRadius,
+        thetaX,
+        thetaY,
+        thetaZ,
+        1.0f);
+    params.bRadius = bRadius;
+    Ellipsoid candidate(params);
+
+    const int stride = std::max(1, sampleStride);
+    const float inner = std::clamp(innerScale, 0.05f, 0.95f);
+    const float maxR = std::max({aRadius, bRadius, cRadius});
+    const int zMin = std::max(0, static_cast<int>(std::floor(center.z - maxR)));
+    const int zMax = std::min(
+        static_cast<int>(realFrame.size()) - 1,
+        static_cast<int>(std::ceil(center.z + maxR)));
+    const int yMin = std::max(0, static_cast<int>(std::floor(center.y - maxR)));
+    const int yMax = std::min(
+        realFrame[0].rows - 1,
+        static_cast<int>(std::ceil(center.y + maxR)));
+    const int xMin = std::max(0, static_cast<int>(std::floor(center.x - maxR)));
+    const int xMax = std::min(
+        realFrame[0].cols - 1,
+        static_cast<int>(std::ceil(center.x + maxR)));
+
+    double innerSum = 0.0;
+    double outerSum = 0.0;
+    for (int z = zMin; z <= zMax; z += stride) {
+        const cv::Mat &slice = realFrame[z];
+        if (slice.empty() || slice.type() != CV_32F) continue;
+        for (int y = yMin; y <= yMax; y += stride) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = xMin; x <= xMax; x += stride) {
+                const cv::Point3f p(
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(z));
+                if (!candidate.isPointInsideEllipsoid(p, 1.0f)) continue;
+                const float v = row[x];
+                if (!std::isfinite(v)) continue;
+                if (candidate.isPointInsideEllipsoid(p, inner)) {
+                    innerSum += v;
+                    ++out.innerCount;
+                } else {
+                    outerSum += v;
+                    ++out.outerCount;
+                }
+            }
+        }
+    }
+
+    if (out.innerCount > 0) {
+        out.innerMean = static_cast<float>(innerSum / out.innerCount);
+    }
+    if (out.outerCount > 0) {
+        out.outerMean = static_cast<float>(outerSum / out.outerCount);
+    }
+    return out;
+}
+
 
 bool Frame::calibrateCellShapeViaPca(
     size_t cellIndex,
@@ -2885,11 +3312,22 @@ bool Frame::calibrateCellShapeViaPca(
                 if (bgEst.sampleCount >= 8) {
                     const float margin = std::max(0.0f, simCfg.pca_shape_bg_margin);
                     adaptiveCutoff = bgEst.percentile + margin;
-                    if (simCfg.pca_shape_bg_sigma_k > 0.0f && bgEst.robustSigma > 0.0f) {
+                    const float sigmaThreshold = std::max(
+                        0.0f, simCfg.pca_shape_bg_degenerate_sigma_threshold);
+                    if (simCfg.pca_shape_bg_sigma_k > 0.0f &&
+                        bgEst.robustSigma > sigmaThreshold) {
                         const float noiseCutoff = bgEst.median
                             + simCfg.pca_shape_bg_sigma_k * bgEst.robustSigma
                             + margin;
                         adaptiveCutoff = std::max(adaptiveCutoff, noiseCutoff);
+                    } else if (bgEst.p99 > bgEst.percentile + margin) {
+                        const float p99Fraction = std::clamp(
+                            simCfg.pca_shape_bg_degenerate_p99_fraction, 0.0f, 1.0f);
+                        const float degenerateCutoff =
+                            bgEst.percentile
+                            + p99Fraction * (bgEst.p99 - bgEst.percentile)
+                            + margin;
+                        adaptiveCutoff = std::max(adaptiveCutoff, degenerateCutoff);
                     }
                     log << "  [PCA Shape LocalBg] cell=" << cell.getName()
                         << " innerR=" << innerR << " outerR=" << outerR
@@ -2899,6 +3337,9 @@ bool Frame::calibrateCellShapeViaPca(
                         << " robust_sigma=" << bgEst.robustSigma
                         << " sigma_k=" << simCfg.pca_shape_bg_sigma_k
                         << " p99=" << bgEst.p99
+                        << " degenerate_sigma_threshold=" << sigmaThreshold
+                        << " degenerate_p99_fraction="
+                        << simCfg.pca_shape_bg_degenerate_p99_fraction
                         << " adaptiveCutoff=" << adaptiveCutoff
                         << " samples=" << bgEst.sampleCount
                         << std::endl;
@@ -3135,12 +3576,12 @@ bool Frame::calibrateCellShapeViaPca(
         // prevents the mask-feedback loops that motivated the percentile
         // experiment. The mask is frozen at birth radii and never participates
         // in the fit → no compounding bloat.
-        const float targetA = cellRadiusInflation * radiusScale *
-                              std::sqrt(static_cast<float>(matchedVariance[0]));
-        const float targetB = cellRadiusInflation * radiusScale *
-                              std::sqrt(static_cast<float>(matchedVariance[1]));
-        const float targetC = cellRadiusInflation * radiusScale *
-                              std::sqrt(static_cast<float>(matchedVariance[2]));
+        float targetA = cellRadiusInflation * radiusScale *
+                        std::sqrt(static_cast<float>(matchedVariance[0]));
+        float targetB = cellRadiusInflation * radiusScale *
+                        std::sqrt(static_cast<float>(matchedVariance[1]));
+        float targetC = cellRadiusInflation * radiusScale *
+                        std::sqrt(static_cast<float>(matchedVariance[2]));
         // No floor. Collapse prevented by birth-based mask (above).
 
         // Position update: centroid, capped.
@@ -3182,6 +3623,96 @@ bool Frame::calibrateCellShapeViaPca(
                 << " keep_previous=1"
                 << std::endl;
             break;
+        }
+
+        if (simulationConfig.pca_shape_outer_shell_shrink_enabled) {
+            const float innerScale = std::clamp(
+                simulationConfig.pca_shape_outer_shell_inner_scale, 0.05f, 0.95f);
+            const float minRatio = std::max(
+                0.0f, simulationConfig.pca_shape_outer_shell_min_outer_inner_ratio);
+            const float minSignal = std::max(
+                0.0f, simulationConfig.pca_shape_outer_shell_min_signal);
+            const float stepFraction = std::clamp(
+                simulationConfig.pca_shape_outer_shell_shrink_step_fraction, 0.0f, 0.95f);
+            const float maxShrink = std::clamp(
+                simulationConfig.pca_shape_outer_shell_max_shrink_fraction, 0.0f, 0.95f);
+            const int sampleStride = std::max(
+                1, simulationConfig.pca_shape_outer_shell_sample_stride);
+            const float minFactor = 1.0f - maxShrink;
+            const float stepFactor = 1.0f - stepFraction;
+            const float backgroundRef = std::max(0.0f, _backgroundValue);
+
+            float shrinkFactor = 1.0f;
+            ShapeShellBrightness shell = measureShapeShellBrightness(
+                _realFrame,
+                cell.getName(),
+                newCenter,
+                targetA,
+                targetB,
+                targetC,
+                static_cast<float>(targetTx),
+                static_cast<float>(targetTy),
+                static_cast<float>(targetTz),
+                innerScale,
+                sampleStride);
+            int shrinkSteps = 0;
+            auto shellLooksLikeBackground = [&]() {
+                if (shell.innerCount <= 0 || shell.outerCount <= 0) {
+                    return false;
+                }
+                const float innerSignal = std::max(0.0f, shell.innerMean - backgroundRef);
+                const float outerSignal = std::max(0.0f, shell.outerMean - backgroundRef);
+                const bool closeToBackground = outerSignal < minSignal;
+                const bool muchDimmerThanCore =
+                    innerSignal > minSignal &&
+                    outerSignal < innerSignal * minRatio;
+                return closeToBackground || muchDimmerThanCore;
+            };
+
+            while (stepFraction > 0.0f &&
+                   shrinkFactor * stepFactor >= minFactor &&
+                   shellLooksLikeBackground()) {
+                shrinkFactor *= stepFactor;
+                ++shrinkSteps;
+                shell = measureShapeShellBrightness(
+                    _realFrame,
+                    cell.getName(),
+                    newCenter,
+                    targetA * shrinkFactor,
+                    targetB * shrinkFactor,
+                    targetC * shrinkFactor,
+                    static_cast<float>(targetTx),
+                    static_cast<float>(targetTy),
+                    static_cast<float>(targetTz),
+                    innerScale,
+                    sampleStride);
+            }
+
+            if (shrinkSteps > 0) {
+                const float innerSignal = std::max(0.0f, shell.innerMean - backgroundRef);
+                const float outerSignal = std::max(0.0f, shell.outerMean - backgroundRef);
+                log << "  [PCA Shape Shell Shrink] cell=" << cell.getName()
+                    << " iter=" << iter
+                    << " steps=" << shrinkSteps
+                    << " factor=" << shrinkFactor
+                    << " innerMean=" << shell.innerMean
+                    << " outerMean=" << shell.outerMean
+                    << " innerSignal=" << innerSignal
+                    << " outerSignal=" << outerSignal
+                    << " ratio=" << (innerSignal > 1e-6f ? outerSignal / innerSignal : 0.0f)
+                    << " background=" << backgroundRef
+                    << " minSignal=" << minSignal
+                    << " minRatio=" << minRatio
+                    << " counts=(" << shell.innerCount << "," << shell.outerCount << ")"
+                    << " innerScale=" << innerScale
+                    << " stepFraction=" << stepFraction
+                    << " maxShrink=" << maxShrink
+                    << std::endl;
+            }
+
+            targetA *= shrinkFactor;
+            targetB *= shrinkFactor;
+            targetC *= shrinkFactor;
         }
 
         // Apply.
@@ -3307,12 +3838,25 @@ bool Frame::discoverPcaBridgeProposal(size_t cellIndex,
     std::vector<int> binBlack(bins, 0);
     std::vector<std::pair<BrightPixel, float>> nonblackWithProj;
 
+    float bridgeBackground = _backgroundValue;
+    if (simulationConfig.bbox_local_background_enabled &&
+        simulationConfig.bbox_local_background_apply_to_thresholds) {
+        const BoundingBox3D bridgeBbox = computeBboxAtPoint(
+            cv::Point3f(parent.getX(), parent.getY(), parent.getZ()),
+            longR,
+            1.0f);
+        bridgeBackground = estimateBboxLocalBackground(bridgeBbox);
+        log << "  [PCA Bridge LocalBg] cell=" << parent.getName()
+            << " local_bg=" << bridgeBackground
+            << " frame_bg=" << _backgroundValue << std::endl;
+    }
+
     // Background-relative PCA-bridge threshold. "Black bridge" means close
     // to the current runtime background, not literal zero.
     const float bridgeBgMult = probConfig.pca_bridge_black_bg_multiplier;
     const float bridgeBgMargin = std::max(0.0f, probConfig.pca_bridge_black_bg_margin);
     const float bridgeBgAdaptive = (bridgeBgMult > 0.0f)
-        ? (_backgroundValue + bridgeBgMargin * bridgeBgMult)
+        ? (bridgeBackground + bridgeBgMargin * bridgeBgMult)
         : 0.0f;
     const float blackThreshold = std::max(
         std::max(0.0f, probConfig.pca_bridge_black_threshold),
@@ -3354,7 +3898,7 @@ bool Frame::discoverPcaBridgeProposal(size_t cellIndex,
                         BrightPixel{cv::Point3f(static_cast<float>(x),
                                                 static_cast<float>(y),
                                                 static_cast<float>(z)),
-                                    std::max(1e-6f, brightness - blackThreshold)},
+                                    std::max(1e-6f, brightness - bridgeBackground)},
                         proj});
                 }
             }
@@ -3570,8 +4114,14 @@ CostCallbackPair Frame::trySplitCellPhased(
             cmpBbox.zMin = std::min(liveBbox.zMin, snapBbox.zMin);
             cmpBbox.zMax = std::max(liveBbox.zMax, snapBbox.zMax);
             const std::vector<uint8_t> noMask;
-            liveCostForComparison = calculateBboxCost(cmpBbox, _synthFrame, noMask);
-            snapCostForComparison = calculateBboxCost(cmpBbox, swappedSynth, noMask);
+            const float cmpLocalBackground =
+                simulationConfig.bbox_local_background_enabled
+                    ? estimateBboxLocalBackground(cmpBbox)
+                    : std::numeric_limits<float>::quiet_NaN();
+            liveCostForComparison = calculateBboxCost(
+                cmpBbox, _synthFrame, noMask, -1, cmpLocalBackground);
+            snapCostForComparison = calculateBboxCost(
+                cmpBbox, swappedSynth, noMask, -1, cmpLocalBackground);
         } else {
             liveCostForComparison = _currentCost;
             swappedImageCost = calculateIncrementalCost(swappedSynth,
@@ -3670,6 +4220,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         // is a no-op). Covers every reject path through restoreLiveParent.
         _snapBboxes.erase(parentName + "0");
         _snapBboxes.erase(parentName + "1");
+        _snapBboxLocalBackgrounds.erase(parentName + "0");
+        _snapBboxLocalBackgrounds.erase(parentName + "1");
         // _sharedMasks removed — no longer used (cost uses empty mask)
         if (!snapshotValid) return;
         if (cellIndex >= cells.size()) return;
@@ -3755,6 +4307,18 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << std::endl;
     }
 
+    float splitThresholdBackground = _backgroundValue;
+    if (simulationConfig.bbox_local_background_enabled &&
+        simulationConfig.bbox_local_background_apply_to_thresholds) {
+        const BoundingBox3D gatherBbox = computeBboxAtPoint(
+            snapshot.position, boxRadius, 1.0f);
+        splitThresholdBackground = estimateBboxLocalBackground(gatherBbox);
+        std::cout << "  [Split Local Background] " << parentName
+                  << " threshold_bg=" << splitThresholdBackground
+                  << " frame_bg=" << _backgroundValue
+                  << " source=gather_bbox" << std::endl;
+    }
+
     // Voronoi exclusion diagnostic — summarize the other-cell claim set.
     {
         size_t otherCellCount = 0;
@@ -3776,7 +4340,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     GatherStats gstats;
     std::vector<BrightPixel> pixels = gatherBrightPixelsVoronoi(
         _realFrame,
-        _backgroundValue,
+        splitThresholdBackground,
         snapshot.position,
         boxRadius,
         selfClaim,
@@ -4144,6 +4708,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     // the same voxel set (apples-to-apples). Neighbor positions don't
     // change during the split attempt, so the mask stays valid throughout.
     BoundingBox3D splitBbox;
+    float splitCostBackground = std::numeric_limits<float>::quiet_NaN();
     if (_useBboxCost) {
         std::vector<cv::Point3f> seedPoints;
         seedPoints.reserve(candidates.size() * 2);
@@ -4171,6 +4736,15 @@ CostCallbackPair Frame::trySplitCellPhased(
             _snapBboxes[parentName + "0"] = splitBbox;
             _snapBboxes[parentName + "1"] = splitBbox;
         }
+        if (simulationConfig.bbox_local_background_enabled) {
+            splitCostBackground = estimateBboxLocalBackground(splitBbox);
+            _snapBboxLocalBackgrounds[parentName + "0"] = splitCostBackground;
+            _snapBboxLocalBackgrounds[parentName + "1"] = splitCostBackground;
+            std::cout << "  [Split Local Background] " << parentName
+                      << " cost_bg=" << splitCostBackground
+                      << " frame_bg=" << _backgroundValue
+                      << " source=split_bbox" << std::endl;
+        }
     }
 
     // No Voronoi mask for split cost eval either — same reasoning as
@@ -4179,12 +4753,15 @@ CostCallbackPair Frame::trySplitCellPhased(
     // cost accounting honest about abandoned voxels.
     const std::vector<uint8_t> noSplitMask;
     auto evalImageCost = [&](const std::vector<cv::Mat> &synth) -> double {
-        if (_useBboxCost) return calculateBboxCost(splitBbox, synth, noSplitMask);
+        if (_useBboxCost) {
+            return calculateBboxCost(
+                splitBbox, synth, noSplitMask, -1, splitCostBackground);
+        }
         return _currentCost;  // legacy path: cached after refreshFullCostCache
     };
 
     const double baselineImageCost = _useBboxCost
-        ? calculateBboxCost(splitBbox, _synthFrame, noSplitMask)
+        ? calculateBboxCost(splitBbox, _synthFrame, noSplitMask, -1, splitCostBackground)
         : _currentCost;
     const double baselineOverlap = computeOverlapPenalty(probConfig.overlap_penalty_weight);
     const double baselineTotal = baselineImageCost + baselineOverlap;
@@ -4261,7 +4838,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     const float kMinDaughterBrightSeed = (kMinEdgeFraction > 0.0f)
         ? std::max(kMinEdgeAbsolute, parent.getBrightness() * kMinEdgeFraction)
         : kMinEdgeAbsolute;
-    auto measureLocalBrightnessAt = [this](float cx, float cy, float cz) -> float {
+    auto measureLocalBrightnessAt = [this, splitThresholdBackground](float cx, float cy, float cz) -> float {
         const int ix = static_cast<int>(std::round(cx));
         const int iy = static_cast<int>(std::round(cy));
         const int iz = static_cast<int>(std::round(cz));
@@ -4284,7 +4861,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                 }
             }
         }
-        return (cnt > 0) ? (sum / cnt) : 0.0f;
+        return (cnt > 0) ? std::max(0.0f, (sum / cnt) - splitThresholdBackground) : 0.0f;
     };
 
     // Hoisted valley probe — same slab-min logic as the post-filter but
@@ -4540,7 +5117,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                     }
                 }
             }
-            return (cnt > 0) ? (sum / cnt) : 0.0f;
+            return (cnt > 0) ? std::max(0.0f, (sum / cnt) - splitThresholdBackground) : 0.0f;
         };
 
         const float d1LocalBright = measureLocalBrightness(
@@ -5291,7 +5868,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                             const float perpSq = deltaSq - proj * proj;
                             if (perpSq > perpRadiusSq) continue;
                             const float v = row[x];
-                            const float w = std::max(0.0f, v - _backgroundValue);
+                            const float w = std::max(0.0f, v - splitThresholdBackground);
                             ++totalInRange;
                             ++gapCount;
                             gapBrightSum += w;
@@ -5653,13 +6230,25 @@ CostCallbackPair Frame::trySplitCellPhased(
             if (d0MaxR > 1e-3f) {
                 BoundingBox3D b0 = this->computeBboxAtPoint(
                     acceptedD1Pos, d0MaxR, this->_bboxMarginScale);
-                if (b0.isValid()) this->_snapBboxes[d0Name] = b0;
+                if (b0.isValid()) {
+                    this->_snapBboxes[d0Name] = b0;
+                    if (simulationConfig.bbox_local_background_enabled) {
+                        this->_snapBboxLocalBackgrounds[d0Name] =
+                            this->estimateBboxLocalBackground(b0);
+                    }
+                }
                 this->_snapPositions[d0Name] = acceptedD1Pos;
             }
             if (d1MaxR > 1e-3f) {
                 BoundingBox3D b1 = this->computeBboxAtPoint(
                     acceptedD2Pos, d1MaxR, this->_bboxMarginScale);
-                if (b1.isValid()) this->_snapBboxes[d1Name] = b1;
+                if (b1.isValid()) {
+                    this->_snapBboxes[d1Name] = b1;
+                    if (simulationConfig.bbox_local_background_enabled) {
+                        this->_snapBboxLocalBackgrounds[d1Name] =
+                            this->estimateBboxLocalBackground(b1);
+                    }
+                }
                 this->_snapPositions[d1Name] = acceptedD2Pos;
             }
             std::cout << "[Split Accepted] " << parentName
@@ -5682,6 +6271,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             // daughter-name entries in snap maps (from burn-in installation).
             this->_snapBboxes.erase(d0Name);
             this->_snapBboxes.erase(d1Name);
+            this->_snapBboxLocalBackgrounds.erase(d0Name);
+            this->_snapBboxLocalBackgrounds.erase(d1Name);
             this->_snapPositions.erase(d0Name);
             this->_snapPositions.erase(d1Name);
             this->cells = std::move(savedCellsCopy);  // NOLINT: move in mutable lambda

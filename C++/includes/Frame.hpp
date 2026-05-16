@@ -6,6 +6,7 @@
 #include <string>
 #include <ostream>
 #include <unordered_map>
+#include <limits>
 #include <opencv2/opencv.hpp>
 #include "types.hpp"
 #include "ConfigTypes.hpp"
@@ -159,7 +160,14 @@ public:
         const BoundingBox3D &bbox,
         const std::vector<cv::Mat> &synthFrame,
         const std::vector<uint8_t> &mask,
-        int voronoiCellIdx = -1) const;
+        int voronoiCellIdx = -1,
+        float localBackground = std::numeric_limits<float>::quiet_NaN()) const;
+
+    // Robust local-background estimate for a fixed bbox. Samples real-frame
+    // pixels outside expanded current ellipsoids, then blends/clamps around
+    // the frame background according to SimulationConfig bbox_local_* fields.
+    float estimateBboxLocalBackground(const BoundingBox3D &bbox) const;
+    void burnBboxLocalBackgroundIntoSynth();
 
     // Static-Voronoi cost territory. When enabled, each pixel is assigned
     // to the nearest cell's snap-anchor (or live-center fallback for
@@ -347,7 +355,13 @@ public:
     void setSnapBbox(const std::string &name, const BoundingBox3D &bbox) {
         _snapBboxes[name] = bbox;
     }
-    void clearSnapBboxes() { _snapBboxes.clear(); }
+    void setSnapBboxLocalBackground(const std::string &name, float background) {
+        _snapBboxLocalBackgrounds[name] = background;
+    }
+    void clearSnapBboxes() {
+        _snapBboxes.clear();
+        _snapBboxLocalBackgrounds.clear();
+    }
     bool hasSnapBbox(const std::string &name) const {
         return _snapBboxes.find(name) != _snapBboxes.end();
     }
@@ -438,6 +452,7 @@ private:
     // cost, anchoring the cell to its real-cell location. Missing entry
     // (frame 1, newborn daughters) → legacy live pre/post-union bbox.
     std::unordered_map<std::string, BoundingBox3D> _snapBboxes;
+    std::unordered_map<std::string, float> _snapBboxLocalBackgrounds;
     // Snap positions keyed by cell name — used for the position prior
     // penalty in perturbCell. Populated once per frame by
     // CellUniverse::optimize from previousSnapshots alongside snap bboxes.

@@ -125,6 +125,39 @@ TEST(FrameTest, GenerateSynthFrameAppliesBackgroundBrightnessFactor) {
     EXPECT_NEAR(synth[0].at<float>(0, 0), 0.6f, 1e-6f);
 }
 
+TEST(FrameTest, BurnBboxLocalBackgroundUpdatesOnlyBackgroundSynthPixels) {
+    ConfigureFrameTestEllipsoidBounds();
+    SimulationConfig cfg = MakeFrameConfig(1);
+    cfg.bbox_local_background_enabled = true;
+    cfg.bbox_local_background_burn_into_synth = true;
+    cfg.bbox_local_background_percentile = 0.5f;
+    cfg.bbox_local_background_blend_with_frame = 0.0f;
+    cfg.bbox_local_background_min_samples = 1;
+    cfg.bbox_local_background_min_delta = -1.0f;
+    cfg.bbox_local_background_max_delta = 1.0f;
+    cfg.bbox_local_background_burn_cell_exclusion_scale = 1.0f;
+    cfg.bbox_local_background_burn_feather_radius = 0.0f;
+    cfg.bbox_local_background_burn_margin = 1.0f;
+    cfg.bbox_local_background_burn_global_fallback_weight = 0.0f;
+
+    cv::Mat slice(7, 7, CV_32F, cv::Scalar(0.2f));
+    slice.at<float>(3, 3) = 1.0f;
+    std::vector<cv::Mat> real = {slice};
+
+    EllipsoidParams p("cell", 3.0f, 3.0f, 0.0f, 1.0f, 1.0f,
+                      0.0f, 0.0f, 0.0f, 0.8f);
+    Frame frame(real, cfg, {Ellipsoid(p)}, "", "bbox_burn");
+    frame.setBackgroundColor(0.1f);
+    frame.regenerateSynthFrame();
+
+    frame.burnBboxLocalBackgroundIntoSynth();
+    const auto synth = frame.getSynthFrame();
+
+    ASSERT_EQ(synth.size(), 1u);
+    EXPECT_NEAR(synth[0].at<float>(0, 0), 0.2f, 1e-6f);
+    EXPECT_GT(synth[0].at<float>(3, 3), 0.2f);
+}
+
 TEST(FrameTest, GenerateSynthFrameUsesEmpiricalBackgroundNoise) {
     SimulationConfig cfg = MakeFrameConfig(1);
     cfg.synth_background_noise_enabled = true;

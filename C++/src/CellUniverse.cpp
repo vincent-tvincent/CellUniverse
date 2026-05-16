@@ -3654,6 +3654,10 @@ void CellUniverse::optimize(int frameIndex)
                 snap.position, snapMaxR, config.prob.bbox_margin_scale);
             if (!snapBbox.isValid()) continue;
             frame.setSnapBbox(name, snapBbox);
+            if (config.simulation.bbox_local_background_enabled) {
+                frame.setSnapBboxLocalBackground(
+                    name, frame.estimateBboxLocalBackground(snapBbox));
+            }
             frame.setSnapPosition(name, snap.position);
             ++installed;
         }
@@ -4534,6 +4538,10 @@ void CellUniverse::optimize(int frameIndex)
                                - nsToSec(tPerturbCellNs.load())
                                - nsToSec(tTrySplitPhasedNs.load())) << "s"
               << std::endl;
+
+    // Final visualization/background pass: after cells are settled, burn a
+    // smooth bbox-local background field into background-only synth voxels.
+    frame.burnBboxLocalBackgroundIntoSynth();
 
     // M1/M2 cache per-frame summaries so optimize(frameIndex+1) doesn't need
     // frames[frameIndex]'s image stacks.

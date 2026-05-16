@@ -158,6 +158,98 @@ TEST(ConfigTypesTest, SynthBackgroundFieldsHaveExpectedDefaults) {
     EXPECT_FLOAT_EQ(prob.pca_bridge_black_bg_margin, 0.02f);
 }
 
+TEST(ConfigTypesTest, BboxLocalBackgroundFieldsHaveExpectedDefaults) {
+    SimulationConfig cfg;
+    EXPECT_FALSE(cfg.bbox_local_background_enabled);
+    EXPECT_TRUE(cfg.bbox_local_background_apply_to_thresholds);
+    EXPECT_FALSE(cfg.bbox_local_background_apply_to_synth_cost);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_percentile, 0.50f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_cell_exclusion_scale, 1.15f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_blend_with_frame, 0.50f);
+    EXPECT_EQ(cfg.bbox_local_background_min_samples, 1000);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_min_delta, -0.02f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_max_delta, 0.05f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_synth_margin, 0.01f);
+    EXPECT_FALSE(cfg.bbox_local_background_debug);
+    EXPECT_FALSE(cfg.bbox_local_background_burn_into_synth);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_cell_exclusion_scale, 1.15f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_feather_radius, 12.0f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_margin, 0.01f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_global_fallback_weight, 0.05f);
+    EXPECT_FALSE(cfg.bbox_local_background_burn_debug);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_bg_degenerate_sigma_threshold, 1e-6f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_bg_degenerate_p99_fraction, 0.50f);
+    EXPECT_FALSE(cfg.pca_shape_outer_shell_shrink_enabled);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_inner_scale, 0.50f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_min_outer_inner_ratio, 0.35f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_min_signal, 0.00005f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_shrink_step_fraction, 0.08f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_max_shrink_fraction, 0.35f);
+    EXPECT_EQ(cfg.pca_shape_outer_shell_sample_stride, 2);
+}
+
+TEST(ConfigTypesTest, BboxLocalBackgroundFieldsParseFromYaml) {
+    SimulationConfig cfg;
+    cfg.explodeConfig(YAML::Load(R"(
+iterations_per_cell: 1
+z_scaling: 1.0
+blur_sigma: 0.0
+bbox_local_background_enabled: true
+bbox_local_background_apply_to_thresholds: false
+bbox_local_background_apply_to_synth_cost: true
+bbox_local_background_percentile: 0.35
+bbox_local_background_cell_exclusion_scale: 1.4
+bbox_local_background_blend_with_frame: 0.25
+bbox_local_background_min_samples: 128
+bbox_local_background_min_delta: -0.01
+bbox_local_background_max_delta: 0.08
+bbox_local_background_synth_margin: 0.015
+bbox_local_background_debug: true
+bbox_local_background_burn_into_synth: true
+bbox_local_background_burn_cell_exclusion_scale: 1.3
+bbox_local_background_burn_feather_radius: 9.5
+bbox_local_background_burn_margin: 0.02
+bbox_local_background_burn_global_fallback_weight: 0.1
+bbox_local_background_burn_debug: true
+pca_shape_bg_degenerate_sigma_threshold: 0.0002
+pca_shape_bg_degenerate_p99_fraction: 0.65
+pca_shape_outer_shell_shrink_enabled: true
+pca_shape_outer_shell_inner_scale: 0.45
+pca_shape_outer_shell_min_outer_inner_ratio: 0.4
+pca_shape_outer_shell_min_signal: 0.02
+pca_shape_outer_shell_shrink_step_fraction: 0.05
+pca_shape_outer_shell_max_shrink_fraction: 0.25
+pca_shape_outer_shell_sample_stride: 3
+)"));
+
+    EXPECT_TRUE(cfg.bbox_local_background_enabled);
+    EXPECT_FALSE(cfg.bbox_local_background_apply_to_thresholds);
+    EXPECT_TRUE(cfg.bbox_local_background_apply_to_synth_cost);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_percentile, 0.35f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_cell_exclusion_scale, 1.4f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_blend_with_frame, 0.25f);
+    EXPECT_EQ(cfg.bbox_local_background_min_samples, 128);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_min_delta, -0.01f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_max_delta, 0.08f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_synth_margin, 0.015f);
+    EXPECT_TRUE(cfg.bbox_local_background_debug);
+    EXPECT_TRUE(cfg.bbox_local_background_burn_into_synth);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_cell_exclusion_scale, 1.3f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_feather_radius, 9.5f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_margin, 0.02f);
+    EXPECT_FLOAT_EQ(cfg.bbox_local_background_burn_global_fallback_weight, 0.1f);
+    EXPECT_TRUE(cfg.bbox_local_background_burn_debug);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_bg_degenerate_sigma_threshold, 0.0002f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_bg_degenerate_p99_fraction, 0.65f);
+    EXPECT_TRUE(cfg.pca_shape_outer_shell_shrink_enabled);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_inner_scale, 0.45f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_min_outer_inner_ratio, 0.4f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_min_signal, 0.02f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_shrink_step_fraction, 0.05f);
+    EXPECT_FLOAT_EQ(cfg.pca_shape_outer_shell_max_shrink_fraction, 0.25f);
+    EXPECT_EQ(cfg.pca_shape_outer_shell_sample_stride, 3);
+}
+
 TEST(ConfigTypesTest, SplitCandidateTogglesHaveExpectedDefaults) {
     ProbabilityConfig prob;
     EXPECT_TRUE(prob.split_candidate_enable_shortest_axis);

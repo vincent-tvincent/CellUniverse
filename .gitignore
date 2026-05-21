@@ -246,6 +246,11 @@ pip-selfcheck.json
 !/.gitignore
 !/C++/
 /CellUniverse_MacLiquidGlass/
+
+# Ignore C++ non-source/project-data areas in this parent repository.
+/C++/docs/
+/C++/yaml-cpp/
+/C++/examples/
 *.jar
 *.rar
 *.tar

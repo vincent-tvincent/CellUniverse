@@ -86,9 +86,7 @@ public:
     float post_alignment_chunk_max_percentile = 0.999f;
     int post_alignment_chunk_non_improvement_patience = 10;
     int post_alignment_chunk_disable_below_count = 0;
-    int post_alignment_chunk_detector_threads = 4;
     bool post_alignment_tiny_particle_removal_enabled = false;
-    int preprocess_radius_batch_size = 5;
     float post_process_blur_sigma = 2.5f;
     float post_process_final_blur_sigma = 0.0f;
     float post_process_final_direct_weight = 1.0f;
@@ -299,9 +297,7 @@ public:
         if (node["post_alignment_chunk_max_percentile"]) post_alignment_chunk_max_percentile = node["post_alignment_chunk_max_percentile"].as<float>();
         if (node["post_alignment_chunk_non_improvement_patience"]) post_alignment_chunk_non_improvement_patience = node["post_alignment_chunk_non_improvement_patience"].as<int>();
         if (node["post_alignment_chunk_disable_below_count"]) post_alignment_chunk_disable_below_count = node["post_alignment_chunk_disable_below_count"].as<int>();
-        if (node["post_alignment_chunk_detector_threads"]) post_alignment_chunk_detector_threads = node["post_alignment_chunk_detector_threads"].as<int>();
         if (node["post_alignment_tiny_particle_removal_enabled"]) post_alignment_tiny_particle_removal_enabled = node["post_alignment_tiny_particle_removal_enabled"].as<bool>();
-        if (node["preprocess_radius_batch_size"]) preprocess_radius_batch_size = node["preprocess_radius_batch_size"].as<int>();
         if (node["post_process_blur_sigma"]) post_process_blur_sigma = node["post_process_blur_sigma"].as<float>();
         if (node["post_process_final_blur_sigma"]) post_process_final_blur_sigma = node["post_process_final_blur_sigma"].as<float>();
         if (node["post_process_final_direct_weight"]) post_process_final_direct_weight = node["post_process_final_direct_weight"].as<float>();
@@ -435,9 +431,7 @@ public:
         std::cout << "post_alignment_chunk_max_percentile: " << post_alignment_chunk_max_percentile << '\n';
         std::cout << "post_alignment_chunk_non_improvement_patience: " << post_alignment_chunk_non_improvement_patience << '\n';
         std::cout << "post_alignment_chunk_disable_below_count: " << post_alignment_chunk_disable_below_count << '\n';
-        std::cout << "post_alignment_chunk_detector_threads: " << post_alignment_chunk_detector_threads << '\n';
         std::cout << "post_alignment_tiny_particle_removal_enabled: " << post_alignment_tiny_particle_removal_enabled << '\n';
-        std::cout << "preprocess_radius_batch_size: " << preprocess_radius_batch_size << '\n';
         std::cout << "post_process_blur_sigma: " << post_process_blur_sigma << '\n';
         std::cout << "post_process_final_blur_sigma: " << post_process_final_blur_sigma << '\n';
         std::cout << "post_process_final_direct_weight: " << post_process_final_direct_weight << '\n';

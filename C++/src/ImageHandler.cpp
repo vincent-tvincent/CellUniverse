@@ -1199,10 +1199,10 @@ ImageStack ImageHandler::processPreparedSequence(const ImageStack &sequence,
         };
     };
 
-    const int configuredRadiusBatchSize =
-        config.simulation.preprocess_radius_batch_size;
+    const int configuredParallelThreads =
+        config.simulation.parallel_threads;
     const int radiusThreadCount = std::min(
-        std::max(1, configuredRadiusBatchSize),
+        std::max(1, configuredParallelThreads),
         static_cast<int>(scoringRadii.size()));
 
     log << "[IterPreprocess] radius_trials=" << scoringRadii.size()
@@ -1215,7 +1215,7 @@ ImageStack ImageHandler::processPreparedSequence(const ImageStack &sequence,
         << " target_score=" << targetScore
         << " target_tolerance=" << targetScoreTolerance
         << " radius_threads=" << radiusThreadCount
-        << " configured_radius_batch_size=" << configuredRadiusBatchSize
+        << " configured_parallel_threads=" << configuredParallelThreads
         << std::endl;
 
     std::vector<PreprocessTrialResult> trialResults(scoringRadii.size());

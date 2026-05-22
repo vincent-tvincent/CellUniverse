@@ -741,7 +741,7 @@ static int countSeparatedChunksInSizeRange(const std::vector<cv::Mat> &stack,
                static_cast<std::size_t>(x);
     };
 
-    int detectorThreads = std::max(1, config.post_alignment_chunk_detector_threads);
+    int detectorThreads = std::max(1, config.parallel_threads);
 #ifdef _OPENMP
     detectorThreads = std::min(detectorThreads, std::max(1, omp_get_max_threads()));
     if (omp_in_parallel()) {
@@ -880,7 +880,7 @@ static void removeTinyIsolatedParticles(std::vector<cv::Mat> &stack,
                static_cast<std::size_t>(x);
     };
 
-    int detectorThreads = std::max(1, config.simulation.post_alignment_chunk_detector_threads);
+    int detectorThreads = std::max(1, config.simulation.parallel_threads);
 #ifdef _OPENMP
     detectorThreads = std::min(detectorThreads, std::max(1, omp_get_max_threads()));
     if (omp_in_parallel()) {
@@ -1018,7 +1018,7 @@ static void adaptBlackPercentileToChunkCount(std::vector<cv::Mat> &stack,
                                     config.post_alignment_chunk_max_size)
         << " non_improvement_patience=" << nonImprovementPatience
         << " disable_below_count=" << disableBelowCount
-        << " detector_threads=" << std::max(1, config.post_alignment_chunk_detector_threads)
+        << " detector_threads=" << std::max(1, config.parallel_threads)
         << std::endl;
 
     if (chunkCount < disableBelowCount) {

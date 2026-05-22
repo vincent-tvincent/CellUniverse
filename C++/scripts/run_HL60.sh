@@ -9,7 +9,7 @@ mkdir -p "$OUTPUT_ROOT"
 INPUT_DIR="$CPP_ROOT/examples/input/Simulated_nuclei_HL60 cells_stained_with_Hoechst/01"
 INPUT_PATTERN="$INPUT_DIR/t%03d.tif"
 CONFIG_FILE="$CPP_ROOT/config/config.yaml"
-INITIAL_FILE="$CPP_ROOT/config/initial_HL60_0.csv"
+INITIAL_FILE="$CPP_ROOT/config/HL60/initial_HL60_0.csv"
 OUT_DIR="$OUTPUT_ROOT/output_HL60_$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$OUT_DIR/run_HL60_$(date +%Y%m%d_%H%M%S).txt"
 
@@ -42,7 +42,7 @@ if [ "$MODE" = "extract" ]; then
   FRAME_FILE="$INPUT_DIR/t$(printf '%03d' "$FRAME_INDEX").tif"
   [ -f "$FRAME_FILE" ] || { echo "[FATAL] input frame not found: $FRAME_FILE"; exit 1; }
 
-  CSV_FILE="$CPP_ROOT/config/initial_HL60_${FRAME_INDEX}.csv"
+  CSV_FILE="$CPP_ROOT/config/HL60/initial_HL60_${FRAME_INDEX}.csv"
   OUT_DIR="$OUTPUT_ROOT/output_HL60_ground_truth_${FRAME_INDEX}_$(date +%Y%m%d_%H%M%S)"
   LOG_FILE="$OUT_DIR/run_HL60_ground_truth_${FRAME_INDEX}_$(date +%Y%m%d_%H%M%S).txt"
 

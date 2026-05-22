@@ -10,7 +10,7 @@ mkdir -p "$OUTPUT_ROOT" "$LOG_DIR"
 INPUT_DIR="$CPP_ROOT/examples/input/C.elegans_developing embryo_Fluo-N3DH-CE_Training/01"
 INPUT_PATTERN="$INPUT_DIR/t%03d.tif"
 CONFIG_FILE="$CPP_ROOT/config/config.yaml"
-INITIAL_FILE="$CPP_ROOT/config/initial_embyro_79.csv"
+INITIAL_FILE="$CPP_ROOT/config/embryo/initial_embryo_79.csv"
 OUT_DIR="$OUTPUT_ROOT/output_embryo_resume40_$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/embryo_resume40_runLog_$(date +%Y%m%d_%H%M%S).txt"
 

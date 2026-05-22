@@ -20,7 +20,7 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 TIFF_PATH = os.path.join(PROJECT_DIR, "data", "input", "original_data", "frame001.tif")
-CSV_PATH = os.path.join(PROJECT_DIR, "config", "initial.csv")
+CSV_PATH = os.path.join(PROJECT_DIR, "config", "Original", "initial_origin_0.csv")
 CONFIG_PATH = os.path.join(PROJECT_DIR, "config", "config.yaml")
 
 # Config defaults (matching config.yaml)

@@ -23,7 +23,7 @@ log "[INFO] Logging to: $LOG_FILE"
 INPUT_DIR="$CPP_ROOT/examples/input/original_data"
 INPUT_PATTERN="$INPUT_DIR/frame%03d.tif"
 CONFIG_FILE="$CPP_ROOT/config/config.yaml"
-INITIAL_FILE="$CPP_ROOT/config/initial.csv"
+INITIAL_FILE="$CPP_ROOT/config/Original/initial_origin_0.csv"
 OUTPUT_BASE="$OUTPUT_ROOT"
 BUILD_DIR="$CPP_ROOT/build"
 

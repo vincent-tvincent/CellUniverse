@@ -212,14 +212,13 @@ simulation:
   post_alignment_chunk_max_percentile: 0.999
   post_alignment_chunk_non_improvement_patience: 10
   post_alignment_chunk_disable_below_count: 15
-  # Thread cap for the chunk detector foreground-mask prepass. The exact
-  # connected-component flood fill remains serial to avoid racy overcounts.
-  post_alignment_chunk_detector_threads: 8
   # After adaptive chunk blackoff, remove isolated nonzero connected
   # components whose z/y/x bounding-box dimensions are all smaller than the
   # configured minimum cell diameters. Disabled by default.
   post_alignment_tiny_particle_removal_enabled: true
-  preprocess_radius_batch_size: 8
+  # Single runtime thread-count entry. This drives OpenCV/OpenMP defaults,
+  # z-slice work, preprocessing radius trials, and chunk-detector prepasses.
+  parallel_threads: 16
 
   post_process_blur_sigma: 0.0
   post_process_final_blur_sigma: 2.5

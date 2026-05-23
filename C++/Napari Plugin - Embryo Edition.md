@@ -1,5 +1,5 @@
-see [the Original Napari Plugin](https://github.com/pnewstein/napari-3d-counter)
-see [the Embryo Adjusted Plugin](https://github.com/KaelynTaing/napari-3d-counter/tree/main)
+see [the Original Napari Plugin](https://github.com/pnewstein/napari-3d-counter)  
+see [the Embryo Adjusted Plugin](https://github.com/KaelynTaing/napari-3d-counter/tree/main)  
 - adds notable features of Z Scale and Individual Point Size
 
 Setup:

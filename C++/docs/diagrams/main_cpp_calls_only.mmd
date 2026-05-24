@@ -14,13 +14,20 @@ class BaseConfig
 class SimulationConfig
 class CellFactory
 class Lineage
+class ImageHandler
+class PreprocessingHandler
+class N2V2Preprocessor
 class YAML
 class StdLib
 
 MainCpp ..> ArgsMain : parse argv
 MainCpp ..> BaseConfig : explodeConfig()/printConfig()
 MainCpp ..> SimulationConfig : read z_slices/z_scaling
+MainCpp ..> ImageHandler : getImageFilePaths()
 MainCpp ..> CellFactory : ctor + createCells()
 MainCpp ..> Lineage : ctor + loop calls
+Lineage ..> PreprocessingHandler : prepareFrame()/preprocess-only
+PreprocessingHandler ..> ImageHandler : legacy engine + z interpolation/cube pooling
+PreprocessingHandler ..> N2V2Preprocessor : n2v2 engine when selected and Torch-linked
 MainCpp ..> YAML : LoadFile() in loadConfig()
 MainCpp ..> StdLib : stoi() + chrono_now()

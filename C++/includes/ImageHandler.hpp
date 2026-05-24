@@ -19,6 +19,10 @@ public:
                                                       const std::string &imageFile,
                                                       const BaseConfig &config,
                                                       std::ostream *logSink = nullptr);
+    static std::vector<cv::Mat> finalizePreprocessedStack(const std::vector<cv::Mat> &processedSlices,
+                                                          const std::string &imageFile,
+                                                          const BaseConfig &config,
+                                                          std::ostream *logSink = nullptr);
     static float evaluateSequenceContrastScore(const ImageStack &sequence, const BaseConfig &config);
     static float evaluateBestWindowContrastScore(const ImageStack &sequence, const BaseConfig &config);
     static std::vector<cv::Mat> loadFrame(const std::string &imageFile,

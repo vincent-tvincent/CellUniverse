@@ -85,6 +85,55 @@ For full rollback: `git revert <merge-commit>` (clean, takes everything back tog
 
 ---
 
+## 2026-05-24: Integrate N2V2 preprocessing switch (Change 15)
+
+**Status: ACTIVE — configurable alternate preprocessing engine**
+
+### What changed
+
+- Added `simulation.preprocessing_pipeline` with supported values `legacy` and `n2v2`.
+- Added `simulation.n2v2_preprocess` so the TorchScript model path, device, tiling, scaling, CAREamics normalization, background subtraction, contrast/gamma, and output controls are configurable from the main CellUniverse YAML.
+- Wired `PreprocessingHandler` so only the selected engine runs:
+  - `legacy` uses the existing `ImageHandler` iterative preprocessing path and never constructs the N2V2 preprocessor.
+  - `n2v2` uses the neural preprocessing path and skips the legacy iterative contrast path.
+- Kept downstream runtime expectations stable by converting N2V2 output back to `CV_32F` `[0,1]`, then using `ImageHandler` only for z interpolation/cube pooling before shared edge-alignment, cleanup, signal-map, and export steps.
+- The active neural backend uses LibTorch/TorchScript. Without LibTorch, the project still builds and selecting `n2v2` reports a clear runtime error.
+
+### Default behavior
+
+`config/config.yaml` defaults to `preprocessing_pipeline: legacy`, so existing runs keep the old preprocessing engine unless explicitly switched.
+
+---
+
+## 2026-05-24: Isolate active preprocessing handler (Change 14)
+
+**Status: ACTIVE — behavior-preserving refactor**
+
+### What changed
+
+- Added `PreprocessingHandler` as the orchestration layer for the active CellUniverse preprocessing path.
+- Kept `ImageHandler` as the low-level image IO and contrast-processing utility.
+- Reduced `CellUniverse::prepareFrame()` and `CellUniverse::preprocessAllFramesAlignedToMinimumBackground()` to compatibility wrappers that attach preprocessed stacks and signal maps to `Frame`.
+- Preserved existing CLI flags, YAML fields, lazy/eager/preprocess-only modes, and logging vocabulary.
+
+### Structure after refactor
+
+```text
+main.cpp
+  -> ImageHandler::getImageFilePaths()
+  -> CellUniverse
+       -> PreprocessingHandler
+            -> ImageHandler::loadRawFrame()
+            -> ImageHandler::preprocessLoadedFrame()
+            -> post-alignment cleanup / signal map / export
+       -> Frame::loadImageStacks()
+       -> optimize()
+```
+
+At this refactor point, the N2V2 prototype remained separate under `prototype/n2v2_preprocess/`.
+
+---
+
 ## 2026-04-19: Config audit — magnitude-dependent gate retuning (Change 2)
 
 **Status: ACTIVE — validated 8/8 splits 7/8 on time 0 FP at 22-frame horizon**

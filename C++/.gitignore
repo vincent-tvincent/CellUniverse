@@ -11,6 +11,10 @@ outputs/
 output/
 output_*/
 build/
+build-*/
 cmake-build-*/
 .vscode/
 .codex
+external/
+lib/libtorch*/
+*.zip

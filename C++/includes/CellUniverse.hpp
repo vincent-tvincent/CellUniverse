@@ -4,6 +4,7 @@
 #include <opencv2/opencv.hpp>
 #include "ConfigTypes.hpp"
 #include "Frame.hpp"
+#include "PreprocessingHandler.hpp"
 #include "types.hpp"
 #include "Ellipsoid.hpp"
 
@@ -39,8 +40,9 @@ public:
     // without 13+ GB memory peaks.
     void releaseFrameImages(int frameIndex);
     // Memory optimization (M2 — Option A): lazy per-frame load. Constructor
-    // only samples percentiles; per-frame TIFF load + normalize + preprocess
-    // happens on demand in this method. Main loop calls `prepareFrame(i)`
+    // only probes preprocessing depth; per-frame TIFF load + normalize +
+    // preprocess happens on demand through PreprocessingHandler. Main loop calls
+    // `prepareFrame(i)`
     // before `optimize(i)`. Keeps peak memory at ~1-2 frames (<1 GB for
     // 100+ frame runs vs 25+ GB before).
     void prepareFrame(int frameIndex);
@@ -69,6 +71,7 @@ private:
    BaseConfig config;
    std::vector<Frame> frames;
    std::string outputPath;
+   PreprocessingHandler preprocessing;
    int firstFrame;
    std::map<std::string, PreviousFrameSnapshot> previousSnapshots;
    // Frozen per-cell shape reference (a, b, c radii). Captured at cell

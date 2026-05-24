@@ -6,6 +6,8 @@ sequenceDiagram
     participant Input as getImageFilePaths()
     participant Factory as CellFactory
     participant Lineage as Lineage
+    participant Preprocess as PreprocessingHandler
+    participant N2V2 as N2V2Preprocessor
     participant FS as File System
 
     User->>Main: Run celluniverse <first> <last> <input> <output> <config.yaml> <initial.csv>
@@ -32,9 +34,21 @@ sequenceDiagram
         Factory-->>Main: map<Path, vector<Spheroid>>
 
         Main->>Lineage: Construct Lineage(cells, imagePaths, config, output, firstFrame, continueFrom)
+        Lineage->>Preprocess: Probe first frame for post-preprocess z depth
+        Preprocess-->>Lineage: z_slices / maxZ basis
         Lineage-->>Main: Ready
 
         loop for each frame [0 .. lineage.length()-1]
+            Main->>Lineage: prepareFrame(frame)
+            Lineage->>Preprocess: preprocessFrame(imagePath, edgeTarget)
+            alt preprocessing_pipeline = legacy
+                Preprocess->>FS: Read raw TIFF stack
+            else preprocessing_pipeline = n2v2
+                Preprocess->>FS: Read raw TIFF stack
+                Preprocess->>N2V2: processStack(rawStack, imagePath)
+                N2V2-->>Preprocess: neural preprocessed stack
+            end
+            Preprocess-->>Lineage: PreprocessedFrame(stack, signalMap)
             Main->>Lineage: optimize(frame)
             Main->>Lineage: copyCellsForward(frame + 1)
             Main->>Lineage: saveImages(frame)

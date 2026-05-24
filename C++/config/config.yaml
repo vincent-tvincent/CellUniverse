@@ -136,6 +136,11 @@ cell:
 # Image preprocessing pipeline — iterative contrast enhancer ported from
 # scripts/image_processor_clean.py. No sigmoid.
 simulation:
+  # Select exactly one active preprocessing engine:
+  # - legacy: existing ImageHandler iterative contrast pipeline
+  # - n2v2: LibTorch/TorchScript neural denoising pipeline below
+  preprocessing_pipeline: n2v2
+
   iterations_per_cell: 250
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
@@ -170,6 +175,44 @@ simulation:
   contrast_reward_weight: 0.85
   contrast_penalty_weight: 0.07
   contrast_eps: 0.000001
+
+  n2v2_preprocess:
+    enable_network: true
+    model_path: "models/general_n2v2_torchscript.pt"
+    # Use auto, cpu, cuda, or cuda:<index>. CUDA requires a CUDA-enabled LibTorch build.
+    device: auto
+    inference_batch_size: 16
+    tile_size: [256, 256]
+    tile_overlap: [48, 48]
+
+    scale_percentile: 99.9
+    use_nonzero_pixels: true
+    fallback_scale: 65536
+    careamics_mean: 0.33040523529052734
+    careamics_std: 0.23699833071884863
+
+    background_subtraction:
+      enabled: true
+      percentile: 20.0
+      exclude_zero: true
+      clip_min: 0.0
+
+    contrast:
+      enabled: true
+      limit_mode: percentile
+      low_limit: 10.0
+      high_limit:
+      low_percentile: 75.0
+      high_percentile: 99.99
+      exclude_zero: true
+      scope: stack
+      gamma: 1.45
+      preserve_zero_pixels: true
+
+    output:
+      dtype: preserve
+      write_intermediate: false
+      quantize_before_contrast: true
 
   frame_intensity_normalization_enabled: true
   frame_intensity_percentile_exclude_zeros: true
@@ -226,8 +269,7 @@ simulation:
   post_process_final_direct_amplification: 1.0
   post_process_final_blurred_amplification: 0.5
   post_alignment_final_blur_sigma: 1.25
-
-  export_preprocessed_images: false
+  
   # Debug signal-guidance localization. When true, exports two stacks per
   # frame under signal_debug/: center cubes on black background and a
   # grayscale perturb-probability field on black background.
@@ -242,7 +284,10 @@ simulation:
   export_perturb_cell_center_debug_images: false
   export_frame_png: false
   export_frame_tiff: true
-  quit_after_preprocessing: false
+
+  export_preprocessed_images: true
+
+  quit_after_preprocessing: true
   prepare_analyze_one_frame: false
   # When true, after a frame has been optimized and exported, release its
   # image-heavy stacks from memory while keeping cells, cached summaries,

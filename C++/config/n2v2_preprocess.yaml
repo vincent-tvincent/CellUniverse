@@ -1,0 +1,36 @@
+n2v2_preprocess:
+  enable_network: true
+  model_path: "models/general_n2v2_torchscript.pt"
+  # Use auto, cpu, cuda, or cuda:<index>. CUDA requires a CUDA-enabled LibTorch build.
+  device: auto
+  inference_batch_size: 16
+  tile_size: [256, 256]
+  tile_overlap: [48, 48]
+
+  scale_percentile: 99.9
+  use_nonzero_pixels: true
+  fallback_scale: 65536
+  careamics_mean: 0.33040523529052734
+  careamics_std: 0.23699833071884863
+
+  background_subtraction:
+    enabled: true
+    percentile: 20.0
+    exclude_zero: true
+    clip_min: 0.0
+
+  contrast:
+    enabled: true
+    limit_mode: percentile
+    low_limit: 10.0
+    low_percentile: 75.0
+    high_percentile: 99.99
+    exclude_zero: true
+    scope: stack
+    gamma: 1.45
+    preserve_zero_pixels: true
+
+  output:
+    dtype: preserve
+    write_intermediate: false
+    quantize_before_contrast: true

@@ -1,6 +1,6 @@
 # CellUniverse Pipeline (Current)
 
-**Last updated:** 2026-04-16 (evening) — adaptive mask + position refinement + soft Voronoi + asymK threshold + neighbor-bridging gate + z-skip render
+**Last updated:** 2026-05-24 — preprocessing engine switch + N2V2 integration + handler isolation + adaptive mask + position refinement + soft Voronoi + asymK threshold + neighbor-bridging gate + z-skip render
 
 This is the authoritative end-to-end pipeline for a single frame. Per-fix rationale lives in `docs/changelogs/changelogv7.md`.
 
@@ -14,7 +14,17 @@ This is the authoritative end-to-end pipeline for a single frame. Per-fix ration
 ================================================================
                              |
                              v
-  Load raw image, preprocess (ImageHandler, iterative contrast)
+  Load raw image, preprocess (PreprocessingHandler orchestration)
+    - simulation.preprocessing_pipeline selects exactly one engine:
+      legacy or n2v2
+    - legacy: ImageHandler TIFF/raw load, grayscale/float conversion,
+      frame intensity scaling, iterative contrast, z interpolation,
+      cube pooling
+    - n2v2: LibTorch/TorchScript N2V2 inference, background subtraction,
+      contrast/gamma, runtime normalization to CV_32F [0,1],
+      ImageHandler z interpolation and cube pooling
+    - common after selected engine: edge alignment, blackoff/chunk
+      cleanup, tiny-particle removal, signal map, optional export
                              |
                              v
   [Frame 2+] Adaptive background from frame N-1 cells:

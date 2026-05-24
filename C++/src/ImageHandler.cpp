@@ -1484,6 +1484,92 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
     return interpolatedZSlices;
 }
 
+std::vector<cv::Mat> ImageHandler::finalizePreprocessedStack(const std::vector<cv::Mat> &processedSlices,
+                                                             const std::string &imageFile,
+                                                             const BaseConfig &config,
+                                                             std::ostream *logSink)
+{
+    std::ostream &log = logSink ? *logSink : std::cout;
+    std::vector<cv::Mat> normalizedSlices = cloneStack(processedSlices);
+    std::vector<cv::Mat> interpolatedZSlices;
+
+    clipStack(normalizedSlices);
+    printStackStats(log, "external_preprocessed_sequence", imageFile, normalizedSlices);
+
+    if (normalizedSlices.empty())
+    {
+        return interpolatedZSlices;
+    }
+
+    if (normalizedSlices.size() == 1)
+    {
+        interpolatedZSlices = normalizedSlices;
+    }
+    else
+    {
+        const int expandFactor = config.simulation.z_scaling;
+        const unsigned numSynthSlices =
+            static_cast<unsigned>(expandFactor) * (normalizedSlices.size() - 1U) + 1U;
+
+        interpolatedZSlices.resize(numSynthSlices);
+        #pragma omp parallel for schedule(static)
+        for (int synthSliceIndex = 0; synthSliceIndex < static_cast<int>(numSynthSlices); ++synthSliceIndex)
+        {
+            const unsigned synthSlice = static_cast<unsigned>(synthSliceIndex);
+            const int sourceSlice = static_cast<int>(synthSlice / expandFactor);
+            if (synthSlice % expandFactor == 0)
+            {
+                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
+                    normalizedSlices[static_cast<std::size_t>(sourceSlice)];
+            }
+            else
+            {
+                const double t = static_cast<double>(synthSlice % expandFactor) /
+                                 static_cast<double>(expandFactor);
+                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
+                    (1.0 - t) * normalizedSlices[static_cast<std::size_t>(sourceSlice)] +
+                    t * normalizedSlices[static_cast<std::size_t>(sourceSlice + 1)];
+            }
+        }
+
+        if (interpolatedZSlices.size() != numSynthSlices)
+        {
+            throw std::runtime_error(
+                "interpolatedZSlices must have exactly " + std::to_string(numSynthSlices) +
+                " slices, but has " + std::to_string(interpolatedZSlices.size()) + " slices");
+        }
+    }
+
+    printStackStats(log, "post_interpolation", imageFile, interpolatedZSlices);
+    ImageStack preCubePoolingSlices = cloneStack(interpolatedZSlices);
+    interpolatedZSlices = applyCubePooling(interpolatedZSlices, config, log);
+    clipStack(interpolatedZSlices);
+    const StackStats cubeStats = computeStackStats(interpolatedZSlices);
+    const float candidateMaxMean = std::max(0.0f, config.simulation.iterative_candidate_max_mean);
+    const float candidateMaxSaturatedFraction = std::clamp(
+        config.simulation.iterative_candidate_max_saturated_fraction, 0.0f, 1.0f);
+    const bool cubeMeanOk =
+        candidateMaxMean <= 0.0f || cubeStats.mean <= candidateMaxMean;
+    const bool cubeSaturationOk =
+        candidateMaxSaturatedFraction <= 0.0f ||
+        cubeStats.saturatedFraction <= candidateMaxSaturatedFraction;
+    if (!cubeMeanOk || !cubeSaturationOk || cubeStats.nonFiniteCount > 0)
+    {
+        log << "[CubePooling] reject=range"
+            << " mean=" << cubeStats.mean
+            << " saturated_fraction=" << cubeStats.saturatedFraction
+            << " nonfinite=" << cubeStats.nonFiniteCount
+            << " max_mean=" << candidateMaxMean
+            << " max_saturated_fraction=" << candidateMaxSaturatedFraction
+            << "; using_pre_cube_pooling_sequence=1"
+            << std::endl;
+        interpolatedZSlices = std::move(preCubePoolingSlices);
+    }
+    printStackStats(log, "post_cube_pooling", imageFile, interpolatedZSlices);
+    log << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;
+    return interpolatedZSlices;
+}
+
 std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,
                                              BaseConfig &config,
                                              std::ostream *logSink)

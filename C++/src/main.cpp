@@ -54,6 +54,29 @@ void loadConfig(const std::string &path, BaseConfig &config)
 {
     YAML::Node node = YAML::LoadFile(path);
     config.explodeConfig(node);
+
+    fs::path modelPath(config.simulation.n2v2_model_path);
+    if (!modelPath.empty() && modelPath.is_relative())
+    {
+        const fs::path configPath(path);
+        const fs::path configDir =
+            configPath.has_parent_path() ? configPath.parent_path() : fs::current_path();
+        const fs::path fromConfigDir = configDir / modelPath;
+        if (fs::exists(fromConfigDir))
+        {
+            config.simulation.n2v2_model_path = fromConfigDir.lexically_normal().string();
+            return;
+        }
+
+        const fs::path projectRelative =
+            (configDir.filename() == "config")
+                ? configDir.parent_path() / modelPath
+                : fs::current_path() / modelPath;
+        if (fs::exists(projectRelative))
+        {
+            config.simulation.n2v2_model_path = projectRelative.lexically_normal().string();
+        }
+    }
 }
 
 void applyRuntimeOverrides(BaseConfig &config)

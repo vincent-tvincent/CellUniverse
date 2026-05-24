@@ -97,7 +97,75 @@ if(NOT OpenCV_FOUND)
     )
 endif()
 
+option(CELLUNIVERSE_BUILD_N2V2_PREPROCESS
+       "Build the optional LibTorch N2V2 preprocessing targets." ON)
+option(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH
+       "Prefer external/libtorch over any cached or system Torch package." ON)
+option(CELLUNIVERSE_AUTO_INSTALL_LIBTORCH
+       "Run scripts/install_libtorch.sh during configure if external/libtorch is missing." ON)
+if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS)
+    set(CELLUNIVERSE_LOCAL_LIBTORCH "${CMAKE_CURRENT_SOURCE_DIR}/external/libtorch")
+    set(CELLUNIVERSE_LOCAL_TORCH_CONFIG
+        "${CELLUNIVERSE_LOCAL_LIBTORCH}/share/cmake/Torch/TorchConfig.cmake")
+
+    if(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH AND
+       CELLUNIVERSE_AUTO_INSTALL_LIBTORCH AND
+       NOT EXISTS "${CELLUNIVERSE_LOCAL_TORCH_CONFIG}")
+        set(CELLUNIVERSE_LIBTORCH_INSTALLER
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/install_libtorch.sh")
+        if(EXISTS "${CELLUNIVERSE_LIBTORCH_INSTALLER}")
+            message(STATUS
+                "Local LibTorch was not found at ${CELLUNIVERSE_LOCAL_LIBTORCH}; "
+                "running scripts/install_libtorch.sh. "
+                "Set -DCELLUNIVERSE_AUTO_INSTALL_LIBTORCH=OFF to skip this.")
+            execute_process(
+                COMMAND "${CELLUNIVERSE_LIBTORCH_INSTALLER}"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                RESULT_VARIABLE CELLUNIVERSE_LIBTORCH_INSTALL_RESULT
+                COMMAND_ECHO STDOUT
+            )
+            if(NOT CELLUNIVERSE_LIBTORCH_INSTALL_RESULT EQUAL 0)
+                message(WARNING
+                    "scripts/install_libtorch.sh failed with exit code "
+                    "${CELLUNIVERSE_LIBTORCH_INSTALL_RESULT}; continuing without "
+                    "local LibTorch.")
+            endif()
+        else()
+            message(WARNING
+                "CELLUNIVERSE_AUTO_INSTALL_LIBTORCH is ON, but "
+                "${CELLUNIVERSE_LIBTORCH_INSTALLER} does not exist.")
+        endif()
+    endif()
+
+    if(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH AND
+       EXISTS "${CELLUNIVERSE_LOCAL_TORCH_CONFIG}")
+        unset(Caffe2_DIR CACHE)
+        unset(ATen_DIR CACHE)
+        unset(TORCH_LIBRARY CACHE)
+        unset(c10_LIBRARY CACHE)
+        unset(C10_CUDA_LIBRARY CACHE)
+        set(Torch_DIR
+            "${CELLUNIVERSE_LOCAL_LIBTORCH}/share/cmake/Torch"
+            CACHE PATH "Path to TorchConfig.cmake" FORCE)
+        list(PREPEND CMAKE_PREFIX_PATH "${CELLUNIVERSE_LOCAL_LIBTORCH}")
+        message(STATUS "Using local LibTorch at ${CELLUNIVERSE_LOCAL_LIBTORCH}")
+    endif()
+
+    find_package(Torch QUIET)
+    if(NOT Torch_FOUND)
+        message(WARNING
+            "Torch was not found; N2V2 network preprocessing targets will not be built. "
+            "Run scripts/install_libtorch.sh or configure with "
+            "-DCMAKE_PREFIX_PATH=/path/to/libtorch.")
+    endif()
+endif()
+
+if(TORCH_CXX_FLAGS)
+    separate_arguments(TORCH_CXX_FLAGS_LIST NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+endif()
+
 set(cwd ${CMAKE_CURRENT_SOURCE_DIR})
+set(n2v2_preprocess_prototype ${cwd}/prototype/n2v2_preprocess)
 
 add_executable(${PROJECT_NAME}
         ${cwd}/src/main.cpp
@@ -108,6 +176,7 @@ add_executable(${PROJECT_NAME}
         ${cwd}/src/EmbryoBrightTracker.cpp
         ${cwd}/src/Frame.cpp
         ${cwd}/src/ImageHandler.cpp
+        ${cwd}/src/PreprocessingHandler.cpp
         ${cwd}/src/LineageTreeCreator.cpp
         ${cwd}/src/LineageViewer.cpp
         ${cwd}/src/Ellipsoid.cpp
@@ -115,6 +184,7 @@ add_executable(${PROJECT_NAME}
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
+        ${n2v2_preprocess_prototype}/include
         ${cwd}/includes
         ${cwd}/src
 )
@@ -125,6 +195,22 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
 endif()
 target_include_directories(${PROJECT_NAME} PRIVATE lib/yaml-cpp/include)
+
+if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
+    target_sources(${PROJECT_NAME} PRIVATE
+            ${n2v2_preprocess_prototype}/src/N2V2Preprocessor.cpp
+    )
+    target_include_directories(${PROJECT_NAME} PRIVATE
+            ${n2v2_preprocess_prototype}/include
+    )
+    target_link_libraries(${PROJECT_NAME} ${TORCH_LIBRARIES})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CELLUNIVERSE_HAS_N2V2_PREPROCESS=1)
+    if(TORCH_CXX_FLAGS_LIST)
+        target_compile_options(${PROJECT_NAME} PRIVATE ${TORCH_CXX_FLAGS_LIST})
+    endif()
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CELLUNIVERSE_HAS_N2V2_PREPROCESS=0)
+endif()
 
 # Release optimization flags.
 target_compile_options(${PROJECT_NAME} PRIVATE
@@ -152,6 +238,42 @@ target_include_directories(brightness_volume_analyzer PRIVATE
 
 target_link_libraries(brightness_volume_analyzer ${OpenCV_LIBS})
 target_link_libraries(brightness_volume_analyzer yaml-cpp)
+
+if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
+    add_library(n2v2_preprocess_lib
+            ${n2v2_preprocess_prototype}/src/N2V2Preprocessor.cpp
+    )
+
+    target_include_directories(n2v2_preprocess_lib PUBLIC
+            ${OpenCV_INCLUDE_DIRS}
+            ${n2v2_preprocess_prototype}/include
+            ${cwd}/lib/yaml-cpp/include
+    )
+    target_link_libraries(n2v2_preprocess_lib PUBLIC
+            ${OpenCV_LIBS}
+            yaml-cpp
+            ${TORCH_LIBRARIES}
+    )
+    if(TORCH_CXX_FLAGS_LIST)
+        target_compile_options(n2v2_preprocess_lib PRIVATE ${TORCH_CXX_FLAGS_LIST})
+    endif()
+    set_property(TARGET n2v2_preprocess_lib PROPERTY CXX_STANDARD 17)
+
+    add_executable(celluniverse_preprocess
+            ${n2v2_preprocess_prototype}/src/n2v2_preprocess_main.cpp
+    )
+    target_link_libraries(celluniverse_preprocess PRIVATE n2v2_preprocess_lib)
+    if(IPO_SUPPORTED)
+        set_property(TARGET celluniverse_preprocess PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+
+    add_executable(n2v2_preprocess_unit_test
+            ${cwd}/tests/n2v2_preprocess_test.cpp
+    )
+    target_link_libraries(n2v2_preprocess_unit_test PRIVATE n2v2_preprocess_lib)
+    add_test(NAME n2v2_preprocess_unit_test COMMAND n2v2_preprocess_unit_test)
+endif()
 
 # Tests disabled 2026-04-08: they reference SimulationConfig fields
 # (background_color, cell_color) that were removed in the sigmoid-pipeline

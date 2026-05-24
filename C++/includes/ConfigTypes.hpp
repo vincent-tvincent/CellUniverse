@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -31,6 +32,7 @@ inline std::mt19937 &cellUniverseRandomGenerator()
 
 class SimulationConfig {
 public:
+    std::string preprocessing_pipeline = "legacy";
     int iterations_per_cell;
     int signal_guided_iterations_per_cell = -1;
     int random_iterations_per_cell = -1;
@@ -238,11 +240,150 @@ public:
     // scaled: CSV z is already in interpolated optimizer z space.
     std::string initial_z_space = "auto";
 
+    bool n2v2_enable_network = true;
+    std::string n2v2_model_path = "models/general_n2v2_torchscript.pt";
+    std::string n2v2_device = "auto";
+    int n2v2_inference_batch_size = 16;
+    std::vector<int> n2v2_tile_size{256, 256};
+    std::vector<int> n2v2_tile_overlap{48, 48};
+    double n2v2_scale_percentile = 99.9;
+    bool n2v2_use_nonzero_pixels = true;
+    double n2v2_fallback_scale = 65536.0;
+    double n2v2_careamics_mean = 0.33040523529052734;
+    double n2v2_careamics_std = 0.23699833071884863;
+    bool n2v2_background_subtraction_enabled = true;
+    double n2v2_background_subtraction_percentile = 20.0;
+    bool n2v2_background_subtraction_exclude_zero = true;
+    double n2v2_background_subtraction_clip_min = 0.0;
+    bool n2v2_contrast_enabled = true;
+    std::string n2v2_contrast_limit_mode = "percentile";
+    double n2v2_contrast_low_limit = 10.0;
+    bool n2v2_contrast_has_high_limit = false;
+    double n2v2_contrast_high_limit = 0.0;
+    double n2v2_contrast_low_percentile = 75.0;
+    double n2v2_contrast_high_percentile = 99.99;
+    bool n2v2_contrast_exclude_zero = true;
+    std::string n2v2_contrast_scope = "stack";
+    double n2v2_contrast_gamma = 1.45;
+    bool n2v2_contrast_preserve_zero_pixels = true;
+    std::string n2v2_output_dtype = "preserve";
+    bool n2v2_output_write_intermediate = false;
+    bool n2v2_output_quantize_before_contrast = true;
+
     // Constructor with default values
     SimulationConfig() : iterations_per_cell(0),
                          z_scaling(1.0), blur_sigma(0.0f), z_slices(-1) {
     }
+    static std::string normalizedConfigString(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return value;
+    }
+    static std::vector<int> readIntPairConfig(const YAML::Node &node,
+                                              const std::vector<int> &fallback) {
+        if (!node) {
+            return fallback;
+        }
+        if (!node.IsSequence() || node.size() != 2) {
+            throw std::invalid_argument("n2v2_preprocess tile pairs must be [y, x]");
+        }
+        return {node[0].as<int>(), node[1].as<int>()};
+    }
+    void explodeN2V2Config(const YAML::Node& node) {
+        if (!node) {
+            return;
+        }
+        if (node["enable_network"]) n2v2_enable_network = node["enable_network"].as<bool>();
+        if (node["model_path"]) n2v2_model_path = node["model_path"].as<std::string>();
+        if (node["device"]) n2v2_device = node["device"].as<std::string>();
+        if (node["inference_batch_size"]) n2v2_inference_batch_size = node["inference_batch_size"].as<int>();
+        n2v2_tile_size = readIntPairConfig(node["tile_size"], n2v2_tile_size);
+        n2v2_tile_overlap = readIntPairConfig(node["tile_overlap"], n2v2_tile_overlap);
+        if (node["scale_percentile"]) n2v2_scale_percentile = node["scale_percentile"].as<double>();
+        if (node["use_nonzero_pixels"]) n2v2_use_nonzero_pixels = node["use_nonzero_pixels"].as<bool>();
+        if (node["fallback_scale"]) n2v2_fallback_scale = node["fallback_scale"].as<double>();
+        if (node["careamics_mean"]) n2v2_careamics_mean = node["careamics_mean"].as<double>();
+        if (node["careamics_std"]) n2v2_careamics_std = node["careamics_std"].as<double>();
+
+        const YAML::Node bg = node["background_subtraction"];
+        if (bg) {
+            if (bg["enabled"]) n2v2_background_subtraction_enabled = bg["enabled"].as<bool>();
+            if (bg["percentile"]) n2v2_background_subtraction_percentile = bg["percentile"].as<double>();
+            if (bg["exclude_zero"]) n2v2_background_subtraction_exclude_zero = bg["exclude_zero"].as<bool>();
+            if (bg["clip_min"]) n2v2_background_subtraction_clip_min = bg["clip_min"].as<double>();
+        }
+
+        const YAML::Node contrast = node["contrast"];
+        if (contrast) {
+            if (contrast["enabled"]) n2v2_contrast_enabled = contrast["enabled"].as<bool>();
+            if (contrast["limit_mode"]) n2v2_contrast_limit_mode = normalizedConfigString(contrast["limit_mode"].as<std::string>());
+            if (contrast["low_limit"]) n2v2_contrast_low_limit = contrast["low_limit"].as<double>();
+            if (contrast["high_limit"] && !contrast["high_limit"].IsNull()) {
+                n2v2_contrast_high_limit = contrast["high_limit"].as<double>();
+                n2v2_contrast_has_high_limit = true;
+            }
+            if (contrast["low_percentile"]) n2v2_contrast_low_percentile = contrast["low_percentile"].as<double>();
+            if (contrast["high_percentile"]) n2v2_contrast_high_percentile = contrast["high_percentile"].as<double>();
+            if (contrast["exclude_zero"]) n2v2_contrast_exclude_zero = contrast["exclude_zero"].as<bool>();
+            if (contrast["scope"]) n2v2_contrast_scope = normalizedConfigString(contrast["scope"].as<std::string>());
+            if (contrast["gamma"]) n2v2_contrast_gamma = contrast["gamma"].as<double>();
+            if (contrast["preserve_zero_pixels"]) n2v2_contrast_preserve_zero_pixels = contrast["preserve_zero_pixels"].as<bool>();
+        }
+
+        const YAML::Node output = node["output"];
+        if (output) {
+            if (output["dtype"]) n2v2_output_dtype = normalizedConfigString(output["dtype"].as<std::string>());
+            if (output["write_intermediate"]) n2v2_output_write_intermediate = output["write_intermediate"].as<bool>();
+            if (output["quantize_before_contrast"]) n2v2_output_quantize_before_contrast = output["quantize_before_contrast"].as<bool>();
+        }
+    }
+    void validatePreprocessingConfig() {
+        preprocessing_pipeline = normalizedConfigString(preprocessing_pipeline);
+        if (preprocessing_pipeline != "legacy" && preprocessing_pipeline != "n2v2") {
+            throw std::invalid_argument("simulation.preprocessing_pipeline must be one of: legacy, n2v2");
+        }
+        if (n2v2_tile_size.size() != 2 || n2v2_tile_overlap.size() != 2 ||
+            n2v2_tile_size[0] <= 0 || n2v2_tile_size[1] <= 0 ||
+            n2v2_tile_overlap[0] < 0 || n2v2_tile_overlap[1] < 0 ||
+            n2v2_tile_overlap[0] >= n2v2_tile_size[0] ||
+            n2v2_tile_overlap[1] >= n2v2_tile_size[1]) {
+            throw std::invalid_argument("n2v2_preprocess tile_size must be positive and tile_overlap must be smaller");
+        }
+        if (n2v2_inference_batch_size <= 0) {
+            throw std::invalid_argument("n2v2_preprocess.inference_batch_size must be positive");
+        }
+        if (n2v2_scale_percentile <= 0.0 || n2v2_scale_percentile > 100.0) {
+            throw std::invalid_argument("n2v2_preprocess.scale_percentile must be in (0, 100]");
+        }
+        if (n2v2_careamics_std <= 0.0) {
+            throw std::invalid_argument("n2v2_preprocess.careamics_std must be positive");
+        }
+        if (n2v2_background_subtraction_percentile < 0.0 ||
+            n2v2_background_subtraction_percentile > 100.0) {
+            throw std::invalid_argument("n2v2_preprocess.background_subtraction.percentile must be in [0, 100]");
+        }
+        if (n2v2_contrast_low_percentile < 0.0 || n2v2_contrast_low_percentile > 100.0 ||
+            n2v2_contrast_high_percentile < 0.0 || n2v2_contrast_high_percentile > 100.0 ||
+            n2v2_contrast_low_percentile >= n2v2_contrast_high_percentile) {
+            throw std::invalid_argument("n2v2_preprocess contrast percentiles must satisfy 0 <= low < high <= 100");
+        }
+        if (n2v2_contrast_gamma <= 0.0) {
+            throw std::invalid_argument("n2v2_preprocess.contrast.gamma must be positive");
+        }
+        if (n2v2_contrast_limit_mode != "absolute" && n2v2_contrast_limit_mode != "percentile") {
+            throw std::invalid_argument("n2v2_preprocess.contrast.limit_mode must be absolute or percentile");
+        }
+        if (n2v2_contrast_scope != "stack" && n2v2_contrast_scope != "slice") {
+            throw std::invalid_argument("n2v2_preprocess.contrast.scope must be stack or slice");
+        }
+        if (n2v2_output_dtype != "preserve" && n2v2_output_dtype != "uint8" &&
+            n2v2_output_dtype != "uint16" && n2v2_output_dtype != "float32") {
+            throw std::invalid_argument("n2v2_preprocess.output.dtype must be preserve, uint8, uint16, or float32");
+        }
+        n2v2_device = normalizedConfigString(n2v2_device);
+    }
     void explodeConfig(const YAML::Node& node) {
+        if (node["preprocessing_pipeline"]) preprocessing_pipeline = node["preprocessing_pipeline"].as<std::string>();
         iterations_per_cell = node["iterations_per_cell"].as<int>();
         if (node["signal_guided_iterations_per_cell"]) signal_guided_iterations_per_cell = node["signal_guided_iterations_per_cell"].as<int>();
         if (node["random_iterations_per_cell"]) random_iterations_per_cell = node["random_iterations_per_cell"].as<int>();
@@ -367,8 +508,10 @@ public:
         if (node["parallel_threads"]) parallel_threads = node["parallel_threads"].as<int>();
         if (node["parallel_min_slices"]) parallel_min_slices = node["parallel_min_slices"].as<int>();
         if (node["initial_z_space"]) initial_z_space = node["initial_z_space"].as<std::string>();
+        explodeN2V2Config(node["n2v2_preprocess"]);
         parallel_threads = std::max(1, parallel_threads);
         parallel_min_slices = std::max(1, parallel_min_slices);
+        validatePreprocessingConfig();
         if (initial_z_space != "auto" &&
             initial_z_space != "raw" &&
             initial_z_space != "scaled") {
@@ -377,6 +520,7 @@ public:
     }
     void printConfig() const {
         std::cout << "Simulation Config\n";
+        std::cout << "preprocessing_pipeline: " << preprocessing_pipeline << '\n';
         std::cout << "iterations_per_cell: " << iterations_per_cell << '\n';
         std::cout << "signal_guided_iterations_per_cell: " << signal_guided_iterations_per_cell << '\n';
         std::cout << "random_iterations_per_cell: " << random_iterations_per_cell << '\n';
@@ -489,6 +633,35 @@ public:
         std::cout << "parallel_threads: " << parallel_threads << '\n';
         std::cout << "parallel_min_slices: " << parallel_min_slices << '\n';
         std::cout << "initial_z_space: " << initial_z_space << '\n';
+        std::cout << "n2v2_enable_network: " << n2v2_enable_network << '\n';
+        std::cout << "n2v2_model_path: " << n2v2_model_path << '\n';
+        std::cout << "n2v2_device: " << n2v2_device << '\n';
+        std::cout << "n2v2_inference_batch_size: " << n2v2_inference_batch_size << '\n';
+        std::cout << "n2v2_tile_size: [" << n2v2_tile_size[0] << ", " << n2v2_tile_size[1] << "]\n";
+        std::cout << "n2v2_tile_overlap: [" << n2v2_tile_overlap[0] << ", " << n2v2_tile_overlap[1] << "]\n";
+        std::cout << "n2v2_scale_percentile: " << n2v2_scale_percentile << '\n';
+        std::cout << "n2v2_use_nonzero_pixels: " << n2v2_use_nonzero_pixels << '\n';
+        std::cout << "n2v2_fallback_scale: " << n2v2_fallback_scale << '\n';
+        std::cout << "n2v2_careamics_mean: " << n2v2_careamics_mean << '\n';
+        std::cout << "n2v2_careamics_std: " << n2v2_careamics_std << '\n';
+        std::cout << "n2v2_background_subtraction_enabled: " << n2v2_background_subtraction_enabled << '\n';
+        std::cout << "n2v2_background_subtraction_percentile: " << n2v2_background_subtraction_percentile << '\n';
+        std::cout << "n2v2_background_subtraction_exclude_zero: " << n2v2_background_subtraction_exclude_zero << '\n';
+        std::cout << "n2v2_background_subtraction_clip_min: " << n2v2_background_subtraction_clip_min << '\n';
+        std::cout << "n2v2_contrast_enabled: " << n2v2_contrast_enabled << '\n';
+        std::cout << "n2v2_contrast_limit_mode: " << n2v2_contrast_limit_mode << '\n';
+        std::cout << "n2v2_contrast_low_limit: " << n2v2_contrast_low_limit << '\n';
+        std::cout << "n2v2_contrast_has_high_limit: " << n2v2_contrast_has_high_limit << '\n';
+        std::cout << "n2v2_contrast_high_limit: " << n2v2_contrast_high_limit << '\n';
+        std::cout << "n2v2_contrast_low_percentile: " << n2v2_contrast_low_percentile << '\n';
+        std::cout << "n2v2_contrast_high_percentile: " << n2v2_contrast_high_percentile << '\n';
+        std::cout << "n2v2_contrast_exclude_zero: " << n2v2_contrast_exclude_zero << '\n';
+        std::cout << "n2v2_contrast_scope: " << n2v2_contrast_scope << '\n';
+        std::cout << "n2v2_contrast_gamma: " << n2v2_contrast_gamma << '\n';
+        std::cout << "n2v2_contrast_preserve_zero_pixels: " << n2v2_contrast_preserve_zero_pixels << '\n';
+        std::cout << "n2v2_output_dtype: " << n2v2_output_dtype << '\n';
+        std::cout << "n2v2_output_write_intermediate: " << n2v2_output_write_intermediate << '\n';
+        std::cout << "n2v2_output_quantize_before_contrast: " << n2v2_output_quantize_before_contrast << '\n';
         std::cout << "z_slices: " << z_slices << std::endl;
     }
 };
@@ -1208,6 +1381,8 @@ public:
         cell = std::make_unique<EllipsoidConfig>();
         cell->explodeConfig(node["cell"]);
         simulation.explodeConfig(node["simulation"]);
+        simulation.explodeN2V2Config(node["n2v2_preprocess"]);
+        simulation.validatePreprocessingConfig();
         prob.explodeConfig(node["prob"]);
     }
 

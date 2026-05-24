@@ -57,9 +57,9 @@ struct BridgeSplitProposal
 class Frame
 {
 public:
-    // Signal center descriptor used by ImageHandler's signal-center
-    // localization (`localizeSignalCentersInStack`). Defined here as a
-    // public nested type so ImageHandler.cpp can compile without coupling
+    // Signal center descriptor used by preprocessing signal-center
+    // localization. Defined here as a
+    // public nested type so preprocessing code can compile without coupling
     // to the rest of the signal-guided perturbation feature (which is
     // currently unused in our pipeline). Kept for future re-enablement.
     struct SignalCenter {

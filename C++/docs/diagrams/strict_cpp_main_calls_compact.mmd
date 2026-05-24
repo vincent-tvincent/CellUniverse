@@ -36,10 +36,29 @@ class CellFactory {
 
 class Lineage {
   +Lineage(cells: map~Path,vector~Spheroid~~, imagePaths: PathVec, config: BaseConfig, outputPath: string, continueFrom: int)
+  +prepareFrame(frame: int) void
+  +preprocessAllFramesAlignedToMinimumBackground(loadIntoFrames: bool) void
   +length() unsigned int
   +optimize(frame: int) void
   +copyCellsForward(to: int) void
   +saveFrame(frame: int) void
+}
+
+class PreprocessingHandler {
+  +probePreprocessedStack(imagePath, log)
+  +preprocessFrame(imagePath, edgeTarget, log)
+  +preprocessBatch(imagePaths, retainStacks, log, resolvedEdgeTarget)
+}
+
+class ImageHandler {
+  +getImageFilePaths(input, firstFrame, lastFrame, config)
+  +loadRawFrame(imageFile, config, logSink)
+  +preprocessLoadedFrame(slices, imageFile, config, logSink)
+  +finalizePreprocessedStack(slices, imageFile, config, logSink)
+}
+
+class N2V2Preprocessor {
+  +processStack(rawStack, inputPath, log)
 }
 
 class YAML {
@@ -50,5 +69,9 @@ MainProgram ..> ArgsMain : parse argv
 MainProgram ..> YAML : load config file
 MainProgram ..> BaseConfig : explodeConfig()/printConfig()
 MainProgram ..> SimulationConfig : read z_slices/z_scaling
+MainProgram ..> ImageHandler : getImageFilePaths()
 MainProgram ..> CellFactory : ctor/createCells()
 MainProgram ..> Lineage : ctor/length()/optimize()/copyCellsForward()/saveFrame()
+Lineage ..> PreprocessingHandler : prepareFrame()/preprocess-only
+PreprocessingHandler ..> ImageHandler : legacy engine + z interpolation/cube pooling
+PreprocessingHandler ..> N2V2Preprocessor : n2v2 engine when selected and Torch-linked

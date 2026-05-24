@@ -246,11 +246,30 @@ class Frame {
 
 class Lineage {
   +Lineage(initialCells, imagePaths, config, outputPath, continueFrom)
+  +prepareFrame(frameIndex)
+  +preprocessAllFramesAlignedToMinimumBackground(loadIntoFrames)
   +optimize(frameIndex)
   +saveImages(frameIndex)
   +saveCells(frameIndex)
   +copyCellsForward(to)
   +length()
+}
+
+class PreprocessingHandler {
+  +probePreprocessedStack(imagePath, log)
+  +preprocessFrame(imagePath, edgeTarget, log)
+  +preprocessBatch(imagePaths, retainStacks, log, resolvedEdgeTarget)
+}
+
+class ImageHandler {
+  +getImageFilePaths(input, firstFrame, lastFrame, config)
+  +loadRawFrame(imageFile, config, logSink)
+  +preprocessLoadedFrame(normalizedSlices, imageFile, config, logSink)
+  +finalizePreprocessedStack(slices, imageFile, config, logSink)
+}
+
+class N2V2Preprocessor {
+  +processStack(rawStack, inputPath, log)
 }
 
 class Args_main {
@@ -297,8 +316,7 @@ class MainCppFunctions {
 
 class LineageFunctions {
   <<utility>>
-  +processImage(image, config)
-  +loadFrame(imageFile, config)
+  +preprocessWrappers()
 }
 
 class FrameFunctions {
@@ -337,6 +355,10 @@ CellFactory --> BaseConfig
 CellFactory --> Spheroid
 Lineage *-- Frame
 Lineage --> BaseConfig
+Lineage --> PreprocessingHandler
+PreprocessingHandler --> ImageHandler
+PreprocessingHandler --> N2V2Preprocessor
+PreprocessingHandler --> BaseConfig
 Frame o-- Spheroid
 Frame --> SimulationConfig
 Sphere --> SphereConfig
@@ -349,6 +371,7 @@ MainCppFunctions --> Args_main
 MainCppFunctions --> BaseConfig
 MainCppFunctions --> CellFactory
 MainCppFunctions --> Lineage
+MainCppFunctions --> ImageHandler
 MainCppFunctions --> Spheroid
 LineageFunctions --> BaseConfig
 LineageFunctions --> Lineage

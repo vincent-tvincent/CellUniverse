@@ -6,7 +6,7 @@
 #endif
 
 #if CELLUNIVERSE_HAS_N2V2_PREPROCESS
-#include "../prototype/n2v2_preprocess/include/N2V2Preprocessor.hpp"
+#include "N2V2Preprocessor.hpp"
 #endif
 
 #include <algorithm>

@@ -8,6 +8,20 @@ Branch (merge done on): `jl_yp_preprocessing_merge_04192026`
 
 ---
 
+## 2026-05-24: Promote N2V2 preprocessor into main source tree
+
+Moved the integrated N2V2 implementation out of `prototype/` and into the
+production source layout:
+
+- `includes/N2V2Preprocessor.hpp`
+- `src/N2V2Preprocessor.cpp`
+
+`PreprocessingHandler` now includes the main header directly. CMake builds the
+runtime and `n2v2_preprocess_lib` from `src/N2V2Preprocessor.cpp`; the prototype
+folder keeps only the standalone CLI entry point.
+
+---
+
 ## 2026-04-19: Merge yp_fix_mask preprocessing pipeline (Change 1)
 
 **Status: ACTIVE — validated against snap-only baseline**

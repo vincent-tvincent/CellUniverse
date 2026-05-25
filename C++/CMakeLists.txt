@@ -165,7 +165,7 @@ if(TORCH_CXX_FLAGS)
 endif()
 
 set(cwd ${CMAKE_CURRENT_SOURCE_DIR})
-set(n2v2_preprocess_prototype ${cwd}/prototype/n2v2_preprocess)
+set(n2v2_preprocess_cli ${cwd}/prototype/n2v2_preprocess)
 
 add_executable(${PROJECT_NAME}
         ${cwd}/src/main.cpp
@@ -184,7 +184,6 @@ add_executable(${PROJECT_NAME}
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
-        ${n2v2_preprocess_prototype}/include
         ${cwd}/includes
         ${cwd}/src
 )
@@ -198,10 +197,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE lib/yaml-cpp/include)
 
 if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
     target_sources(${PROJECT_NAME} PRIVATE
-            ${n2v2_preprocess_prototype}/src/N2V2Preprocessor.cpp
+            ${cwd}/src/N2V2Preprocessor.cpp
     )
     target_include_directories(${PROJECT_NAME} PRIVATE
-            ${n2v2_preprocess_prototype}/include
+            ${cwd}/includes
     )
     target_link_libraries(${PROJECT_NAME} ${TORCH_LIBRARIES})
     target_compile_definitions(${PROJECT_NAME} PRIVATE CELLUNIVERSE_HAS_N2V2_PREPROCESS=1)
@@ -241,12 +240,12 @@ target_link_libraries(brightness_volume_analyzer yaml-cpp)
 
 if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
     add_library(n2v2_preprocess_lib
-            ${n2v2_preprocess_prototype}/src/N2V2Preprocessor.cpp
+            ${cwd}/src/N2V2Preprocessor.cpp
     )
 
     target_include_directories(n2v2_preprocess_lib PUBLIC
             ${OpenCV_INCLUDE_DIRS}
-            ${n2v2_preprocess_prototype}/include
+            ${cwd}/includes
             ${cwd}/lib/yaml-cpp/include
     )
     target_link_libraries(n2v2_preprocess_lib PUBLIC
@@ -260,7 +259,7 @@ if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
     set_property(TARGET n2v2_preprocess_lib PROPERTY CXX_STANDARD 17)
 
     add_executable(celluniverse_preprocess
-            ${n2v2_preprocess_prototype}/src/n2v2_preprocess_main.cpp
+            ${n2v2_preprocess_cli}/src/n2v2_preprocess_main.cpp
     )
     target_link_libraries(celluniverse_preprocess PRIVATE n2v2_preprocess_lib)
     if(IPO_SUPPORTED)

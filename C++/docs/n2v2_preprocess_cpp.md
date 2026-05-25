@@ -12,6 +12,10 @@ It is available in two forms:
 - an integrated CellUniverse preprocessing engine selected with
   `simulation.preprocessing_pipeline: n2v2`
 
+The reusable implementation lives in `includes/N2V2Preprocessor.hpp` and
+`src/N2V2Preprocessor.cpp`. The `prototype/n2v2_preprocess` folder only keeps
+the standalone CLI entry point.
+
 `PreprocessingHandler` calls `N2V2Preprocessor` directly for integrated runs.
 The legacy `ImageHandler` iterative contrast path is skipped in that mode;
 `ImageHandler` is still reused for z interpolation and cube pooling so `Frame`

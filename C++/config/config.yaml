@@ -262,7 +262,7 @@ simulation:
   post_alignment_tiny_particle_removal_enabled: false
   # Single runtime thread-count entry. This drives OpenCV/OpenMP defaults,
   # z-slice work, preprocessing radius trials, and chunk-detector prepasses.
-  parallel_threads: 12
+  parallel_threads: 100
 
   post_process_blur_sigma: 0.0
   post_process_final_blur_sigma: 2.5

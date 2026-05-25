@@ -314,6 +314,10 @@ public:
         _signalMap.shrink_to_fit();
         _currentCostPerSlice.clear();
         _currentCostPerSlice.shrink_to_fit();
+        _voronoiMap.clear();
+        _voronoiMap.shrink_to_fit();
+        _voronoiAnchors.clear();
+        _voronoiAnchors.shrink_to_fit();
     }
     void setBackgroundColor(float backgroundColor) { _backgroundValue = backgroundColor; }
     float getBackgroundValue() const { return _backgroundValue; }

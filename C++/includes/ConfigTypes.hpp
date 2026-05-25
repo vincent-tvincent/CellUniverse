@@ -1226,6 +1226,7 @@ public:
     bool pcaShapeFitGrowthCapEnabled{true};
     float pcaShapeFitGrowthCap{0.10f};
     bool trashPcaShapeFitEnabled{true};
+    bool trashPcaShapeUpdatePosition{false};
     float trashPcaShapeMaxOriginalRadiusFactor{2.0f};
     bool trashRemovalEnabled{false};
     float trashRemovalBrightnessThreshold{0.05f};
@@ -1330,6 +1331,7 @@ public:
         if (node["pcaShapeFitGrowthCapEnabled"]) pcaShapeFitGrowthCapEnabled = node["pcaShapeFitGrowthCapEnabled"].as<bool>();
         if (node["pcaShapeFitGrowthCap"]) pcaShapeFitGrowthCap = node["pcaShapeFitGrowthCap"].as<float>();
         if (node["trashPcaShapeFitEnabled"]) trashPcaShapeFitEnabled = node["trashPcaShapeFitEnabled"].as<bool>();
+        if (node["trashPcaShapeUpdatePosition"]) trashPcaShapeUpdatePosition = node["trashPcaShapeUpdatePosition"].as<bool>();
         if (node["trashPcaShapeMaxOriginalRadiusFactor"]) trashPcaShapeMaxOriginalRadiusFactor = node["trashPcaShapeMaxOriginalRadiusFactor"].as<float>();
         if (node["trashRemovalEnabled"]) trashRemovalEnabled = node["trashRemovalEnabled"].as<bool>();
         if (node["trashRemovalBrightnessThreshold"]) trashRemovalBrightnessThreshold = node["trashRemovalBrightnessThreshold"].as<float>();

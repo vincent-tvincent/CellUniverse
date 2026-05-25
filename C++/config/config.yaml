@@ -92,6 +92,7 @@ cell:
   pcaShapeFitGrowthCapEnabled: true
   pcaShapeFitGrowthCap: 0.90
   trashPcaShapeFitEnabled: true
+  trashPcaShapeUpdatePosition: false
   trashPcaShapeMaxOriginalRadiusFactor: 2.0
   # Post-optimization cleanup: trash cells dimmer than this threshold are
   # removed after the current frame is fully optimized. Their brightness is

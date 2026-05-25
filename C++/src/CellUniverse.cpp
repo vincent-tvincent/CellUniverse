@@ -1428,6 +1428,7 @@ void CellUniverse::optimize(int frameIndex)
                   << " minPixels=" << pcaMin
                   << " maskScale=" << maskScale
                   << " updatePos=" << updatePos
+                  << " trashUpdatePos=" << (config.cell && config.cell->trashPcaShapeUpdatePosition)
                   << std::endl;
 
         // Snapshot cell positions BEFORE the parallel region to avoid a
@@ -1467,6 +1468,8 @@ void CellUniverse::optimize(int frameIndex)
         // ordering is deterministic regardless of thread count.
         const bool trashPcaShapeFitEnabled =
             config.cell && config.cell->trashPcaShapeFitEnabled;
+        const bool trashPcaShapeUpdatePosition =
+            config.cell && config.cell->trashPcaShapeUpdatePosition;
         const float trashMaxOriginalRadiusFactor = std::max(
             1.0f,
             config.cell ? config.cell->trashPcaShapeMaxOriginalRadiusFactor : 2.0f);
@@ -1527,10 +1530,12 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
 
+            const bool cellUpdatePos =
+                isTrashCell ? trashPcaShapeUpdatePosition : updatePos;
             frame.calibrateCellShapeViaPca(ci, others,
                                            pcaMaxIters, pcaScale, pcaMin,
                                            maskScale, convR, convAng,
-                                           updatePos, posShiftCap,
+                                           cellUpdatePos, posShiftCap,
                                            maskA, maskB, maskC,
                                            &shapeLogs[ci]);
             if (isTrashCell) {
@@ -2466,6 +2471,10 @@ void CellUniverse::optimize(int frameIndex)
                             framePath,
                             config.simulation.export_frame_png,
                             config.simulation.export_frame_tiff);
+        movementPerturbDebugPlacements.clear();
+        movementPerturbDebugPlacements.shrink_to_fit();
+        splitPerturbDebugPlacements.clear();
+        splitPerturbDebugPlacements.shrink_to_fit();
     }
 
     if (exportPerturbCenterDebug) {

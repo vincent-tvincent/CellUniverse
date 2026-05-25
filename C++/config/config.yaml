@@ -273,7 +273,7 @@ simulation:
   # Debug signal-guidance localization. When true, exports two stacks per
   # frame under signal_debug/: center cubes on black background and a
   # grayscale perturb-probability field on black background.
-  export_signal_debug_images: true
+  export_signal_debug_images: false
   # Debug normal perturb proposals. Draws every proposed cell placement during
   # normal perturbation onto black; overlaps accumulate brightness.
   # Keep this off for production runs to avoid per-iteration image write churn.
@@ -281,7 +281,7 @@ simulation:
   # Extra perturb debug export: black background with a small cube at each
   # current cell center and the cell name drawn next to that cube.
   # Keep this off for production runs; turn on manually when diagnosing.
-  export_perturb_cell_center_debug_images: false
+  export_perturb_cell_center_debug_images: true
   export_frame_png: false
   export_frame_tiff: true
 

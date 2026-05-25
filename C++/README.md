@@ -163,6 +163,44 @@ To build only the N2V2-related targets after configuring with LibTorch:
 cmake --build build -j "$(nproc)" --target celluniverse_preprocess n2v2_preprocess_unit_test
 ```
 
+## Live Napari Monitor
+
+Use `scripts/live_monitor_napari.py` to watch a running CellUniverse output
+folder. The `--interval` value is in minutes, so `2.5` means refresh every two
+and a half minutes:
+
+```bash
+python3 scripts/live_monitor_napari.py /path/to/output_run --interval 2.5
+```
+
+For a run launched from `scripts/run_celluniverse.sh`, the output path is printed
+near startup as `Output Path`. Example:
+
+```bash
+python3 scripts/live_monitor_napari.py \
+  /run/media/blue-lobster/disk3/celluniverse_output/outputs_fluo/output_ubuntu_fluo_0-150_YYYYMMDD_HHMMSS \
+  --interval 2.5
+```
+
+The monitor expects TIFF export and perturb debug export folders:
+
+```text
+tiff/real
+tiff/synth
+perturb_debug/split_placements
+perturb_debug/movement_placements
+perturb_debug/cell_centers
+```
+
+Enable the corresponding config options before starting the run:
+
+```yaml
+simulation:
+  export_frame_tiff: true
+  export_perturb_debug_images: true
+  export_perturb_cell_center_debug_images: true
+```
+
 ### Using ICS openlab
 - ssh into your ICS openlab. (Recommend to use vscode remote development tool: https://code.visualstudio.com/docs/remote/ssh)
     - Notice you should ssh into the circinus-28 machine to avoid dependency issue (ssh <netid>@circinus-28.ics.uci.edu)

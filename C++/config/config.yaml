@@ -262,7 +262,7 @@ simulation:
   post_alignment_tiny_particle_removal_enabled: false
   # Single runtime thread-count entry. This drives OpenCV/OpenMP defaults,
   # z-slice work, preprocessing radius trials, and chunk-detector prepasses.
-  parallel_threads: 100
+  parallel_threads: 12
 
   post_process_blur_sigma: 0.0
   post_process_final_blur_sigma: 2.5
@@ -393,8 +393,10 @@ prob:
   P_split_base: 0.03
   P_split_max: 0.5
 
-  split_cost: 2000
-  split_cost_fraction: 0.03
+  # split_cost: 2000
+  # split_cost_fraction: 0.03
+  split_cost: 500
+  split_cost_fraction: 0.01
   # Some visually correct divisions have a strong dark bridge but still lose
   # bbox image cost against the current live parent. Let those pass when the
   # bridge is strong and the positive cost delta is bounded.
@@ -434,7 +436,7 @@ prob:
   split_axis_alignment_gate_enabled: true
   split_axis_alignment_sphere_angle_degrees: 120.0
   # allowed = max(min_angle, sphere_angle / (1 + shrink * max(0, elongation - 1)))
-  split_axis_alignment_elongation_shrink: 0.75
+  split_axis_alignment_elongation_shrink: 0.5
   split_axis_alignment_min_angle_degrees: 20.0
   # Reject if generated daughters overlap each other by more than this
   # fraction of either daughter's voxel body.

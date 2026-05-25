@@ -258,7 +258,9 @@ case "$TARGET" in
     DEVICE_HINT="cpu"
     ;;
   linux-cpu)
-    URL="https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-latest.zip"
+    URL="$(select_latest_from_index \
+      "https://download.pytorch.org/libtorch/cpu/" \
+      '^libtorch-cxx11-abi-shared-with-deps-[0-9][^/]*\+cpu\.zip$')"
     DEVICE_HINT="cpu"
     ;;
   cuda)
@@ -277,7 +279,7 @@ case "$TARGET" in
     fi
     URL="$(select_latest_from_index \
       "https://download.pytorch.org/libtorch/${CUDA_TAG}/" \
-      "^libtorch-shared-with-deps-[0-9][^/]*\\+${CUDA_TAG}\\.zip$")"
+      "^libtorch-cxx11-abi-shared-with-deps-[0-9][^/]*\+${CUDA_TAG}\.zip$")"
     DEVICE_HINT="cuda"
     ;;
 esac
@@ -321,7 +323,7 @@ if [[ -e "$INSTALL_DIR" ]]; then
   rm -rf "$INSTALL_DIR"
 fi
 
-TMP_DIR="$(mktemp -d)"
+TMP_DIR="$(mktemp -d "$PREFIX/.libtorch-install.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 ZIP_PATH="$TMP_DIR/libtorch.zip"
 

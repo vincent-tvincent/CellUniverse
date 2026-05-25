@@ -41,6 +41,13 @@ std::string lowerCopy(std::string value)
     return value;
 }
 
+std::string deviceToString(const torch::Device &device)
+{
+    std::ostringstream stream;
+    stream << device;
+    return stream.str();
+}
+
 bool isTiffPath(const fs::path &path)
 {
     const std::string ext = lowerCopy(path.extension().string());
@@ -726,7 +733,7 @@ public:
                     << "/" << normalized.size()
                     << " tiles=" << tiles.size()
                     << " backend=libtorch"
-                    << " device=" << device.str()
+                    << " device=" << deviceToString(device)
                     << '\n';
             }
         }
@@ -786,7 +793,7 @@ PreprocessResult N2V2Preprocessor::processStack(const std::vector<cv::Mat> &rawS
     log << "[N2V2] runtime"
         << " backend=libtorch"
         << " requested_device=" << config_.device
-        << " selected_device=" << impl_->selectedDevice().str()
+        << " selected_device=" << deviceToString(impl_->selectedDevice())
         << " network_enabled=" << config_.enableNetwork
         << " network_loaded=" << impl_->isNetworkLoaded()
         << '\n';

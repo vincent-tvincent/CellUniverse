@@ -173,6 +173,11 @@ and a half minutes:
 python3 scripts/live_monitor_napari.py /path/to/output_run --interval 2.5
 ```
 
+By default, the monitor keeps the full start-to-current time stack as lazy dask
+arrays, so Napari can scroll through all loaded frames without loading every
+TIFF into RAM at once. To force the old eager RAM-loading behavior, add
+`--eager`.
+
 For a run launched from `scripts/run_celluniverse.sh`, the output path is printed
 near startup as `Output Path`. Example:
 

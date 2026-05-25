@@ -7,6 +7,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -19,6 +20,12 @@ os.environ.setdefault("XDG_CONFIG_HOME", "/tmp/celluniverse_napari_config")
 import napari
 import numpy as np
 import tifffile
+try:
+    import dask.array as da
+    from dask import delayed
+except Exception:  # pragma: no cover - optional runtime dependency
+    da = None
+    delayed = None
 from qtpy.QtCore import QTimer
 
 
@@ -68,6 +75,17 @@ def parse_args() -> argparse.Namespace:
         default=0.05,
         help="Per-layer Z offset in voxels. Default: 0.05.",
     )
+    parser.add_argument(
+        "--eager",
+        action="store_true",
+        help="Load full TIFF stacks into RAM. Default uses lazy dask arrays when dask is installed.",
+    )
+    parser.add_argument(
+        "--stable-age",
+        type=float,
+        default=2.0,
+        help="Minimum seconds since last file modification before reading. Default: 2.0.",
+    )
     return parser.parse_args()
 
 
@@ -104,21 +122,42 @@ def complete_frame_ids(root: Path) -> tuple[int, ...]:
     return tuple(sorted(set.intersection(*per_layer_ids)))
 
 
-def stable_file(path: Path) -> bool:
+def stable_file(path: Path, stable_age_seconds: float) -> bool:
     try:
-        before = path.stat()
-        after = path.stat()
+        stat = path.stat()
     except OSError:
         return False
 
-    return before.st_size > 0 and before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+    age_seconds = max(0.0, time.time() - (stat.st_mtime_ns / 1_000_000_000.0))
+    return stat.st_size > 0 and age_seconds >= stable_age_seconds
 
 
-def read_layer_stack(paths: Iterable[Path]) -> np.ndarray:
+def read_tiff_metadata(path: Path) -> tuple[tuple[int, ...], np.dtype]:
+    with tifffile.TiffFile(path) as tif:
+        series = tif.series[0]
+        return tuple(series.shape), np.dtype(series.dtype)
+
+
+def read_layer_stack(paths: Iterable[Path], lazy: bool, stable_age_seconds: float):
+    paths = tuple(paths)
+    for path in paths:
+        if not stable_file(path, stable_age_seconds):
+            raise RuntimeError(f"{path} is still changing or too new")
+
+    if lazy:
+        if da is None or delayed is None:
+            raise RuntimeError("lazy loading requires dask; rerun with --eager or install dask")
+        chunks = []
+        for path in paths:
+            shape, dtype = read_tiff_metadata(path)
+            lazy_frame = delayed(tifffile.imread)(str(path))
+            chunks.append(da.from_delayed(lazy_frame, shape=shape, dtype=dtype))
+        if not chunks:
+            return da.empty((0,), dtype=np.float32)
+        return da.stack(chunks, axis=0)
+
     frames = []
     for path in paths:
-        if not stable_file(path):
-            raise RuntimeError(f"{path} is still changing")
         frames.append(tifffile.imread(path))
 
     if not frames:
@@ -137,9 +176,18 @@ def z_translate(data: np.ndarray, offset: float) -> tuple[float, ...]:
 
 
 class LiveMonitor:
-    def __init__(self, output_dir: Path, interval_minutes: float, z_offset: float) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        interval_minutes: float,
+        z_offset: float,
+        lazy: bool,
+        stable_age_seconds: float,
+    ) -> None:
         self.output_dir = output_dir
         self.z_offset = z_offset
+        self.lazy = lazy
+        self.stable_age_seconds = stable_age_seconds
         self.viewer = napari.Viewer(title=f"CellUniverse live monitor: {output_dir.name}")
         self.loaded_frame_ids: tuple[int, ...] = ()
         self.timer = QTimer()
@@ -182,17 +230,18 @@ class LiveMonitor:
         self.loaded_frame_ids = frame_ids
         self.viewer.dims.ndisplay = 3
         self.viewer.dims.set_point(0, len(frame_ids) - 1)
+        mode = "lazy" if self.lazy else "eager"
         print(
-            f"[live-monitor] Loaded {len(frame_ids)} complete frames "
+            f"[live-monitor] Loaded {len(frame_ids)} complete frames ({mode}) "
             f"({frame_ids[0]}..{frame_ids[-1]})"
         )
 
-    def load_all_layers(self, frame_ids: tuple[int, ...]) -> list[tuple[LayerSpec, np.ndarray]]:
+    def load_all_layers(self, frame_ids: tuple[int, ...]):
         loaded = []
         for spec in LAYER_SPECS:
             layer_frames = tif_paths_by_frame(self.output_dir / spec.relative_dir)
             paths = [layer_frames[fid] for fid in frame_ids]
-            loaded.append((spec, read_layer_stack(paths)))
+            loaded.append((spec, read_layer_stack(paths, self.lazy, self.stable_age_seconds)))
         return loaded
 
 
@@ -208,7 +257,12 @@ def main() -> int:
         print(f"Output directory is missing required layer folders: {', '.join(missing)}", file=sys.stderr)
         return 2
 
-    LiveMonitor(output_dir, args.interval, args.z_offset).start()
+    lazy = not args.eager
+    if lazy and da is None:
+        print("[live-monitor] dask is not installed; falling back to eager RAM loading.", file=sys.stderr)
+        lazy = False
+
+    LiveMonitor(output_dir, args.interval, args.z_offset, lazy, args.stable_age).start()
     return 0
 
 

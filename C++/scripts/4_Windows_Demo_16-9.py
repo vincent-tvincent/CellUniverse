@@ -157,6 +157,31 @@ def discover_frame_specs(
     last_frame: int,
 ) -> dict[int, FrameImageSpec]:
     frame_specs: dict[int, FrameImageSpec] = {}
+
+    flat_real_root = base_dir / "tiff" / "real"
+    flat_synth_root = base_dir / "tiff" / "synth"
+    if flat_real_root.is_dir() and flat_synth_root.is_dir():
+        real_files = {
+            frame: path
+            for path in flat_real_root.iterdir()
+            if path.is_file() and (frame := frame_number(path.name)) is not None
+        }
+        synth_files = {
+            frame: path
+            for path in flat_synth_root.iterdir()
+            if path.is_file() and (frame := frame_number(path.name)) is not None
+        }
+        for frame in sorted(set(real_files) & set(synth_files)):
+            if first_frame <= frame <= last_frame:
+                frame_specs[frame] = FrameImageSpec(
+                    frame=frame,
+                    real_dir=real_files[frame],
+                    synth_dir=synth_files[frame],
+                    source="tiff",
+                )
+        if frame_specs:
+            return frame_specs
+
     stage_dirs = sorted([p for p in base_dir.iterdir() if p.is_dir()], key=stage_sort_key)
 
     for stage_dir in stage_dirs:
@@ -911,34 +936,46 @@ def read_gray(path: Path) -> np.ndarray:
     return image
 
 
-def project_volume(frame_dir: Path, mode: str) -> np.ndarray:
-    files = image_files(frame_dir)
-    if not files:
-        raise FileNotFoundError(f"No image slices found in {frame_dir}")
+def read_stack_pages(path: Path) -> list[np.ndarray]:
+    ok, images = cv2.imreadmulti(str(path), flags=cv2.IMREAD_UNCHANGED)
+    if ok and images:
+        pages = []
+        for image in images:
+            if image.ndim == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            pages.append(image)
+        return pages
+
+    image = read_gray(path)
+    return [image]
+
+
+def project_images(images: list[np.ndarray], mode: str) -> np.ndarray:
+    if not images:
+        raise FileNotFoundError("No image slices found")
 
     if mode == "middle":
-        return read_gray(files[len(files) // 2]).astype(np.float32)
+        return images[len(images) // 2].astype(np.float32)
 
-    result: np.ndarray | None = None
+    result = images[0].astype(np.float32)
     if mode == "max":
-        for file_path in files:
-            image = read_gray(file_path)
-            if result is None:
-                result = image.astype(np.float32)
-            else:
-                np.maximum(result, image, out=result)
-        assert result is not None
+        for image in images[1:]:
+            np.maximum(result, image, out=result)
         return result
 
-    accum: np.ndarray | None = None
-    for file_path in files:
-        image = read_gray(file_path).astype(np.float32)
-        if accum is None:
-            accum = image
-        else:
-            accum += image
-    assert accum is not None
-    return accum / float(len(files))
+    for image in images[1:]:
+        result += image.astype(np.float32)
+    return result / float(len(images))
+
+
+def project_volume(frame_path: Path, mode: str) -> np.ndarray:
+    if frame_path.is_file():
+        return project_images(read_stack_pages(frame_path), mode)
+
+    files = image_files(frame_path)
+    if not files:
+        raise FileNotFoundError(f"No image slices found in {frame_path}")
+    return project_images([read_gray(file_path) for file_path in files], mode)
 
 
 def compute_window(images: list[np.ndarray], low_q: float, high_q: float) -> tuple[float, float]:

@@ -421,20 +421,17 @@ choose_preset_arrow_menu() {
   local count="${#preset_ref[@]}"
   local selected=0
   local offset=0
-  local rows visible key rest i idx prefix line cols max_name typed_number viewport_cap
+  local rows visible key rest i idx prefix line cols max_name typed_number
 
   [ "$count" -gt 0 ] || return 1
   [ -r /dev/tty ] && [ -w /dev/tty ] || return 1
 
   rows="$(get_term_height)"
   cols="$(get_term_width)"
-  visible=$((rows - 8))
-  viewport_cap=18
+  # Use nearly the full terminal height: 5 header lines + 2 footer lines.
+  visible=$((rows - 7))
   if [ "$visible" -lt 8 ]; then
     visible=8
-  fi
-  if [ "$visible" -gt "$viewport_cap" ]; then
-    visible="$viewport_cap"
   fi
   if [ "$visible" -gt "$count" ]; then
     visible="$count"

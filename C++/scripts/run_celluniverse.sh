@@ -234,6 +234,7 @@ choose_preset() {
   local i=1
   local answer=""
   local line=""
+  local selected_preset=""
 
   while IFS= read -r line; do
     [ -n "$line" ] && presets+=("$line")
@@ -251,14 +252,17 @@ choose_preset() {
     exit 1
   fi
 
-  echo "Available presets:" >&2
-  for p in "${presets[@]}"; do
-    echo "  $i) $p" >&2
-    i=$((i + 1))
-  done
+  if [ -t 0 ] && [ -t 2 ]; then
+    if selected_preset="$(choose_preset_arrow_menu presets)"; then
+      printf '%s\n' "$selected_preset"
+      return 0
+    fi
+  fi
+
+  show_preset_list presets
 
   while true; do
-    if ! read -r -p "Select preset (name or number, default 1): " answer; then
+    if ! read -r -p "Select preset (name, number, or 'list'; default 1): " answer; then
       err "[FATAL] no input provided."
       exit 1
     fi
@@ -267,6 +271,11 @@ choose_preset() {
     if [ -z "$answer" ]; then
       printf '%s\n' "${presets[0]}"
       return 0
+    fi
+
+    if [ "$answer" = "list" ] || [ "$answer" = "l" ] || [ "$answer" = "?" ]; then
+      show_preset_list presets
+      continue
     fi
 
     if [[ "$answer" =~ ^[0-9]+$ ]]; then
@@ -366,6 +375,196 @@ get_term_width() {
     cols=40
   fi
   printf '%s\n' "$cols"
+}
+
+get_term_height() {
+  local rows=24
+  if command -v tput >/dev/null 2>&1; then
+    rows="$(tput lines 2>/dev/null || echo 24)"
+  fi
+  if ! [[ "$rows" =~ ^[0-9]+$ ]]; then
+    rows=24
+  fi
+  if [ "$rows" -lt 10 ]; then
+    rows=10
+  fi
+  printf '%s\n' "$rows"
+}
+
+show_preset_list() {
+  local -n preset_ref=$1
+  local count="${#preset_ref[@]}"
+  local i=1
+  local cols rows page_limit
+
+  cols="$(get_term_width)"
+  rows="$(get_term_height)"
+  page_limit=$((rows - 6))
+  if [ "$page_limit" -lt 8 ]; then
+    page_limit=8
+  fi
+
+  {
+    echo "Available presets ($count total):"
+    if [ "$count" -gt "$page_limit" ]; then
+      echo "Hint: more presets may be below. Type a number/name and Enter, or type 'list' to reopen this list."
+    fi
+    for p in "${preset_ref[@]}"; do
+      printf '  %3d) %s\n' "$i" "$p"
+      i=$((i + 1))
+    done
+  } | fold -s -w "$cols" >&2
+}
+
+choose_preset_arrow_menu() {
+  local -n preset_ref=$1
+  local count="${#preset_ref[@]}"
+  local selected=0
+  local offset=0
+  local rows visible key rest i idx prefix line cols max_name typed_number viewport_cap
+
+  [ "$count" -gt 0 ] || return 1
+  [ -r /dev/tty ] && [ -w /dev/tty ] || return 1
+
+  rows="$(get_term_height)"
+  cols="$(get_term_width)"
+  visible=$((rows - 8))
+  viewport_cap=18
+  if [ "$visible" -lt 8 ]; then
+    visible=8
+  fi
+  if [ "$visible" -gt "$viewport_cap" ]; then
+    visible="$viewport_cap"
+  fi
+  if [ "$visible" -gt "$count" ]; then
+    visible="$count"
+  fi
+  max_name=$((cols - 10))
+  if [ "$max_name" -lt 20 ]; then
+    max_name=20
+  fi
+  typed_number=""
+
+  draw_menu() {
+    printf '\033[H\033[J' > /dev/tty
+    printf 'Available presets (%s total)\n' "$count" > /dev/tty
+    printf 'Keys: Up/Down or j/k = move | PageUp/PageDown = jump | number+Enter = select by number\n' > /dev/tty
+    printf '      Enter = select highlighted | Backspace = edit number | q = text prompt\n' > /dev/tty
+    printf 'Hint: scroll down to see more presets below.\n\n' > /dev/tty
+    i=0
+    while [ "$i" -lt "$visible" ]; do
+      idx=$((offset + i))
+      [ "$idx" -lt "$count" ] || break
+      line="${preset_ref[$idx]}"
+      if [ "${#line}" -gt "$max_name" ]; then
+        line="${line:0:$((max_name - 3))}..."
+      fi
+      if [ "$idx" -eq "$selected" ]; then
+        prefix=">"
+      else
+        prefix=" "
+      fi
+      printf '%s %3d) %s\n' "$prefix" "$((idx + 1))" "$line" > /dev/tty
+      i=$((i + 1))
+    done
+    printf '\nShowing %d-%d of %d.\n' "$((offset + 1))" "$((offset + visible))" "$count" > /dev/tty
+    if [ -n "$typed_number" ]; then
+      printf 'Typed number: %s\n' "$typed_number" > /dev/tty
+    fi
+  }
+
+  printf '\033[?25l' > /dev/tty
+  trap "printf '\033[?25h' > /dev/tty" RETURN
+  while true; do
+    draw_menu
+    IFS= read -rsn1 key < /dev/tty || { printf '\033[?25h' > /dev/tty; trap - RETURN; return 1; }
+    case "$key" in
+      "")
+        if [ -n "$typed_number" ]; then
+          if [ "$typed_number" -ge 1 ] && [ "$typed_number" -le "$count" ]; then
+            selected=$((typed_number - 1))
+            printf '\033[?25h\033[H\033[J' > /dev/tty
+            printf '%s\n' "${preset_ref[$selected]}"
+            trap - RETURN
+            return 0
+          fi
+          typed_number=""
+          continue
+        fi
+        printf '\033[?25h\033[H\033[J' > /dev/tty
+        printf '%s\n' "${preset_ref[$selected]}"
+        trap - RETURN
+        return 0
+        ;;
+      q|Q)
+        if [ -n "$typed_number" ]; then
+          typed_number=""
+          continue
+        fi
+        printf '\033[?25h\033[H\033[J' > /dev/tty
+        trap - RETURN
+        return 1
+        ;;
+      $'\177'|$'\b')
+        typed_number="${typed_number%?}"
+        continue
+        ;;
+      [0-9])
+        typed_number="${typed_number}${key}"
+        if [ "$typed_number" -ge 1 ] && [ "$typed_number" -le "$count" ]; then
+          selected=$((typed_number - 1))
+          if [ "$selected" -lt "$offset" ]; then
+            offset="$selected"
+          elif [ "$selected" -ge $((offset + visible)) ]; then
+            offset=$((selected - visible + 1))
+          fi
+        fi
+        continue
+        ;;
+      j)
+        key="B"
+        ;;
+      k)
+        key="A"
+        ;;
+      $'\033')
+        IFS= read -rsn1 rest < /dev/tty || rest=""
+        if [ "$rest" = "[" ]; then
+          IFS= read -rsn1 key < /dev/tty || key=""
+          if [[ "$key" =~ [0-9] ]]; then
+            IFS= read -rsn1 rest < /dev/tty || rest=""
+          fi
+        fi
+        ;;
+    esac
+
+    case "$key" in
+      A)
+        typed_number=""
+        [ "$selected" -gt 0 ] && selected=$((selected - 1))
+        ;;
+      B)
+        typed_number=""
+        [ "$selected" -lt $((count - 1)) ] && selected=$((selected + 1))
+        ;;
+      5)
+        typed_number=""
+        selected=$((selected - visible))
+        [ "$selected" -lt 0 ] && selected=0
+        ;;
+      6)
+        typed_number=""
+        selected=$((selected + visible))
+        [ "$selected" -ge "$count" ] && selected=$((count - 1))
+        ;;
+    esac
+
+    if [ "$selected" -lt "$offset" ]; then
+      offset="$selected"
+    elif [ "$selected" -ge $((offset + visible)) ]; then
+      offset=$((selected - visible + 1))
+    fi
+  done
 }
 
 hr() {

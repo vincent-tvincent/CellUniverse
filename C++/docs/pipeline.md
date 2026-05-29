@@ -1,8 +1,11 @@
 # CellUniverse Pipeline (Current)
 
-**Last updated:** 2026-05-28 — shared N2V2/none preprocessing for CellUniverse and CellLumen
+**Last updated:** 2026-05-29 — shared N2V2/none preprocessing and CellLumen fusion split priors
 
 This is the authoritative end-to-end pipeline for a single frame. Per-fix rationale lives in `docs/changelogs/changelogv7.md`.
+
+For the active CellLumen center-prior and deterministic split-prior method, see
+`docs/cell_lumen_fusion_split_prior.md`.
 
 ---
 

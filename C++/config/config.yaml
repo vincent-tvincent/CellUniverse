@@ -133,6 +133,168 @@ cell:
   # the push, while still damping random movement away from the bright core.
   randomPerturbBrightCoreGuideStrength: 0.75
 
+cell_lumen:
+  enabled: true
+  fusionEnabled: true
+
+  # High-recall CellLumen candidates are used only as priors; Cell Universe
+  # still validates the resulting movement/split with its normal cost gates.
+  seededWatershedAdaptiveMinVoxelsCellCount: 100
+  seededWatershedAdaptiveDenseMinVoxels: 800
+  seededWatershedLowRescueMinVoxels: 800
+  seededWatershedLowRescueMinCandidateVoxels: 800
+  finalDuplicateMergeDistance: -1.0
+  finalPostRefineDuplicateMergeDistance: -1.0
+  finalWeakSatelliteFilterEnabled: false
+
+  fusionCenterPriorEnabled: true
+  fusionCenterPriorMaxDistance: 24.0
+  fusionCenterPriorPositionBlend: 0.35
+  fusionCenterPriorRadiusBlend: 0.25
+
+  fusionSplitPriorEnabled: true
+  fusionSplitPriorForceSchedule: true
+  fusionSplitPriorSkipRandomSplits: true
+  fusionSplitPriorGuidedOnly: true
+  fusionSplitPriorMaxParentDistance: 42.0
+  fusionSplitPriorParentRadiusScale: 2.8
+  fusionSplitPriorMinSeparation: 8.0
+  fusionSplitPriorMinSeparationRadiusScale: 0.55
+  fusionSplitPriorRoundParentMaxShape: 1.25
+  fusionSplitPriorRoundParentMinSeparationRadiusScale: 0.85
+  fusionSplitPriorMaxSeparation: 64.0
+  fusionSplitPriorMaxSeparationRadiusScale: 3.4
+  fusionSplitPriorMaxMidpointDistance: 28.0
+  fusionSplitPriorMaxMidpointRadiusScale: 0.80
+  fusionSplitPriorMaxScore: 22.0
+  fusionSplitPriorMinVoxels: 500
+  fusionSplitPriorMinTop10MinusShell: 0.0
+  fusionSplitPriorMaxPriorsPerFrame: 35
+  fusionSplitPriorFallbackToClassicOnReject: false
+
+  fusionSplitPriorElongatedParentRescueEnabled: true
+  fusionSplitPriorElongatedParentMinShape: 1.55
+  fusionSplitPriorElongatedParentMaxScore: 80.0
+  fusionSplitPriorElongatedParentScoreBonus: 10.0
+  fusionSplitPriorElongatedParentMaxNeighborClaimPenalty: 30.0
+  fusionSplitPriorMaxNeighborClaimPenalty: 7.0
+
+  fusionSplitPriorConflictReplacementEnabled: true
+  fusionSplitPriorConflictCloseParentRadiusScale: 0.45
+  fusionSplitPriorConflictMinNewSeparationRadiusScale: 1.40
+  fusionSplitPriorConflictMinSeparationDrop: 15.0
+  fusionSplitPriorConflictMinOldScoreForReplacement: 10.0
+  fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose: false
+  fusionSplitPriorMidpointWeight: 1.0
+  fusionSplitPriorSeparationPenaltyWeight: 0.20
+  fusionSplitPriorSignalBonusWeight: 0.001
+
+  fusionSplitPriorWindowEnabled: true
+  fusionSplitPriorWindowSize: 3
+  fusionSplitPriorWindowMatchDistance: 28.0
+  fusionSplitPriorWindowMatchDistancePerFrame: 4.0
+  fusionSplitPriorWindowDaughterSupportBonus: 4.0
+  fusionSplitPriorWindowMissingDaughterPenalty: 5.0
+  fusionSplitPriorWindowParentPersistencePenalty: 6.0
+  fusionSplitPriorWindowBalancedDaughterBonus: 25.0
+  fusionSplitPriorWindowBalancedMinParentDistanceBalance: 0.65
+  fusionSplitPriorWindowBalancedMinNearParentRadiusScale: 0.60
+  fusionSplitPriorWindowHighConfidenceMaxOverlapCostFraction: 1.0
+
+  fusionSplitPriorRankingSoftGateEnabled: true
+  fusionSplitPriorRankingSoftSeparationPenalty: 12.0
+  fusionSplitPriorRankingSoftMidpointPenalty: 10.0
+  fusionSplitPriorRankingSoftScorePenalty: 1.0
+  fusionSplitPriorRankingSoftNeighborPenalty: 1.0
+  fusionSplitPriorGlobalSelectMaxCost: 50.0
+
+  fusionSplitPriorContinuationClaimGuardEnabled: true
+  fusionSplitPriorContinuationClaimRadiusScale: 1.35
+  fusionSplitPriorContinuationClaimTieMargin: 4.0
+  fusionSplitPriorContinuationClaimCloseParentRadiusScale: 0.62
+  fusionSplitPriorContinuationClaimCloseParentPenalty: 6.0
+  fusionSplitPriorMinDaughterParentDistance: 6.0
+  fusionSplitPriorMinDaughterParentDistanceRadiusScale: 0.35
+  fusionSplitPriorMinParentDistanceBalance: 0.35
+  fusionSplitPriorParentPersistencePenalty: 8.0
+  fusionSplitPriorNeighborClaimPenalty: 3.0
+  fusionSplitPriorNeighborClaimMargin: 2.0
+
+  fusionSplitPriorUseDedicatedCostGate: true
+  fusionSplitPriorUseImageCostGate: true
+  fusionSplitPriorCost: 0.0
+  fusionSplitPriorCostFraction: 0.0
+  fusionSplitPriorMaxPositiveCostFraction: 0.12
+  fusionSplitPriorPositiveGateMinImageGain: 30.0
+  fusionSplitPriorPositiveGateMinImageGainPenaltyRatio: 0.03
+  fusionSplitPriorPositiveGateElongatedParentMinShape: 1.25
+  fusionSplitPriorPositiveGateElongatedMaxRawWorsening: 15.0
+  fusionSplitPriorPositiveGateElongatedMaxSoftPenaltyFraction: 0.04
+  fusionSplitPriorPositiveGateElongatedMaxScore: 8.0
+  fusionSplitPriorMaxOverlapCostFraction: 0.15
+  fusionSplitPriorHighConfidenceMaxScore: 12.0
+  fusionSplitPriorHighConfidenceMaxOverlapCostFraction: 0.50
+  fusionSplitPriorHighConfidenceAxisAlignmentDegrees: 90.0
+  fusionSplitPriorDaughterVolumeScale: 0.68
+  fusionSplitPriorPrefilterMaxValleyRatio: 1.15
+  fusionSplitPriorBridgeMaxValleyRatio: 1.15
+  fusionSplitPriorMinBridgeGapWidth: 0.0
+  fusionSplitPriorMinEdgeBrightness: 0.025
+  fusionSplitPriorMaxDaughterOverlapFraction: 0.22
+
+  fusionSplitPriorSoftGateEnabled: true
+  fusionSplitPriorSoftAxisPenaltyFraction: 0.03
+  fusionSplitPriorSoftDaughterOverlapPenaltyFraction: 0.12
+  fusionSplitPriorSoftValleyPenaltyFraction: 0.08
+  fusionSplitPriorSoftBridgeGapPenaltyFraction: 0.04
+  fusionSplitPriorSoftOverlapCostPenaltyWeight: 0.45
+  fusionSplitPriorBridgeEvidenceWaivesOverlapSoftPenalty: false
+  fusionSplitPriorHardMaxDaughterOverlapFraction: 0.82
+  fusionSplitPriorHardMaxValleyRatio: 2.0
+  fusionSplitPriorHardMaxOverlapCostFraction: 1.25
+  fusionSplitPriorMinPostRefitLateralSeparation: 4.0
+  fusionSplitPriorMinPostRefitLateralSeparationRadiusScale: 0.20
+  fusionSplitPriorMaxZDominanceForLowLateralSeparation: 0.85
+  fusionSplitPriorDynamicOverlapEnabled: true
+  fusionSplitPriorLocalDensityRadiusScale: 2.5
+  fusionSplitPriorLocalDensityOverlapBonus: 0.035
+  fusionSplitPriorMaxDynamicDaughterOverlapFraction: 0.68
+  fusionSplitPriorSkipExistingCellBuriedCheck: true
+  fusionSplitPriorSkipNeighborBridgeCheck: true
+  fusionSplitPriorBurnInIterations: 0
+  fusionSplitPriorRefineIterations: 0
+
+  fusionSplitPriorPrepassFallbackEnabled: true
+  fusionSplitPriorPrepassFallbackMaxPriors: 12
+  fusionSplitPriorPrepassFallbackMinKeptPixels: 50000
+  fusionSplitPriorPrepassFallbackMinShape: 1.20
+  fusionSplitPriorPrepassFallbackMinSeparationRadiusScale: 0.90
+  fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale: 1.05
+  fusionSplitPriorPrepassFallbackParentClaimMargin: 8.0
+  fusionSplitPriorPrepassFallbackMaxScore: 8.0
+  fusionSplitPriorPrepassFallbackRejectBadLumenParent: true
+  fusionSplitPriorPrepassFallbackBadLumenMaxScore: 28.0
+  fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty: 18.0
+  fusionSplitPriorPrepassFallbackUseSnapshotSeedOnLargeDrift: true
+  fusionSplitPriorPrepassFallbackSeedMaxShift: 25.0
+  fusionSplitPriorPrepassFallbackSeedMinSeparationRadiusScale: 0.55
+  fusionSplitPriorPrepassFallbackSeedMaxSeparationRadiusScale: 0.95
+  fusionSplitPriorPrepassFallbackSeedMaxScore: 16.0
+  fusionSplitPriorPrepassFallbackSeedMinShape: 1.40
+  fusionSplitPriorSnapshotSeedMaxRefitDrift: 12.0
+  fusionReducePostSplitPerturbEnabled: true
+  fusionPostSplitPerturbItersPerCell: 1
+
+  fusionMinDistanceToExisting: 24.0
+  fusionMinVoxels: 1000
+  fusionMinTop10MinusShell: 65.0
+  fusionMaxAddedPerFrame: 0
+  fusionRepairCloseCellsEnabled: true
+  fusionRepairMaxDistance: 18.0
+  fusionRepairRadiusRatio: 0.75
+  fusionRepairPositionBlend: 0.20
+  fusionRepairRadiusBlend: 0.75
+
 # Image preprocessing pipeline.
 # preprocess_mode supports only:
 #   none: normalized raw stack -> z interpolation/cube pooling

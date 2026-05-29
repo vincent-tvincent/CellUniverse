@@ -321,7 +321,7 @@ int main(int argc, char *argv[])
                   << std::endl;
         if (config.cellLumen.enabled && config.cellLumen.fusionEnabled &&
             !config.simulation.prepare_analyze_one_frame) {
-            std::cout << "[INFO] cell_lumen.fusionEnabled=true; forcing per-frame prepare so raw CellLumen rescue runs before optimization."
+            std::cout << "[INFO] cell_lumen.fusionEnabled=true; forcing per-frame prepare so CellLumen rescue uses the shared prepared stack before optimization."
                       << std::endl;
         }
     } else {
@@ -363,9 +363,12 @@ int main(int argc, char *argv[])
     auto start = std::chrono::steady_clock::now();
     for (int frame = loopStart; frame < lineage.length(); ++frame)
     {
-        // M2 Option A: lazy-load this frame's images (raw TIFF load +
-        // percentile normalize + iterative preprocess). Constructor only
-        // sampled for percentiles; actual frame data is loaded here.
+        // M2 Option A: lazy-load this frame's images. In on-demand mode,
+        // keep a rolling prepared-stack window sized to the CellLumen future
+        // evidence window, then consume the current frame from that cache.
+        if (prepareAnalyzeOneFrame) {
+            lineage.prepareFrameWindow(frame);
+        }
         lineage.prepareFrame(frame);
 
         lineage.optimize(frame);

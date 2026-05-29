@@ -133,14 +133,51 @@ cell:
   # the push, while still damping random movement away from the bright core.
   randomPerturbBrightCoreGuideStrength: 0.75
 
-# Image preprocessing pipeline — iterative contrast enhancer ported from
-# scripts/image_processor_clean.py. No sigmoid.
+# Image preprocessing pipeline.
+# preprocess_mode supports only:
+#   none: normalized raw stack -> z interpolation/cube pooling
+#   n2v2: N2V2 neural preprocessing -> z interpolation/cube pooling
 simulation:
   iterations_per_cell: 250
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
   z_scaling: 7
   blur_sigma: 1.1 # 0.0
+  preprocess_mode: n2v2
+
+  n2v2_preprocess:
+    enabled: true
+    enable_network: true
+    model_path: models/general_n2v2_torchscript.pt
+    device: auto
+    inference_batch_size: 16
+    tile_size: [256, 256]
+    tile_overlap: [48, 48]
+    scale_percentile: 99.9
+    use_nonzero_pixels: true
+    fallback_scale: 65536.0
+    careamics_mean: 0.33040523529052734
+    careamics_std: 0.23699833071884863
+    background_subtraction:
+      enabled: true
+      percentile: 20.0
+      exclude_zero: true
+      clip_min: 0.0
+    contrast:
+      enabled: true
+      limit_mode: percentile
+      low_limit: 10.0
+      high_limit:
+      low_percentile: 75.0
+      high_percentile: 99.99
+      exclude_zero: true
+      scope: stack
+      gamma: 1.0
+      preserve_zero_pixels: true
+    output:
+      dtype: preserve
+      write_intermediate: false
+      quantize_before_contrast: true
 
   iterative_penalty: 0.1
   iterative_penalty_range: 1.0
@@ -244,7 +281,8 @@ simulation:
   export_frame_png: false
   export_frame_tiff: true
   quit_after_preprocessing: false
-  prepare_analyze_one_frame: false
+  prepare_analyze_one_frame: true
+  parallel_threads: 12
   # When true, after a frame has been optimized and exported, release its
   # image-heavy stacks from memory while keeping cells, cached summaries,
   # checkpoints, and other state needed by later frames.

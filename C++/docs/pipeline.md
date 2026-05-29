@@ -1,6 +1,6 @@
 # CellUniverse Pipeline (Current)
 
-**Last updated:** 2026-04-16 (evening) — adaptive mask + position refinement + soft Voronoi + asymK threshold + neighbor-bridging gate + z-skip render
+**Last updated:** 2026-05-28 — shared N2V2/none preprocessing for CellUniverse and CellLumen
 
 This is the authoritative end-to-end pipeline for a single frame. Per-fix rationale lives in `docs/changelogs/changelogv7.md`.
 
@@ -14,7 +14,9 @@ This is the authoritative end-to-end pipeline for a single frame. Per-fix ration
 ================================================================
                              |
                              v
-  Load raw image, preprocess (ImageHandler, iterative contrast)
+  Load raw image and build the shared prepared stack
+    (ImageHandler: raw IO, frame normalization, optional N2V2, z interpolation)
+    CellUniverse and CellLumen both consume this prepared stack
                              |
                              v
   [Frame 2+] Adaptive background from frame N-1 cells:

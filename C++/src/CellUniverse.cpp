@@ -2016,7 +2016,8 @@ static float blackVoxelFractionInsideCell(const Frame &frame,
 
 static bool usesIterativePostPreprocessing(const SimulationConfig &config)
 {
-    return config.preprocess_mode == "iterative";
+    (void)config;
+    return false;
 }
 
 // Preprocessing moved to ImageHandler. Single preprocessed stack via
@@ -2077,14 +2078,9 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
                   << " runtime_z_slices=" << config.simulation.z_slices
                   << " maxZ=" << Ellipsoid::cellConfig.maxZ << '\n';
     } else if (!config.simulation.quit_after_preprocessing) {
-        std::ostringstream probeRaw, probePre;
-        std::vector<cv::Mat> probe = ImageHandler::loadRawFrame(
-            imagePaths.front().string(), config, &probeRaw);
-        if (config.simulation.frame_intensity_normalization_enabled) {
-            normalizeStackToFrameIntensity(probe, config.simulation);
-        }
-        probe = ImageHandler::preprocessLoadedFrame(
-            probe, imagePaths.front().string(), config, &probePre);
+        std::ostringstream probeLog;
+        std::vector<cv::Mat> probe = ImageHandler::loadFrame(
+            imagePaths.front().string(), config, &probeLog);
         config.simulation.z_slices = static_cast<int>(probe.size());
         Ellipsoid::cellConfig.maxZ = static_cast<float>(probe.size()) - 1.0f;
         std::cout << "[M2 Probe] post-preprocess z_slices=" << probe.size()
@@ -2114,7 +2110,8 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
     perFrameMeanBrightness.assign(imagePaths.size(), 0.0f);
 }
 
-void CellUniverse::applyCellLumenRescue(int frameIndex)
+void CellUniverse::applyCellLumenRescue(int frameIndex,
+                                        const std::vector<cv::Mat> &preparedFrame)
 {
     const CellLumenConfig &lumenConfig = config.cellLumen;
     if (!lumenConfig.enabled || !lumenConfig.fusionEnabled) {
@@ -2152,7 +2149,7 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
     std::vector<CellLumen::DetectedCell> candidates;
     try {
         CellLumen lumen(config, fs::path(outputPath) / "cell_lumen_fusion");
-        candidates = lumen.detectCellsForFrame(framePath, false, false);
+        candidates = lumen.detectCellsInPreparedStack(preparedFrame, framePath, false);
     } catch (const std::exception &ex) {
         Ellipsoid::cellConfig = savedCellConfig;
         std::cout << "[CellLumen Fusion] frame=" << absoluteFrame
@@ -3918,6 +3915,129 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
               << std::endl;
 }
 
+int CellUniverse::rollingPreprocessWindowSize() const
+{
+    const CellLumenConfig &lumenConfig = config.cellLumen;
+    if (lumenConfig.enabled &&
+        lumenConfig.fusionEnabled &&
+        lumenConfig.fusionSplitPriorWindowEnabled &&
+        lumenConfig.fusionSplitPriorWindowSize > 1)
+    {
+        return std::clamp(lumenConfig.fusionSplitPriorWindowSize, 2, 5);
+    }
+    return 1;
+}
+
+CellUniverse::PreparedFrameStack CellUniverse::loadPreparedFrameStack(int frameIndex)
+{
+    if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
+    {
+        throw std::invalid_argument("loadPreparedFrameStack: invalid frame index");
+    }
+
+    std::ostringstream prepareLog;
+    PreparedFrameStack prepared;
+    prepared.realFrame =
+        ImageHandler::loadFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
+                                config,
+                                &prepareLog);
+    std::cout << prepareLog.str();
+    if (usesIterativePostPreprocessing(config.simulation)) {
+        if (config.simulation.edge_brightness_alignment_enabled &&
+            !edgeBrightnessAlignmentTargetInitialized) {
+            edgeBrightnessAlignmentTarget =
+                computeEdgeBrightnessMean(prepared.realFrame, config.simulation);
+            edgeBrightnessAlignmentTargetInitialized = true;
+            std::cout << "[EdgeBrightnessAlignment] target_initialized_from="
+                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                      << " target=" << edgeBrightnessAlignmentTarget << '\n';
+        }
+        alignStackToEdgeBrightness(prepared.realFrame,
+                                   config.simulation,
+                                   edgeBrightnessAlignmentTarget,
+                                   imagePaths[static_cast<size_t>(frameIndex)],
+                                   std::cout);
+        blackThresholdStackAfterAlignment(prepared.realFrame,
+                                          config.simulation,
+                                          imagePaths[static_cast<size_t>(frameIndex)],
+                                          std::cout);
+        const std::vector<cv::Mat> unblackoffedFrame = cloneMatStack(prepared.realFrame);
+        blackPercentileStackAfterAlignment(prepared.realFrame,
+                                           config.simulation,
+                                           imagePaths[static_cast<size_t>(frameIndex)],
+                                           std::cout);
+        adaptBlackPercentileToChunkCount(prepared.realFrame,
+                                         unblackoffedFrame,
+                                         config.simulation,
+                                         imagePaths[static_cast<size_t>(frameIndex)],
+                                         std::cout);
+        removeTinyIsolatedParticles(prepared.realFrame,
+                                    config,
+                                    imagePaths[static_cast<size_t>(frameIndex)],
+                                    std::cout);
+        applyFinalPreprocessingBlur(prepared.realFrame,
+                                    config.simulation,
+                                    imagePaths[static_cast<size_t>(frameIndex)],
+                                    std::cout);
+    } else {
+        std::cout << "[PostPreprocess] frame="
+                  << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+                  << " skipped_for_mode=" << config.simulation.preprocess_mode
+                  << '\n';
+    }
+    prepared.signalMap = buildSignalMapStack(
+        prepared.realFrame,
+        config.simulation,
+        imagePaths[static_cast<size_t>(frameIndex)],
+        std::cout);
+
+    if (config.simulation.export_preprocessed_images) {
+        exportPreprocessedStack(prepared.realFrame, fs::path(outputPath),
+                                imagePaths[static_cast<size_t>(frameIndex)],
+                                config.simulation.export_frame_png,
+                                config.simulation.export_frame_tiff);
+    }
+
+    return prepared;
+}
+
+void CellUniverse::cachePreparedFrameStack(int frameIndex)
+{
+    if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
+    {
+        return;
+    }
+    if (frames[frameIndex].hasImageStacks() ||
+        preparedFrameStacks.find(frameIndex) != preparedFrameStacks.end())
+    {
+        return;
+    }
+
+    std::cout << "[RollingPreprocess] frame=" << (firstFrame + frameIndex)
+              << " source=" << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
+              << " action=load" << std::endl;
+    preparedFrameStacks.emplace(frameIndex, loadPreparedFrameStack(frameIndex));
+}
+
+void CellUniverse::prepareFrameWindow(int frameIndex)
+{
+    if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
+    {
+        throw std::invalid_argument("prepareFrameWindow: invalid frame index");
+    }
+
+    const int windowSize = rollingPreprocessWindowSize();
+    for (int offset = 0; offset < windowSize; ++offset)
+    {
+        const int targetFrame = frameIndex + offset;
+        if (static_cast<size_t>(targetFrame) >= frames.size())
+        {
+            break;
+        }
+        cachePreparedFrameStack(targetFrame);
+    }
+}
+
 void CellUniverse::prepareFrame(int frameIndex)
 {
     if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
@@ -3928,104 +4048,32 @@ void CellUniverse::prepareFrame(int frameIndex)
         return;  // already loaded
     }
 
-    // Load + normalize + preprocess just this frame.
-    std::ostringstream rawLog;
-    std::ostringstream preprocessLog;
-    std::vector<cv::Mat> real_frame =
-        ImageHandler::loadRawFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
-                                   config, &rawLog);
-    std::cout << rawLog.str();
-
-    if (config.simulation.frame_intensity_normalization_enabled) {
-        const auto [lowReference, highReference] =
-            normalizeStackToFrameIntensity(real_frame, config.simulation);
-        std::cout << "[Frame Intensity Scale] frame="
-                  << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " mean=" << computeStackMean(real_frame)
-                  << " low_ref=" << lowReference
-                  << " high_ref=" << highReference
-                  << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
-    } else {
-        std::cout << "[Frame Intensity Scale] frame="
-                  << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " enabled=0"
-                  << " mean=" << computeStackMean(real_frame)
-                  << '\n';
+    PreparedFrameStack prepared;
+    auto cached = preparedFrameStacks.find(frameIndex);
+    if (cached != preparedFrameStacks.end())
+    {
+        prepared = std::move(cached->second);
+        preparedFrameStacks.erase(cached);
+        std::cout << "[RollingPreprocess] frame=" << (firstFrame + frameIndex)
+                  << " action=consume_cached" << std::endl;
     }
-
-    real_frame = ImageHandler::preprocessLoadedFrame(
-        real_frame,
-        imagePaths[static_cast<size_t>(frameIndex)].string(),
-        config, &preprocessLog);
-    std::cout << preprocessLog.str();
-    if (usesIterativePostPreprocessing(config.simulation)) {
-        if (config.simulation.edge_brightness_alignment_enabled &&
-            !edgeBrightnessAlignmentTargetInitialized) {
-            edgeBrightnessAlignmentTarget =
-                computeEdgeBrightnessMean(real_frame, config.simulation);
-            edgeBrightnessAlignmentTargetInitialized = true;
-            std::cout << "[EdgeBrightnessAlignment] target_initialized_from="
-                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                      << " target=" << edgeBrightnessAlignmentTarget << '\n';
-        }
-        alignStackToEdgeBrightness(real_frame,
-                                   config.simulation,
-                                   edgeBrightnessAlignmentTarget,
-                                   imagePaths[static_cast<size_t>(frameIndex)],
-                                   std::cout);
-        blackThresholdStackAfterAlignment(real_frame,
-                                          config.simulation,
-                                          imagePaths[static_cast<size_t>(frameIndex)],
-                                          std::cout);
-        const std::vector<cv::Mat> unblackoffedFrame = cloneMatStack(real_frame);
-        blackPercentileStackAfterAlignment(real_frame,
-                                           config.simulation,
-                                           imagePaths[static_cast<size_t>(frameIndex)],
-                                           std::cout);
-        adaptBlackPercentileToChunkCount(real_frame,
-                                         unblackoffedFrame,
-                                         config.simulation,
-                                         imagePaths[static_cast<size_t>(frameIndex)],
-                                         std::cout);
-        removeTinyIsolatedParticles(real_frame,
-                                    config,
-                                    imagePaths[static_cast<size_t>(frameIndex)],
-                                    std::cout);
-        applyFinalPreprocessingBlur(real_frame,
-                                    config.simulation,
-                                    imagePaths[static_cast<size_t>(frameIndex)],
-                                    std::cout);
-    } else {
-        std::cout << "[PostPreprocess] frame="
-                  << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                  << " skipped_for_mode=" << config.simulation.preprocess_mode
-                  << '\n';
-    }
-    std::vector<cv::Mat> signalMap = buildSignalMapStack(
-        real_frame,
-        config.simulation,
-        imagePaths[static_cast<size_t>(frameIndex)],
-        std::cout);
-
-    if (config.simulation.export_preprocessed_images) {
-        exportPreprocessedStack(real_frame, fs::path(outputPath),
-                                imagePaths[static_cast<size_t>(frameIndex)],
-                                config.simulation.export_frame_png,
-                                config.simulation.export_frame_tiff);
+    else
+    {
+        prepared = loadPreparedFrameStack(frameIndex);
     }
 
     {
         ScopedStageTimer timer(firstFrame + frameIndex,
                                "cell_lumen_fusion_prepare");
-        applyCellLumenRescue(frameIndex);
+        applyCellLumenRescue(frameIndex, prepared.realFrame);
     }
 
     // loadImageStacks already generates _synthFrame + refreshes the full-image
     // cost cache. The previous `if (config.cell) regenerateSynthFrame()` was
     // redundant work (2x render + 2x cost cache per frame).
-    frames[frameIndex].loadImageStacks(real_frame);
-    frames[frameIndex].setSignalMap(std::move(signalMap));
-    prepareSignalCentersForFrame(frameIndex, real_frame, true);
+    frames[frameIndex].loadImageStacks(prepared.realFrame);
+    frames[frameIndex].setSignalMap(std::move(prepared.signalMap));
+    prepareSignalCentersForFrame(frameIndex, prepared.realFrame, true);
 }
 
 void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
@@ -4084,37 +4132,12 @@ void CellUniverse::preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFr
 
     for (int frameIndex = 0; frameIndex < frameCount; ++frameIndex)
     {
-        std::ostringstream rawLog;
-        std::ostringstream preprocessLog;
+        std::ostringstream prepareLog;
         std::vector<cv::Mat> realFrame =
-            ImageHandler::loadRawFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
-                                       config,
-                                       &rawLog);
-        std::cout << rawLog.str();
-
-        if (config.simulation.frame_intensity_normalization_enabled) {
-            const auto [lowReference, highReference] =
-                normalizeStackToFrameIntensity(realFrame, config.simulation);
-            std::cout << "[Frame Intensity Scale] frame="
-                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                      << " mean=" << computeStackMean(realFrame)
-                      << " low_ref=" << lowReference
-                      << " high_ref=" << highReference
-                      << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
-        } else {
-            std::cout << "[Frame Intensity Scale] frame="
-                      << imagePaths[static_cast<size_t>(frameIndex)].filename().string()
-                      << " enabled=0"
-                      << " mean=" << computeStackMean(realFrame)
-                      << '\n';
-        }
-
-        realFrame = ImageHandler::preprocessLoadedFrame(
-            realFrame,
-            imagePaths[static_cast<size_t>(frameIndex)].string(),
-            config,
-            &preprocessLog);
-        std::cout << preprocessLog.str();
+            ImageHandler::loadFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
+                                    config,
+                                    &prepareLog);
+        std::cout << prepareLog.str();
 
         if (!alignmentEnabled) {
             if (heavyPostPreprocessing) {
@@ -4281,10 +4304,33 @@ CellUniverse::getCellLumenLookaheadCandidates(int frameIndex)
     EllipsoidConfig savedCellConfig = Ellipsoid::cellConfig;
     try {
         CellLumen lumen(config, fs::path(outputPath) / "cell_lumen_fusion_window");
-        const auto detected =
-            lumen.detectCellsForFrame(imagePaths[static_cast<size_t>(frameIndex)],
-                                      false,
-                                      false);
+        std::vector<CellLumen::DetectedCell> detected;
+        std::string source = "direct_load";
+        const auto prepared = preparedFrameStacks.find(frameIndex);
+        if (prepared != preparedFrameStacks.end() &&
+            !prepared->second.realFrame.empty())
+        {
+            detected = lumen.detectCellsInPreparedStack(
+                prepared->second.realFrame,
+                imagePaths[static_cast<size_t>(frameIndex)],
+                false);
+            source = "rolling_prepared_cache";
+        }
+        else if (static_cast<size_t>(frameIndex) < frames.size() &&
+                 frames[frameIndex].hasImageStacks())
+        {
+            detected = lumen.detectCellsInPreparedStack(
+                frames[frameIndex].getRealFrame(),
+                imagePaths[static_cast<size_t>(frameIndex)],
+                false);
+            source = "prepared_frame";
+        }
+        else
+        {
+            detected = lumen.detectCellsForFrame(imagePaths[static_cast<size_t>(frameIndex)],
+                                                 false,
+                                                 false);
+        }
         int candidateId = 0;
         for (const auto &candidate : detected) {
             if (candidate.voxelCount < minVoxels ||
@@ -4310,6 +4356,7 @@ CellUniverse::getCellLumenLookaheadCandidates(int frameIndex)
                   });
         std::cout << "[CellLumen Window Candidates] frame=" << (firstFrame + frameIndex)
                   << " candidates=" << stored.size()
+                  << " source=" << source
                   << " min_voxels=" << minVoxels
                   << " min_signal=" << minSignal
                   << std::endl;

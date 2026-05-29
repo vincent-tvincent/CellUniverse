@@ -8,10 +8,15 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <queue>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+
+#if CELLUNIVERSE_HAS_N2V2_PREPROCESS
+#include "../includes/N2V2Preprocessor.hpp"
+#endif
 
 namespace
 {
@@ -132,6 +137,301 @@ void printStackStats(std::ostream &log,
         << " nonfinite=" << stats.nonFiniteCount
         << std::endl;
 }
+
+std::vector<float> collectFiniteStackValues(const ImageStack &stack, bool excludeZeros)
+{
+    std::vector<float> values;
+    std::size_t total = 0;
+    for (const auto &slice : stack)
+    {
+        total += slice.total();
+    }
+    values.reserve(total);
+
+    for (const auto &slice : stack)
+    {
+        CV_Assert(slice.type() == CV_32F);
+        for (int y = 0; y < slice.rows; ++y)
+        {
+            const float *row = slice.ptr<float>(y);
+            for (int x = 0; x < slice.cols; ++x)
+            {
+                const float value = row[x];
+                if (!std::isfinite(value))
+                {
+                    continue;
+                }
+                if (excludeZeros && value == 0.0f)
+                {
+                    continue;
+                }
+                values.push_back(value);
+            }
+        }
+    }
+    return values;
+}
+
+double computeStackMeanForLog(const ImageStack &stack)
+{
+    double sum = 0.0;
+    std::size_t count = 0;
+    for (const auto &slice : stack)
+    {
+        CV_Assert(slice.type() == CV_32F);
+        for (int y = 0; y < slice.rows; ++y)
+        {
+            const float *row = slice.ptr<float>(y);
+            for (int x = 0; x < slice.cols; ++x)
+            {
+                const float value = row[x];
+                if (std::isfinite(value))
+                {
+                    sum += value;
+                    ++count;
+                }
+            }
+        }
+    }
+    return count == 0 ? 0.0 : sum / static_cast<double>(count);
+}
+
+float percentileFromValues(std::vector<float> values, float percentileFraction)
+{
+    if (values.empty())
+    {
+        return 0.0f;
+    }
+    const float clamped = std::clamp(percentileFraction, 0.0f, 1.0f);
+    const std::size_t index = static_cast<std::size_t>(
+        std::floor(clamped * static_cast<float>(values.size() - 1)));
+    std::nth_element(values.begin(),
+                     values.begin() + static_cast<std::ptrdiff_t>(index),
+                     values.end());
+    return values[index];
+}
+
+std::pair<float, float> normalizeStackToFrameIntensity(ImageStack &stack,
+                                                       const SimulationConfig &config)
+{
+    if (stack.empty())
+    {
+        return {0.0f, 1.0f};
+    }
+
+    const std::vector<float> values =
+        collectFiniteStackValues(stack, config.frame_intensity_percentile_exclude_zeros);
+    if (values.empty())
+    {
+        return {0.0f, 1.0f};
+    }
+
+    const float lowRef = percentileFromValues(
+        values, config.frame_intensity_scale_low_percentile);
+    float highRef = config.frame_intensity_hard_max > 0.0f
+        ? config.frame_intensity_hard_max
+        : percentileFromValues(
+              values, config.frame_intensity_scale_high_percentile);
+    if (!std::isfinite(highRef) || highRef <= lowRef + 1e-6f)
+    {
+        highRef = lowRef + 1.0f;
+    }
+
+    const float scale = 1.0f / (highRef - lowRef);
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < static_cast<int>(stack.size()); ++i)
+    {
+        cv::Mat &slice = stack[static_cast<std::size_t>(i)];
+        CV_Assert(slice.type() == CV_32F);
+        for (int y = 0; y < slice.rows; ++y)
+        {
+            float *row = slice.ptr<float>(y);
+            for (int x = 0; x < slice.cols; ++x)
+            {
+                float value = row[x];
+                if (!std::isfinite(value))
+                {
+                    value = 0.0f;
+                }
+                value = (value - lowRef) * scale;
+                row[x] = std::clamp(value, 0.0f, 1.0f);
+            }
+        }
+    }
+    return {lowRef, highRef};
+}
+
+bool n2v2PreprocessEnabled(const SimulationConfig &config)
+{
+    return config.n2v2_preprocess_enabled || config.preprocess_mode == "n2v2";
+}
+
+#if CELLUNIVERSE_HAS_N2V2_PREPROCESS
+n2v2::OutputDType parseN2V2OutputDType(const std::string &value)
+{
+    const std::string normalized = SimulationConfig::normalizedConfigString(value);
+    if (normalized == "uint8")
+    {
+        return n2v2::OutputDType::UInt8;
+    }
+    if (normalized == "uint16")
+    {
+        return n2v2::OutputDType::UInt16;
+    }
+    if (normalized == "float32")
+    {
+        return n2v2::OutputDType::Float32;
+    }
+    return n2v2::OutputDType::Preserve;
+}
+
+n2v2::ContrastLimitMode parseN2V2ContrastLimitMode(const std::string &value)
+{
+    return SimulationConfig::normalizedConfigString(value) == "absolute"
+        ? n2v2::ContrastLimitMode::Absolute
+        : n2v2::ContrastLimitMode::Percentile;
+}
+
+n2v2::ContrastScope parseN2V2ContrastScope(const std::string &value)
+{
+    return SimulationConfig::normalizedConfigString(value) == "slice"
+        ? n2v2::ContrastScope::Slice
+        : n2v2::ContrastScope::Stack;
+}
+
+n2v2::PreprocessConfig makeN2V2Config(const SimulationConfig &simulation)
+{
+    n2v2::PreprocessConfig cfg;
+    cfg.enableNetwork = simulation.n2v2_enable_network;
+    cfg.modelPath = simulation.n2v2_model_path;
+    if (cfg.modelPath.is_relative() && !fs::exists(cfg.modelPath))
+    {
+        const fs::path projectRoot = fs::path(__FILE__).parent_path().parent_path();
+        const fs::path fromProjectRoot = projectRoot / cfg.modelPath;
+        if (fs::exists(fromProjectRoot))
+        {
+            cfg.modelPath = fromProjectRoot;
+        }
+    }
+    cfg.device = simulation.n2v2_device;
+    cfg.inferenceBatchSize = simulation.n2v2_inference_batch_size;
+    cfg.tileSize = simulation.n2v2_tile_size;
+    cfg.tileOverlap = simulation.n2v2_tile_overlap;
+    cfg.scalePercentile = simulation.n2v2_scale_percentile;
+    cfg.useNonzeroPixels = simulation.n2v2_use_nonzero_pixels;
+    cfg.fallbackScale = simulation.n2v2_fallback_scale;
+    cfg.careamicsMean = simulation.n2v2_careamics_mean;
+    cfg.careamicsStd = simulation.n2v2_careamics_std;
+    cfg.backgroundSubtraction.enabled = simulation.n2v2_background_subtraction_enabled;
+    cfg.backgroundSubtraction.percentile = simulation.n2v2_background_subtraction_percentile;
+    cfg.backgroundSubtraction.excludeZero = simulation.n2v2_background_subtraction_exclude_zero;
+    cfg.backgroundSubtraction.clipMin = simulation.n2v2_background_subtraction_clip_min;
+    cfg.contrast.enabled = simulation.n2v2_contrast_enabled;
+    cfg.contrast.limitMode = parseN2V2ContrastLimitMode(simulation.n2v2_contrast_limit_mode);
+    cfg.contrast.lowLimit = simulation.n2v2_contrast_low_limit;
+    cfg.contrast.hasHighLimit = simulation.n2v2_contrast_has_high_limit;
+    cfg.contrast.highLimit = simulation.n2v2_contrast_high_limit;
+    cfg.contrast.lowPercentile = simulation.n2v2_contrast_low_percentile;
+    cfg.contrast.highPercentile = simulation.n2v2_contrast_high_percentile;
+    cfg.contrast.excludeZero = simulation.n2v2_contrast_exclude_zero;
+    cfg.contrast.scope = parseN2V2ContrastScope(simulation.n2v2_contrast_scope);
+    cfg.contrast.gamma = simulation.n2v2_contrast_gamma;
+    cfg.contrast.preserveZeroPixels = simulation.n2v2_contrast_preserve_zero_pixels;
+    cfg.output.dtype = parseN2V2OutputDType(simulation.n2v2_output_dtype);
+    cfg.output.writeIntermediate = simulation.n2v2_output_write_intermediate;
+    cfg.output.quantizeBeforeContrast = simulation.n2v2_output_quantize_before_contrast;
+    return cfg;
+}
+
+std::string makeN2V2RuntimeKey(const SimulationConfig &simulation)
+{
+    std::ostringstream key;
+    key << simulation.n2v2_enable_network << '|'
+        << simulation.n2v2_model_path << '|'
+        << simulation.n2v2_device << '|'
+        << simulation.n2v2_inference_batch_size << '|'
+        << simulation.n2v2_tile_size[0] << ',' << simulation.n2v2_tile_size[1] << '|'
+        << simulation.n2v2_tile_overlap[0] << ',' << simulation.n2v2_tile_overlap[1] << '|'
+        << simulation.n2v2_scale_percentile << '|'
+        << simulation.n2v2_use_nonzero_pixels << '|'
+        << simulation.n2v2_fallback_scale << '|'
+        << simulation.n2v2_careamics_mean << '|'
+        << simulation.n2v2_careamics_std << '|'
+        << simulation.n2v2_background_subtraction_enabled << '|'
+        << simulation.n2v2_background_subtraction_percentile << '|'
+        << simulation.n2v2_background_subtraction_exclude_zero << '|'
+        << simulation.n2v2_background_subtraction_clip_min << '|'
+        << simulation.n2v2_contrast_enabled << '|'
+        << simulation.n2v2_contrast_limit_mode << '|'
+        << simulation.n2v2_contrast_low_limit << '|'
+        << simulation.n2v2_contrast_has_high_limit << '|'
+        << simulation.n2v2_contrast_high_limit << '|'
+        << simulation.n2v2_contrast_low_percentile << '|'
+        << simulation.n2v2_contrast_high_percentile << '|'
+        << simulation.n2v2_contrast_exclude_zero << '|'
+        << simulation.n2v2_contrast_scope << '|'
+        << simulation.n2v2_contrast_gamma << '|'
+        << simulation.n2v2_contrast_preserve_zero_pixels << '|'
+        << simulation.n2v2_output_dtype << '|'
+        << simulation.n2v2_output_write_intermediate << '|'
+        << simulation.n2v2_output_quantize_before_contrast;
+    return key.str();
+}
+
+ImageStack normalizeN2V2RuntimeStack(const ImageStack &stack,
+                                     const std::string &imageFile,
+                                     std::ostream &log)
+{
+    ImageStack normalized(stack.size());
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < static_cast<int>(stack.size()); ++i)
+    {
+        const cv::Mat &slice = stack[static_cast<std::size_t>(i)];
+        cv::Mat floatSlice;
+        if (slice.depth() == CV_8U)
+        {
+            slice.convertTo(floatSlice, CV_32F, 1.0 / 255.0);
+        }
+        else if (slice.depth() == CV_16U)
+        {
+            slice.convertTo(floatSlice, CV_32F, 1.0 / 65535.0);
+        }
+        else
+        {
+            slice.convertTo(floatSlice, CV_32F);
+        }
+        cv::min(floatSlice, 1.0f, floatSlice);
+        cv::max(floatSlice, 0.0f, floatSlice);
+        normalized[static_cast<std::size_t>(i)] = floatSlice;
+    }
+    printStackStats(log, "n2v2_runtime_contract_cv32f_0_1", imageFile, normalized);
+    return normalized;
+}
+
+ImageStack runN2V2Preprocessing(const ImageStack &input,
+                                const std::string &imageFile,
+                                const SimulationConfig &simulation,
+                                std::ostream &log)
+{
+    static std::unique_ptr<n2v2::N2V2Preprocessor> runtime;
+    static std::string runtimeKey;
+
+    const std::string key = makeN2V2RuntimeKey(simulation);
+    if (!runtime || runtimeKey != key)
+    {
+        log << "[N2V2] load_runtime"
+            << " model=" << simulation.n2v2_model_path
+            << " device=" << simulation.n2v2_device
+            << " network_enabled=" << simulation.n2v2_enable_network
+            << '\n';
+        runtime = std::make_unique<n2v2::N2V2Preprocessor>(makeN2V2Config(simulation));
+        runtimeKey = key;
+    }
+
+    n2v2::PreprocessResult result = runtime->processStack(input, fs::path(imageFile), log);
+    return normalizeN2V2RuntimeStack(result.stack, imageFile, log);
+}
+#endif
 
 ImageStack cloneStack(const ImageStack &sequence)
 {
@@ -1443,27 +1743,40 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
     std::ostream &log = logSink ? *logSink : std::cout;
     std::vector<cv::Mat> processedZSlices = cloneStack(normalizedSlices);
     std::vector<cv::Mat> interpolatedZSlices;
+    const bool usingN2V2 = n2v2PreprocessEnabled(config.simulation);
 
-    if (config.simulation.preprocess_mode == "iterative") {
-        processedZSlices = processPreparedSequence(processedZSlices, config, log, imageFile);
-    } else {
-        log << "[PreprocessMode] file=" << fs::path(imageFile).filename().string()
-            << " mode=" << config.simulation.preprocess_mode
-            << " iterative_sequence=0"
-            << " gamma=" << config.simulation.light_preprocess_gamma
-            << std::endl;
-        if (config.simulation.preprocess_mode == "light") {
-            applyGammaToStack(processedZSlices, config.simulation.light_preprocess_gamma);
-            clipStack(processedZSlices);
-        }
-    }
-
-    const float localScore = evaluateBestWindowContrastScore(processedZSlices, config);
-    log << "[PreprocessScores] file=" << fs::path(imageFile).filename().string()
-        << " local=" << localScore
+    log << "[PreprocessMode] file=" << fs::path(imageFile).filename().string()
+        << " mode=" << config.simulation.preprocess_mode
+        << " n2v2_enabled=" << usingN2V2
+        << " iterative_sequence=0"
         << std::endl;
 
-    printStackStats(log, "processed_sequence", imageFile, processedZSlices);
+    if (usingN2V2)
+    {
+#if CELLUNIVERSE_HAS_N2V2_PREPROCESS
+        processedZSlices = runN2V2Preprocessing(processedZSlices, imageFile, config.simulation, log);
+#else
+        throw std::runtime_error(
+            "n2v2_preprocess.enabled is true, but this build was configured without LibTorch/N2V2 support");
+#endif
+    }
+    else
+    {
+        clipStack(processedZSlices);
+    }
+
+    if (!usingN2V2)
+    {
+        const float localScore = evaluateBestWindowContrastScore(processedZSlices, config);
+        log << "[PreprocessScores] file=" << fs::path(imageFile).filename().string()
+            << " local=" << localScore
+            << std::endl;
+    }
+
+    printStackStats(log,
+                    usingN2V2 ? "n2v2_processed_stack" : "processed_sequence",
+                    imageFile,
+                    processedZSlices);
 
     if (processedZSlices.empty())
     {
@@ -1510,31 +1823,49 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
     }
 
     printStackStats(log, "post_interpolation", imageFile, interpolatedZSlices);
-    ImageStack preCubePoolingSlices = cloneStack(interpolatedZSlices);
-    interpolatedZSlices = applyCubePooling(interpolatedZSlices, config, log);
     clipStack(interpolatedZSlices);
-    const StackStats cubeStats = computeStackStats(interpolatedZSlices);
-    const float candidateMaxMean = std::max(0.0f, config.simulation.iterative_candidate_max_mean);
-    const float candidateMaxSaturatedFraction = std::clamp(
-        config.simulation.iterative_candidate_max_saturated_fraction, 0.0f, 1.0f);
-    const bool cubeMeanOk =
-        candidateMaxMean <= 0.0f || cubeStats.mean <= candidateMaxMean;
-    const bool cubeSaturationOk =
-        candidateMaxSaturatedFraction <= 0.0f ||
-        cubeStats.saturatedFraction <= candidateMaxSaturatedFraction;
-    if (!cubeMeanOk || !cubeSaturationOk || cubeStats.nonFiniteCount > 0)
+    if (config.simulation.cube_pooling_enabled)
     {
-        log << "[CubePooling] reject=range"
-            << " mean=" << cubeStats.mean
-            << " saturated_fraction=" << cubeStats.saturatedFraction
-            << " nonfinite=" << cubeStats.nonFiniteCount
-            << " max_mean=" << candidateMaxMean
-            << " max_saturated_fraction=" << candidateMaxSaturatedFraction
-            << "; using_pre_cube_pooling_sequence=1"
-            << std::endl;
-        interpolatedZSlices = std::move(preCubePoolingSlices);
+        ImageStack preCubePoolingSlices = cloneStack(interpolatedZSlices);
+        interpolatedZSlices = applyCubePooling(interpolatedZSlices, config, log);
+        clipStack(interpolatedZSlices);
+        const StackStats cubeStats = computeStackStats(interpolatedZSlices);
+        if (usingN2V2)
+        {
+            if (cubeStats.nonFiniteCount > 0)
+            {
+                log << "[CubePooling] reject=nonfinite"
+                    << " nonfinite=" << cubeStats.nonFiniteCount
+                    << "; using_pre_cube_pooling_sequence=1"
+                    << std::endl;
+                interpolatedZSlices = std::move(preCubePoolingSlices);
+            }
+        }
+        else
+        {
+            const float candidateMaxMean = std::max(0.0f, config.simulation.iterative_candidate_max_mean);
+            const float candidateMaxSaturatedFraction = std::clamp(
+                config.simulation.iterative_candidate_max_saturated_fraction, 0.0f, 1.0f);
+            const bool cubeMeanOk =
+                candidateMaxMean <= 0.0f || cubeStats.mean <= candidateMaxMean;
+            const bool cubeSaturationOk =
+                candidateMaxSaturatedFraction <= 0.0f ||
+                cubeStats.saturatedFraction <= candidateMaxSaturatedFraction;
+            if (!cubeMeanOk || !cubeSaturationOk || cubeStats.nonFiniteCount > 0)
+            {
+                log << "[CubePooling] reject=range"
+                    << " mean=" << cubeStats.mean
+                    << " saturated_fraction=" << cubeStats.saturatedFraction
+                    << " nonfinite=" << cubeStats.nonFiniteCount
+                    << " max_mean=" << candidateMaxMean
+                    << " max_saturated_fraction=" << candidateMaxSaturatedFraction
+                    << "; using_pre_cube_pooling_sequence=1"
+                    << std::endl;
+                interpolatedZSlices = std::move(preCubePoolingSlices);
+            }
+        }
+        printStackStats(log, "post_cube_pooling", imageFile, interpolatedZSlices);
     }
-    printStackStats(log, "post_cube_pooling", imageFile, interpolatedZSlices);
     log << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;
     return interpolatedZSlices;
 }
@@ -1543,7 +1874,27 @@ std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,
                                              BaseConfig &config,
                                              std::ostream *logSink)
 {
-    const std::vector<cv::Mat> normalizedSlices = loadRawFrame(imageFile, config, logSink);
+    std::ostream &log = logSink ? *logSink : std::cout;
+    std::vector<cv::Mat> normalizedSlices = loadRawFrame(imageFile, config, logSink);
+    if (config.simulation.frame_intensity_normalization_enabled)
+    {
+        const auto [lowReference, highReference] =
+            normalizeStackToFrameIntensity(normalizedSlices, config.simulation);
+        log << "[Frame Intensity Scale] frame="
+            << fs::path(imageFile).filename().string()
+            << " mean=" << computeStackMeanForLog(normalizedSlices)
+            << " low_ref=" << lowReference
+            << " high_ref=" << highReference
+            << " hard_max=" << config.simulation.frame_intensity_hard_max << '\n';
+    }
+    else
+    {
+        log << "[Frame Intensity Scale] frame="
+            << fs::path(imageFile).filename().string()
+            << " enabled=0"
+            << " mean=" << computeStackMeanForLog(normalizedSlices)
+            << '\n';
+    }
     return preprocessLoadedFrame(normalizedSlices, imageFile, config, logSink);
 }
 

@@ -46,6 +46,7 @@ public:
     // before `optimize(i)`. Keeps peak memory at ~1-2 frames (<1 GB for
     // 100+ frame runs vs 25+ GB before).
     void prepareFrame(int frameIndex);
+    void prepareFrameWindow(int frameIndex);
     void preprocessAllFramesAlignedToMinimumBackground(bool loadIntoFrames);
     // Checkpoint save/load (Approach 2 — full state serialization).
     // saveCheckpoint(N) writes all state needed to resume AT frame N+1
@@ -116,6 +117,11 @@ private:
        int candidateId = -1;
    };
    std::unordered_map<int, std::vector<CellLumenLookaheadCandidate>> cellLumenLookaheadCandidates;
+   struct PreparedFrameStack {
+       std::vector<cv::Mat> realFrame;
+       std::vector<cv::Mat> signalMap;
+   };
+   std::unordered_map<int, PreparedFrameStack> preparedFrameStacks;
 
    // Per-frame cached summaries for adaptive background (computed at end of
    // optimize(N); consumed by optimize(N+1) without needing frames[N]'s
@@ -130,7 +136,10 @@ private:
    void prepareSignalCentersForFrame(int frameIndex,
                                      const std::vector<cv::Mat> &realFrame,
                                      bool keepLoaded);
-   void applyCellLumenRescue(int frameIndex);
+   int rollingPreprocessWindowSize() const;
+   PreparedFrameStack loadPreparedFrameStack(int frameIndex);
+   void cachePreparedFrameStack(int frameIndex);
+   void applyCellLumenRescue(int frameIndex, const std::vector<cv::Mat> &preparedFrame);
    const std::vector<CellLumenLookaheadCandidate> &getCellLumenLookaheadCandidates(int frameIndex);
 };
 

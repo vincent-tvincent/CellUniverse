@@ -286,6 +286,43 @@ choose_preset() {
   done
 }
 
+validate_core_count() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -gt 0 ]
+}
+
+choose_core_count() {
+  local requested="${1:-}"
+  local answer=""
+
+  if [ -n "$requested" ]; then
+    if validate_core_count "$requested"; then
+      printf '%s\n' "$requested"
+      return 0
+    fi
+    err "[FATAL] invalid core count: $requested"
+    exit 1
+  fi
+
+  while true; do
+    if ! read -r -p "How many CPU cores to use? (blank = YAML default): " answer; then
+      err "[FATAL] no input provided."
+      exit 1
+    fi
+
+    answer="$(trim "$answer")"
+    if [ -z "$answer" ]; then
+      printf '\n'
+      return 0
+    fi
+    if validate_core_count "$answer"; then
+      printf '%s\n' "$answer"
+      return 0
+    fi
+    echo "[WARN] invalid core count. Enter a positive integer, or blank for YAML default." >&2
+  done
+}
+
 build_unique_output_dir() {
   local base_dir="$1"
   local name_rule="$2"
@@ -361,29 +398,80 @@ print_kv() {
 INTERACTIVE=0
 INI_FILE=""
 PRESET_ARG=""
+CORES_ARG=""
 
 usage() {
   echo "Usage:" >&2
-  echo "  $0 -i" >&2
-  echo "  $0 <preset_config.ini> [preset_name]" >&2
+  echo "  $0 -i [--cores N]" >&2
+  echo "  $0 <preset_config.ini> [preset_name] [cores]" >&2
+  echo "  $0 <preset_config.ini> [preset_name] --cores N" >&2
 }
 
-if [ "$#" -eq 0 ]; then
-  err "[FATAL] missing arguments."
-  usage
-  exit 1
-elif [ "$1" = "-i" ]; then
-  if [ "$#" -ne 1 ]; then
-    err "[FATAL] -i does not accept extra arguments."
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -i)
+      INTERACTIVE=1
+      shift
+      ;;
+    --cores|--threads|-j)
+      if [ "$#" -lt 2 ]; then
+        err "[FATAL] $1 requires a positive integer argument."
+        usage
+        exit 1
+      fi
+      CORES_ARG="$2"
+      shift 2
+      ;;
+    --cores=*|--threads=*)
+      CORES_ARG="${1#*=}"
+      shift
+      ;;
+    -*)
+      err "[FATAL] unknown option: $1"
+      usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ "$INTERACTIVE" -eq 1 ]; then
+  if [ "${#POSITIONAL[@]}" -ne 0 ]; then
+    err "[FATAL] -i does not accept positional arguments."
     usage
     exit 1
   fi
-  INTERACTIVE=1
-elif [ "$#" -ge 1 ] && [ "$#" -le 2 ]; then
-  INI_FILE="$1"
-  PRESET_ARG="${2:-}"
+elif [ "${#POSITIONAL[@]}" -eq 0 ]; then
+  err "[FATAL] missing arguments."
+  usage
+  exit 1
+elif [ "${#POSITIONAL[@]}" -le 3 ]; then
+  INI_FILE="${POSITIONAL[0]}"
+  PRESET_ARG="${POSITIONAL[1]:-}"
+  if [ "${#POSITIONAL[@]}" -eq 3 ]; then
+    if [ -n "$CORES_ARG" ]; then
+      err "[FATAL] core count provided both positionally and with --cores."
+      usage
+      exit 1
+    fi
+    CORES_ARG="${POSITIONAL[2]}"
+  fi
 else
   err "[FATAL] invalid arguments."
+  usage
+  exit 1
+fi
+
+if [ -n "$CORES_ARG" ] && ! validate_core_count "$CORES_ARG"; then
+  err "[FATAL] invalid core count: $CORES_ARG"
   usage
   exit 1
 fi
@@ -402,6 +490,9 @@ fi
 
 INI_DIR="$(cd "$(dirname "$INI_FILE")" && pwd)"
 PRESET="$(choose_preset "$INI_FILE" "$PRESET_ARG")"
+if [ "$INTERACTIVE" -eq 1 ]; then
+  CORES_ARG="$(choose_core_count "$CORES_ARG")"
+fi
 
 BUILD_DIR_RAW="$(ini_get "$INI_FILE" "$PRESET" "build_dir")"
 INPUT_PATH_RAW="$(ini_get "$INI_FILE" "$PRESET" "input_path")"
@@ -452,6 +543,7 @@ print_kv "Configuration File" "$INI_FILE"
 print_kv "Initial CSV" "$INITIAL_FILE"
 print_kv "CLI Args File" "${CLI_ARGS_FILE:-<none>}"
 print_kv "Config YAML" "$CELL_CONFIG_FILE"
+print_kv "CPU cores" "${CORES_ARG:-YAML default}"
 hr "-"
 print_kv "Build Path" "$BUILD_DIR"
 print_kv "Frames" "$FIRST_FRAME to $LAST_FRAME"
@@ -502,7 +594,13 @@ echo "[CMD] ${CMD[*]}"
 DEBUG_LOG="$OUT_DIR/debug_log.txt"
 echo "[CMD] ${CMD[*]}" > "$DEBUG_LOG"
 echo "Started: $(date)" >> "$DEBUG_LOG"
+echo "CPU cores: ${CORES_ARG:-YAML default}" >> "$DEBUG_LOG"
 echo "==========================================" >> "$DEBUG_LOG"
+if [ -n "$CORES_ARG" ]; then
+  export CELLUNIVERSE_THREADS="$CORES_ARG"
+else
+  unset CELLUNIVERSE_THREADS
+fi
 if "${CMD[@]}" > >(tee -a "$DEBUG_LOG") 2> >(grep -Ev "TIFF_Warning TIFFReadDirectory: Unknown field with tag 6500(0|1)?" | tee -a "$DEBUG_LOG" >&2); then
   :
 else

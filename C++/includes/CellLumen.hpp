@@ -38,6 +38,10 @@ public:
                                                   bool printCellDetails = false,
                                                   bool allowTraMask = true);
 
+    std::vector<DetectedCell> detectCellsInPreparedStack(const std::vector<cv::Mat> &preparedStack,
+                                                         const fs::path &imageFile,
+                                                         bool printCellDetails = false);
+
     std::vector<DetectedCell> buildInitialCsvForFrame(const fs::path &imageFile,
                                                       const fs::path &csvOutputPath);
 

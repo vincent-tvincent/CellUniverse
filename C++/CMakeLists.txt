@@ -97,6 +97,73 @@ if(NOT OpenCV_FOUND)
     )
 endif()
 
+option(CELLUNIVERSE_BUILD_N2V2_PREPROCESS
+       "Build optional LibTorch-backed N2V2 preprocessing support." ON)
+option(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH
+       "Prefer external/libtorch over any cached or system Torch package." ON)
+option(CELLUNIVERSE_AUTO_INSTALL_LIBTORCH
+       "Run scripts/install_libtorch.sh during configure if external/libtorch is missing." ON)
+if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS)
+    set(CELLUNIVERSE_LOCAL_LIBTORCH "${CMAKE_CURRENT_SOURCE_DIR}/external/libtorch")
+    set(CELLUNIVERSE_LOCAL_TORCH_CONFIG
+        "${CELLUNIVERSE_LOCAL_LIBTORCH}/share/cmake/Torch/TorchConfig.cmake")
+
+    if(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH AND
+       CELLUNIVERSE_AUTO_INSTALL_LIBTORCH AND
+       NOT EXISTS "${CELLUNIVERSE_LOCAL_TORCH_CONFIG}")
+        set(CELLUNIVERSE_LIBTORCH_INSTALLER
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/install_libtorch.sh")
+        if(EXISTS "${CELLUNIVERSE_LIBTORCH_INSTALLER}")
+            message(STATUS
+                "Local LibTorch was not found at ${CELLUNIVERSE_LOCAL_LIBTORCH}; "
+                "running scripts/install_libtorch.sh. "
+                "Set -DCELLUNIVERSE_AUTO_INSTALL_LIBTORCH=OFF to skip this.")
+            execute_process(
+                COMMAND "${CELLUNIVERSE_LIBTORCH_INSTALLER}"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                RESULT_VARIABLE CELLUNIVERSE_LIBTORCH_INSTALL_RESULT
+                COMMAND_ECHO STDOUT
+            )
+            if(NOT CELLUNIVERSE_LIBTORCH_INSTALL_RESULT EQUAL 0)
+                message(WARNING
+                    "scripts/install_libtorch.sh failed with exit code "
+                    "${CELLUNIVERSE_LIBTORCH_INSTALL_RESULT}; continuing without "
+                    "local LibTorch.")
+            endif()
+        else()
+            message(WARNING
+                "CELLUNIVERSE_AUTO_INSTALL_LIBTORCH is ON, but "
+                "${CELLUNIVERSE_LIBTORCH_INSTALLER} does not exist.")
+        endif()
+    endif()
+
+    if(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH AND
+       EXISTS "${CELLUNIVERSE_LOCAL_TORCH_CONFIG}")
+        unset(Caffe2_DIR CACHE)
+        unset(ATen_DIR CACHE)
+        unset(TORCH_LIBRARY CACHE)
+        unset(c10_LIBRARY CACHE)
+        unset(C10_CUDA_LIBRARY CACHE)
+        set(Torch_DIR
+            "${CELLUNIVERSE_LOCAL_LIBTORCH}/share/cmake/Torch"
+            CACHE PATH "Path to TorchConfig.cmake" FORCE)
+        list(PREPEND CMAKE_PREFIX_PATH "${CELLUNIVERSE_LOCAL_LIBTORCH}")
+        message(STATUS "Using local LibTorch at ${CELLUNIVERSE_LOCAL_LIBTORCH}")
+    endif()
+
+    find_package(Torch QUIET)
+    if(NOT Torch_FOUND)
+        message(WARNING
+            "Torch was not found; N2V2 preprocessing will be unavailable. "
+            "Run scripts/install_libtorch.sh or configure with "
+            "-DCMAKE_PREFIX_PATH=/path/to/libtorch.")
+    endif()
+endif()
+
+if(TORCH_CXX_FLAGS)
+    separate_arguments(TORCH_CXX_FLAGS_LIST NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+endif()
+
 set(cwd ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(${PROJECT_NAME}
@@ -125,6 +192,19 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
 endif()
 target_include_directories(${PROJECT_NAME} PRIVATE lib/yaml-cpp/include)
+
+if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
+    target_sources(${PROJECT_NAME} PRIVATE
+            ${cwd}/src/N2V2Preprocessor.cpp
+    )
+    target_link_libraries(${PROJECT_NAME} ${TORCH_LIBRARIES})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CELLUNIVERSE_HAS_N2V2_PREPROCESS=1)
+    if(TORCH_CXX_FLAGS_LIST)
+        target_compile_options(${PROJECT_NAME} PRIVATE ${TORCH_CXX_FLAGS_LIST})
+    endif()
+else()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CELLUNIVERSE_HAS_N2V2_PREPROCESS=0)
+endif()
 
 # Release optimization flags.
 target_compile_options(${PROJECT_NAME} PRIVATE

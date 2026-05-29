@@ -1,10 +1,8 @@
-# Light preprocessing preset for C. elegans embryo resume tests.
+# N2V2-ready preprocessing preset for C. elegans embryo resume tests.
 #
 # This file intentionally inherits the merged branch default config instead of
-# duplicating it. C++/config/config.yaml remains the heavy iterative
-# preprocessing preset, including the split gate thresholds tuned for that
-# binary-like image scale. Only the overrides below are active when this file is
-# passed as the config argument.
+# duplicating it. The old light/iterative code paths are removed; this preset
+# keeps normalized raw input unless n2v2_preprocess.enabled is set true.
 
 base_config: ../config.yaml
 
@@ -12,11 +10,7 @@ simulation:
   # Keep the original voxel values after percentile normalization and z
   # interpolation. This avoids blacking out dim but real cells in later embryo
   # frames.
-  preprocess_mode: light
-  # Gamma > 1 suppresses dim background speckles smoothly. Unlike hard
-  # thresholding, it does not erase weak cell signal; a voxel at 0.2 becomes
-  # 0.04, while a voxel at 0.8 remains 0.64.
-  light_preprocess_gamma: 2.0
+  preprocess_mode: none
   # Disable the first blur for this high signal dataset so adjacent cells do
   # not bleed into each other before split detection.
   blur_sigma: 0.0

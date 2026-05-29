@@ -11,6 +11,8 @@ outputs/
 output/
 output_*/
 build/
+build-*/
 cmake-build-*/
+external/
 .vscode/
 .codex

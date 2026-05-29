@@ -4233,16 +4233,6 @@ std::vector<CellLumen::DetectedCell> CellLumen::buildInitialCsvForFrame(
         throw std::runtime_error("CellLumen frame file not found: " + imageFile.string());
     }
 
-    activeProfile = inferDatasetProfile(imageFile);
-    config.simulation.z_scaling = effectiveZScaling();
-    std::cout << "[CellLumen Dataset] profile=" << activeProfile.label
-              << " effective_z_scaling=" << effectiveZScaling();
-    if (activeProfile.label == "hl60_sim")
-    {
-        std::cout << " voxel_size_xyz=(0.125,0.125,0.200)";
-    }
-    std::cout << std::endl;
-
     PathVec discoveredInput = ImageHandler::getImageFilePaths(imageFile.string(), 0, 0, config);
     if (discoveredInput.empty())
     {
@@ -4250,33 +4240,20 @@ std::vector<CellLumen::DetectedCell> CellLumen::buildInitialCsvForFrame(
     }
     logElapsed("input_discovery");
 
-    std::vector<cv::Mat> realFrame = loadCellLumenRawStack(discoveredInput.front());
-    std::cout << "[CellLumen RawInput] frame=" << imageFile.filename().string()
-              << " mode=no_preprocess"
+    std::ostringstream preprocessLog;
+    std::vector<cv::Mat> realFrame =
+        ImageHandler::loadFrame(discoveredInput.front().string(), config, &preprocessLog);
+    std::cout << preprocessLog.str();
+    std::cout << "[CellLumen PreparedInput] frame=" << imageFile.filename().string()
+              << " mode=shared_preprocess"
               << " slices=" << realFrame.size()
               << " min=" << stackPercentile(realFrame, 0.0f, false)
               << " max=" << stackMaxValue(realFrame)
               << " mean=" << stackMeanValue(realFrame)
               << std::endl;
-    config.simulation.z_slices = static_cast<int>(realFrame.size());
-    logElapsed("load_raw_frame_no_preprocess");
+    logElapsed("load_prepared_frame");
 
-    if (config.cell)
-    {
-        Ellipsoid::cellConfig = *config.cell;
-        Ellipsoid::cellConfig.maxZ = static_cast<float>(realFrame.size()) - 1.0f;
-    }
-
-    const std::string frameStem = imageFile.stem().string();
-    std::vector<DetectedCell> cells;
-    if (const std::optional<fs::path> traMask = findPairedTraMask(imageFile))
-    {
-        cells = detectCellsFromTraMask(*traMask, realFrame, frameStem);
-    }
-    else
-    {
-        cells = detectCellsInVolume(realFrame, frameStem);
-    }
+    std::vector<DetectedCell> cells = detectCellsInPreparedStack(realFrame, imageFile, false);
     logElapsed("detect_cells");
 
     std::cout << "[CellLumen Result] frame=" << imageFile.filename().string()
@@ -4316,18 +4293,12 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsForFrame(
 {
     using Clock = std::chrono::steady_clock;
     const auto totalStart = Clock::now();
+    (void)allowTraMask;
 
     if (!fs::exists(imageFile))
     {
         throw std::runtime_error("CellLumen frame file not found: " + imageFile.string());
     }
-
-    activeProfile = inferDatasetProfile(imageFile);
-    config.simulation.z_scaling = effectiveZScaling();
-    std::cout << "[CellLumen Fusion Dataset] profile=" << activeProfile.label
-              << " effective_z_scaling=" << effectiveZScaling()
-              << " frame=" << imageFile.filename().string()
-              << std::endl;
 
     PathVec discoveredInput = ImageHandler::getImageFilePaths(imageFile.string(), 0, 0, config);
     if (discoveredInput.empty())
@@ -4335,28 +4306,13 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsForFrame(
         throw std::runtime_error("CellLumen input discovery returned no files.");
     }
 
-    std::vector<cv::Mat> realFrame = loadCellLumenRawStack(discoveredInput.front());
-    config.simulation.z_slices = static_cast<int>(realFrame.size());
+    std::ostringstream preprocessLog;
+    std::vector<cv::Mat> realFrame =
+        ImageHandler::loadFrame(discoveredInput.front().string(), config, &preprocessLog);
+    std::cout << preprocessLog.str();
 
-    if (config.cell)
-    {
-        Ellipsoid::cellConfig = *config.cell;
-        Ellipsoid::cellConfig.maxZ = static_cast<float>(realFrame.size()) - 1.0f;
-    }
-
-    const std::string frameStem = imageFile.stem().string();
-    std::vector<DetectedCell> cells;
-    if (allowTraMask)
-    {
-        if (const std::optional<fs::path> traMask = findPairedTraMask(imageFile))
-        {
-            cells = detectCellsFromTraMask(*traMask, realFrame, frameStem);
-        }
-    }
-    if (cells.empty())
-    {
-        cells = detectCellsInVolume(realFrame, frameStem);
-    }
+    std::vector<DetectedCell> cells =
+        detectCellsInPreparedStack(realFrame, imageFile, printCellDetails);
 
     std::cout << "[CellLumen Fusion Result] frame=" << imageFile.filename().string()
               << " detected_cells=" << cells.size()
@@ -4364,6 +4320,38 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsForFrame(
               << std::chrono::duration<double>(Clock::now() - totalStart).count()
               << std::defaultfloat
               << std::endl;
+
+    return cells;
+}
+
+std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInPreparedStack(
+    const std::vector<cv::Mat> &preparedStack,
+    const fs::path &imageFile,
+    bool printCellDetails)
+{
+    if (preparedStack.empty())
+    {
+        throw std::runtime_error("CellLumen prepared stack is empty for frame: " + imageFile.string());
+    }
+
+    activeProfile = inferDatasetProfile(imageFile);
+    activeProfile.effectiveZScaling = 1.0f;
+    config.simulation.z_scaling = 1.0f;
+    config.simulation.z_slices = static_cast<int>(preparedStack.size());
+    std::cout << "[CellLumen Fusion Dataset] profile=" << activeProfile.label
+              << " input=prepared_stack"
+              << " effective_z_scaling=" << effectiveZScaling()
+              << " frame=" << imageFile.filename().string()
+              << std::endl;
+
+    if (config.cell)
+    {
+        Ellipsoid::cellConfig = *config.cell;
+        Ellipsoid::cellConfig.maxZ = static_cast<float>(preparedStack.size()) - 1.0f;
+    }
+
+    const std::string frameStem = imageFile.stem().string();
+    std::vector<DetectedCell> cells = detectCellsInVolume(preparedStack, frameStem);
 
     if (printCellDetails)
     {

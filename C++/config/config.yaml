@@ -334,7 +334,7 @@ simulation:
       high_percentile: 99.99
       exclude_zero: true
       scope: stack
-      gamma: 1.3
+      gamma: 1.45
       preserve_zero_pixels: true
     output:
       dtype: preserve

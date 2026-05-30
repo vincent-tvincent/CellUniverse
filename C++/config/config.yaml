@@ -308,7 +308,6 @@ simulation:
   preprocess_mode: n2v2
 
   n2v2_preprocess:
-    enabled: true
     enable_network: true
     model_path: models/general_n2v2_torchscript.pt
     device: auto

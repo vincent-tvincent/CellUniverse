@@ -64,3 +64,35 @@ prob: {}
     ASSERT_TRUE(config.cell);
     EXPECT_FALSE(config.cell->flatCellRotationRefineEnabled);
 }
+
+TEST(ConfigTypesTest, PreprocessModeNoneIgnoresLegacyN2V2EnabledFlag) {
+    const YAML::Node node = YAML::Load(R"(
+iterations_per_cell: 1
+z_scaling: 1.0
+blur_sigma: 0.0
+preprocess_mode: none
+n2v2_preprocess:
+  enabled: true
+)");
+
+    SimulationConfig config;
+    config.explodeConfig(node);
+
+    EXPECT_EQ(config.preprocess_mode, "none");
+    EXPECT_FALSE(config.n2v2_preprocess_enabled);
+}
+
+TEST(ConfigTypesTest, PreprocessModeN2V2EnablesN2V2Internally) {
+    const YAML::Node node = YAML::Load(R"(
+iterations_per_cell: 1
+z_scaling: 1.0
+blur_sigma: 0.0
+preprocess_mode: n2v2
+)");
+
+    SimulationConfig config;
+    config.explodeConfig(node);
+
+    EXPECT_EQ(config.preprocess_mode, "n2v2");
+    EXPECT_TRUE(config.n2v2_preprocess_enabled);
+}

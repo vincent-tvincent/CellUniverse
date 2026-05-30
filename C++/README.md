@@ -19,7 +19,7 @@
   ```
 
 ### Optional N2V2 Neural Preprocessing
-The project builds without LibTorch, but `n2v2_preprocess.enabled: true` requires LibTorch at configure/build time.
+The project builds without LibTorch, but `simulation.preprocess_mode: n2v2` requires LibTorch at configure/build time.
 
 Automatic install into `external/libtorch`:
 ```bash
@@ -42,13 +42,15 @@ cmake --build build -j "$(nproc)"
 
 Enable neural preprocessing in YAML:
 ```yaml
+simulation:
+  preprocess_mode: n2v2
+
 n2v2_preprocess:
-  enabled: true
   model_path: models/general_n2v2_torchscript.pt
   device: auto   # auto, cpu, cuda, cuda:0, ...
 ```
 
-When enabled, CellUniverse and CellLumen both consume the same N2V2-preprocessed stack. When disabled, preprocessing mode is `none`; the old iterative/light preprocessors are not active runtime modes.
+When `simulation.preprocess_mode` is `n2v2`, CellUniverse and CellLumen both consume the same N2V2-preprocessed stack. Use `preprocess_mode: none` for normalized raw input; the old iterative/light preprocessors are not active runtime modes.
 
 ### Using ICS openlab
 - ssh into your ICS openlab. (Recommend to use vscode remote development tool: https://code.visualstudio.com/docs/remote/ssh)

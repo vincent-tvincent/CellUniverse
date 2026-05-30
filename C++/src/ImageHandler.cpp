@@ -263,7 +263,7 @@ std::pair<float, float> normalizeStackToFrameIntensity(ImageStack &stack,
 
 bool n2v2PreprocessEnabled(const SimulationConfig &config)
 {
-    return config.n2v2_preprocess_enabled || config.preprocess_mode == "n2v2";
+    return config.preprocess_mode == "n2v2";
 }
 
 #if CELLUNIVERSE_HAS_N2V2_PREPROCESS
@@ -1757,7 +1757,7 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
         processedZSlices = runN2V2Preprocessing(processedZSlices, imageFile, config.simulation, log);
 #else
         throw std::runtime_error(
-            "n2v2_preprocess.enabled is true, but this build was configured without LibTorch/N2V2 support");
+            "simulation.preprocess_mode is n2v2, but this build was configured without LibTorch/N2V2 support");
 #endif
     }
     else

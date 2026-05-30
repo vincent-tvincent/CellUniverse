@@ -2,7 +2,7 @@
 #
 # This file intentionally inherits the merged branch default config instead of
 # duplicating it. The old light/iterative code paths are removed; this preset
-# keeps normalized raw input unless n2v2_preprocess.enabled is set true.
+# keeps normalized raw input unless preprocess_mode is set to n2v2.
 
 base_config: ../config.yaml
 

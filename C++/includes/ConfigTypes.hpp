@@ -343,7 +343,6 @@ public:
         if (!node) {
             return;
         }
-        if (node["enabled"]) n2v2_preprocess_enabled = node["enabled"].as<bool>();
         if (node["enable_network"]) n2v2_enable_network = node["enable_network"].as<bool>();
         if (node["model_path"]) n2v2_model_path = node["model_path"].as<std::string>();
         if (node["device"]) n2v2_device = node["device"].as<std::string>();
@@ -390,15 +389,10 @@ public:
     }
     void validatePreprocessingConfig() {
         preprocess_mode = normalizedConfigString(preprocess_mode);
-        if (preprocess_mode == "n2v2") {
-            n2v2_preprocess_enabled = true;
-        }
-        if (n2v2_preprocess_enabled) {
-            preprocess_mode = "n2v2";
-        }
         if (preprocess_mode != "none" && preprocess_mode != "n2v2") {
             throw std::invalid_argument("simulation.preprocess_mode must be one of: none, n2v2");
         }
+        n2v2_preprocess_enabled = (preprocess_mode == "n2v2");
         if (n2v2_tile_size.size() != 2 || n2v2_tile_overlap.size() != 2 ||
             n2v2_tile_size[0] <= 0 || n2v2_tile_size[1] <= 0 ||
             n2v2_tile_overlap[0] < 0 || n2v2_tile_overlap[1] < 0 ||

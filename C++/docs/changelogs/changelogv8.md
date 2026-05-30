@@ -12,7 +12,7 @@ Branch (merge done on): `jl_yp_preprocessing_merge_04192026`
 
 The active preprocessing surface is now either `none` or `n2v2`; the old iterative/light runtime branches are no longer active. `ImageHandler::loadFrame` owns the shared prepared stack creation: raw TIFF/image load, frame intensity normalization, optional N2V2 inference, z interpolation, and cube pooling.
 
-CellUniverse and CellLumen now consume that same prepared stack when N2V2 is enabled, so CellLumen fusion no longer silently reloads raw TIFFs during a CellUniverse run. LibTorch support is optional at build time; enabling `n2v2_preprocess.enabled` at runtime requires a build where CMake found LibTorch.
+CellUniverse and CellLumen now consume that same prepared stack when N2V2 is enabled, so CellLumen fusion no longer silently reloads raw TIFFs during a CellUniverse run. LibTorch support is optional at build time; enabling `simulation.preprocess_mode: n2v2` at runtime requires a build where CMake found LibTorch.
 
 ## 2026-04-19: Merge yp_fix_mask preprocessing pipeline (Change 1)
 

@@ -14,7 +14,7 @@ spec.loader.exec_module(r3)
 ROOT = r3.ROOT
 SLEEP_SECONDS = 20
 
-GAMMA_PRIORITY = [1.75, 1.25, 2.1, 1.0]
+GAMMA_PRIORITY = [1.43, 1.42, 1.75, 1.25, 2.1, 1.0]
 BASELINE_GAMMA = 1.45
 
 

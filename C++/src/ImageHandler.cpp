@@ -408,29 +408,6 @@ ImageStack normalizeN2V2RuntimeStack(const ImageStack &stack,
     return normalized;
 }
 
-ImageStack runN2V2Preprocessing(const ImageStack &input,
-                                const std::string &imageFile,
-                                const SimulationConfig &simulation,
-                                std::ostream &log)
-{
-    static std::unique_ptr<n2v2::N2V2Preprocessor> runtime;
-    static std::string runtimeKey;
-
-    const std::string key = makeN2V2RuntimeKey(simulation);
-    if (!runtime || runtimeKey != key)
-    {
-        log << "[N2V2] load_runtime"
-            << " model=" << simulation.n2v2_model_path
-            << " device=" << simulation.n2v2_device
-            << " network_enabled=" << simulation.n2v2_enable_network
-            << '\n';
-        runtime = std::make_unique<n2v2::N2V2Preprocessor>(makeN2V2Config(simulation));
-        runtimeKey = key;
-    }
-
-    n2v2::PreprocessResult result = runtime->processStack(input, fs::path(imageFile), log);
-    return normalizeN2V2RuntimeStack(result.stack, imageFile, log);
-}
 #endif
 
 ImageStack cloneStack(const ImageStack &sequence)
@@ -898,6 +875,144 @@ void applyGammaToStack(ImageStack &sequence, float gamma)
             }
         }
     }
+}
+
+#if CELLUNIVERSE_HAS_N2V2_PREPROCESS
+ImageStack runN2V2PreprocessingFromRawTiff(const std::string &imageFile,
+                                                 const SimulationConfig &simulation,
+                                                 std::ostream &log)
+{
+    static std::unique_ptr<n2v2::N2V2Preprocessor> runtime;
+    static std::string runtimeKey;
+
+    const std::string key = makeN2V2RuntimeKey(simulation);
+    if (!runtime || runtimeKey != key)
+    {
+        log << "[N2V2] load_runtime"
+            << " model=" << simulation.n2v2_model_path
+            << " device=" << simulation.n2v2_device
+            << " network_enabled=" << simulation.n2v2_enable_network
+            << '\n';
+        runtime = std::make_unique<n2v2::N2V2Preprocessor>(makeN2V2Config(simulation));
+        runtimeKey = key;
+    }
+
+    const fs::path imagePath(imageFile);
+    log << "[PreprocessingPipeline] frame=" << imagePath.filename().string()
+        << " pipeline=n2v2"
+        << " legacy_pipeline=off"
+        << " model=" << simulation.n2v2_model_path
+        << " network_enabled=" << simulation.n2v2_enable_network
+        << std::endl;
+
+    ImageStack rawStack = n2v2::loadTiffStack(imagePath);
+    n2v2::PreprocessResult result = runtime->processStack(rawStack, imagePath, log);
+    return normalizeN2V2RuntimeStack(result.stack, imageFile, log);
+}
+#endif
+
+ImageStack finalizeExternalPreprocessedStack(const ImageStack &processedSlices,
+                                                   const std::string &imageFile,
+                                                   const BaseConfig &config,
+                                                   std::ostream &log)
+{
+    ImageStack normalizedSlices = cloneStack(processedSlices);
+    ImageStack interpolatedZSlices;
+
+    clipStack(normalizedSlices);
+    printStackStats(log, "external_preprocessed_sequence", imageFile, normalizedSlices);
+
+    if (normalizedSlices.empty())
+    {
+        return interpolatedZSlices;
+    }
+
+    if (normalizedSlices.size() == 1)
+    {
+        interpolatedZSlices = normalizedSlices;
+    }
+    else
+    {
+        const int expandFactor = config.simulation.z_scaling;
+        const unsigned numSynthSlices =
+            static_cast<unsigned>(expandFactor) * (normalizedSlices.size() - 1U) + 1U;
+
+        interpolatedZSlices.resize(numSynthSlices);
+        #pragma omp parallel for schedule(static)
+        for (int synthSliceIndex = 0; synthSliceIndex < static_cast<int>(numSynthSlices); ++synthSliceIndex)
+        {
+            const unsigned synthSlice = static_cast<unsigned>(synthSliceIndex);
+            const int sourceSlice = static_cast<int>(synthSlice / expandFactor);
+            if (synthSlice % expandFactor == 0)
+            {
+                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
+                    normalizedSlices[static_cast<std::size_t>(sourceSlice)];
+            }
+            else
+            {
+                const double t = static_cast<double>(synthSlice % expandFactor) /
+                                 static_cast<double>(expandFactor);
+                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
+                    (1.0 - t) * normalizedSlices[static_cast<std::size_t>(sourceSlice)] +
+                    t * normalizedSlices[static_cast<std::size_t>(sourceSlice + 1)];
+            }
+        }
+
+        if (interpolatedZSlices.size() != numSynthSlices)
+        {
+            throw std::runtime_error(
+                "interpolatedZSlices must have exactly " + std::to_string(numSynthSlices) +
+                " slices, but has " + std::to_string(interpolatedZSlices.size()) + " slices");
+        }
+    }
+
+    printStackStats(log, "post_interpolation", imageFile, interpolatedZSlices);
+    ImageStack preCubePoolingSlices = cloneStack(interpolatedZSlices);
+    interpolatedZSlices = applyCubePooling(interpolatedZSlices, config, log);
+    clipStack(interpolatedZSlices);
+    const StackStats cubeStats = computeStackStats(interpolatedZSlices);
+    const float candidateMaxMean = std::max(0.0f, config.simulation.iterative_candidate_max_mean);
+    const float candidateMaxSaturatedFraction = std::clamp(
+        config.simulation.iterative_candidate_max_saturated_fraction, 0.0f, 1.0f);
+    const bool cubeMeanOk =
+        candidateMaxMean <= 0.0f || cubeStats.mean <= candidateMaxMean;
+    const bool cubeSaturationOk =
+        candidateMaxSaturatedFraction <= 0.0f ||
+        cubeStats.saturatedFraction <= candidateMaxSaturatedFraction;
+    if (!cubeMeanOk || !cubeSaturationOk || cubeStats.nonFiniteCount > 0)
+    {
+        log << "[CubePooling] reject=range"
+            << " mean=" << cubeStats.mean
+            << " saturated_fraction=" << cubeStats.saturatedFraction
+            << " nonfinite=" << cubeStats.nonFiniteCount
+            << " max_mean=" << candidateMaxMean
+            << " max_saturated_fraction=" << candidateMaxSaturatedFraction
+            << "; using_pre_cube_pooling_sequence=1"
+            << std::endl;
+        interpolatedZSlices = std::move(preCubePoolingSlices);
+    }
+    printStackStats(log, "post_cube_pooling", imageFile, interpolatedZSlices);
+    log << std::to_string(interpolatedZSlices.size()) << "slices built successfully" << std::endl;
+    return interpolatedZSlices;
+}
+
+ImageStack loadN2V2FrameFromRawTiff(const std::string &imageFile,
+                                       const BaseConfig &config,
+                                       std::ostream &log)
+{
+#if CELLUNIVERSE_HAS_N2V2_PREPROCESS
+    ImageStack normalized = runN2V2PreprocessingFromRawTiff(
+        imageFile,
+        config.simulation,
+        log);
+    return finalizeExternalPreprocessedStack(normalized, imageFile, config, log);
+#else
+    (void)imageFile;
+    (void)config;
+    (void)log;
+    throw std::runtime_error(
+        "simulation.preprocess_mode is n2v2, but this build was configured without LibTorch/N2V2 support");
+#endif
 }
 } // namespace
 
@@ -1753,30 +1868,18 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
 
     if (usingN2V2)
     {
-#if CELLUNIVERSE_HAS_N2V2_PREPROCESS
-        processedZSlices = runN2V2Preprocessing(processedZSlices, imageFile, config.simulation, log);
-#else
         throw std::runtime_error(
-            "simulation.preprocess_mode is n2v2, but this build was configured without LibTorch/N2V2 support");
-#endif
-    }
-    else
-    {
-        clipStack(processedZSlices);
+            "N2V2 preprocessing requires ImageHandler::loadFrame so the raw TIFF stack is passed to the network before normalization");
     }
 
-    if (!usingN2V2)
-    {
-        const float localScore = evaluateBestWindowContrastScore(processedZSlices, config);
-        log << "[PreprocessScores] file=" << fs::path(imageFile).filename().string()
-            << " local=" << localScore
-            << std::endl;
-    }
+    clipStack(processedZSlices);
 
-    printStackStats(log,
-                    usingN2V2 ? "n2v2_processed_stack" : "processed_sequence",
-                    imageFile,
-                    processedZSlices);
+    const float localScore = evaluateBestWindowContrastScore(processedZSlices, config);
+    log << "[PreprocessScores] file=" << fs::path(imageFile).filename().string()
+        << " local=" << localScore
+        << std::endl;
+
+    printStackStats(log, "processed_sequence", imageFile, processedZSlices);
 
     if (processedZSlices.empty())
     {
@@ -1875,6 +1978,11 @@ std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,
                                              std::ostream *logSink)
 {
     std::ostream &log = logSink ? *logSink : std::cout;
+    if (n2v2PreprocessEnabled(config.simulation))
+    {
+        return loadN2V2FrameFromRawTiff(imageFile, config, log);
+    }
+
     std::vector<cv::Mat> normalizedSlices = loadRawFrame(imageFile, config, logSink);
     if (config.simulation.frame_intensity_normalization_enabled)
     {

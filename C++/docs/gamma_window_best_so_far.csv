@@ -1,0 +1,8 @@
+time,batch,best_gamma_so_far,best_run_so_far,classification,frames_scored,clean_prefix_frames,last_frame,complete_window,note
+2026-05-30T10:39:51-0700,000_024,1.75,000_024__gamma_1p75,true_fail_or_needs_tuning,13,12,12,0,extra predicted cell/split before completing window
+2026-05-30T10:39:51-0700,025_049,1.45,025_049__gamma_1p45_resume28_relaxed,true_fail_or_needs_tuning,12,11,40,0,missed GT cell/split before completing window
+2026-05-30T10:39:51-0700,050_074,1.45,050_074__gamma_1p45,stopped_clean_so_far,7,7,56,0,
+2026-05-30T10:39:51-0700,075_099,1.45,075_099__gamma_1p45,possible_one_frame_early_split,11,11,85,0,
+2026-05-30T10:39:51-0700,100_124,1.45,100_124__gamma_1p45,true_fail_or_needs_tuning,3,2,102,0,missed GT cell/split before completing window
+2026-05-30T10:39:51-0700,125_149,1.45,125_149__gamma_1p45,no_scored_output,0,0,,0,
+2026-05-30T10:39:51-0700,150_174,1.45,150_174__gamma_1p45,no_scored_output,0,0,,0,

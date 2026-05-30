@@ -177,8 +177,8 @@ def should_prune(gt, batches, active):
             # matches the next frame's GT count; the next frame will verify it.
             early_split_grace = (
                 matched == current_gt_count
-                and len(pred_rows) == next_gt_count
                 and next_gt_count > current_gt_count
+                and 0 < extra <= next_gt_count - current_gt_count
             )
         if (missing or extra or max_dist > threshold(frame)) and not early_split_grace:
             failures.append({

@@ -439,6 +439,9 @@ public:
         if (node["random_iterations_per_cell"]) random_iterations_per_cell = node["random_iterations_per_cell"].as<int>();
         z_scaling = node["z_scaling"].as<float>();
         blur_sigma = node["blur_sigma"].as<float>();
+        if (node["preprocessing_pipeline"] && !node["preprocess_mode"]) {
+            preprocess_mode = node["preprocessing_pipeline"].as<std::string>();
+        }
         if (node["preprocess_mode"]) preprocess_mode = node["preprocess_mode"].as<std::string>();
         if (node["light_preprocess_gamma"]) light_preprocess_gamma = node["light_preprocess_gamma"].as<float>();
         if (node["iterative_penalty"]) iterative_penalty = node["iterative_penalty"].as<float>();

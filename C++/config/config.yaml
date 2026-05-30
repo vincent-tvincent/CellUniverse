@@ -92,6 +92,7 @@ cell:
   pcaShapeFitGrowthCapEnabled: true
   pcaShapeFitGrowthCap: 0.90
   trashPcaShapeFitEnabled: true
+  trashPcaShapeUpdatePosition: false
   trashPcaShapeMaxOriginalRadiusFactor: 2.0
   # Post-optimization cleanup: trash cells dimmer than this threshold are
   # removed after the current frame is fully optimized. Their brightness is
@@ -134,8 +135,8 @@ cell:
   randomPerturbBrightCoreGuideStrength: 0.75
 
 cell_lumen:
-  enabled: true
-  fusionEnabled: true
+  enabled: false
+  fusionEnabled: false
 
   # High-recall CellLumen candidates are used only as priors; Cell Universe
   # still validates the resulting movement/split with its normal cost gates.
@@ -300,7 +301,7 @@ cell_lumen:
 #   none: normalized raw stack -> z interpolation/cube pooling
 #   n2v2: N2V2 neural preprocessing -> z interpolation/cube pooling
 simulation:
-  iterations_per_cell: 250
+  iterations_per_cell: 50
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
   z_scaling: 7

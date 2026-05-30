@@ -4879,6 +4879,8 @@ void CellUniverse::optimize(int frameIndex)
         // ordering is deterministic regardless of thread count.
         const bool trashPcaShapeFitEnabled =
             config.cell && config.cell->trashPcaShapeFitEnabled;
+        const bool trashPcaShapeUpdatePosition =
+            config.cell && config.cell->trashPcaShapeUpdatePosition;
         const float trashMaxOriginalRadiusFactor = std::max(
             1.0f,
             config.cell ? config.cell->trashPcaShapeMaxOriginalRadiusFactor : 2.0f);
@@ -4947,8 +4949,10 @@ void CellUniverse::optimize(int frameIndex)
 
             const bool pcaPositionLocked =
                 pcaPositionLockedCells.count(sname) > 0;
-            const bool updatePosForCell = updatePos && !pcaPositionLocked;
-            if (pcaPositionLocked && updatePos) {
+            const bool cellUpdatePos =
+                isTrashCell ? trashPcaShapeUpdatePosition : updatePos;
+            const bool updatePosForCell = cellUpdatePos && !pcaPositionLocked;
+            if (pcaPositionLocked && cellUpdatePos) {
                 const auto reasonIt = pcaPositionLockReasons.find(sname);
                 shapeLogs[ci] << "  [PCA Shape Position Lock] cell=" << sname
                               << " reason="

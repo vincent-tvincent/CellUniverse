@@ -196,6 +196,126 @@ def patch_driver(d):
 
     d.parse_debug = parse_original_debug
 
+
+    def corrected_gt_birth_rows(gt, frame):
+        previous_labels = {g.get("label") for g in gt.get(frame - 1, [])} if frame > 0 else set()
+        return [g for g in gt.get(frame, []) if g.get("parent", 0) > 0 and g.get("label") not in previous_labels]
+
+    def corrected_evaluate_frames(run_dir, start, end, candidate, stage):
+        gt = d.load_gt()
+        pred = d.load_predictions(Path(run_dir) / "cells.csv", start, end)
+        rows = []
+        split_rows = []
+        summary = {
+            "candidate": candidate,
+            "stage": stage,
+            "run_dir": str(run_dir),
+            "start": start,
+            "end": end,
+            "passed": True,
+            "score": 0.0,
+            "missing_cells": 0,
+            "extra_cells": 0,
+            "missed_splits": 0,
+            "extra_splits": 0,
+            "matched_cells": 0,
+            "mean_matched_distance": 0.0,
+            "max_matched_distance": 0.0,
+            "duplicate_tolerated": 0,
+            "failed_frames": [],
+        }
+        total_dist = 0.0
+        for frame in range(start, end + 1):
+            gt_rows = gt.get(frame, [])
+            pred_rows = pred.get(frame, [])
+            threshold = d.frame_match_threshold(frame)
+            matches, missing, extra = d.greedy_match(gt_rows, pred_rows, threshold)
+            missing, tolerated = d.tolerate_duplicate_gt(missing, matches)
+            frame_dists = [m[2] for m in matches]
+            gt_birth_rows = corrected_gt_birth_rows(gt, frame)
+            pred_birth_rows = d.split_events_from_predictions(pred, frame)
+            split_matches, split_missing, split_extra = d.greedy_match(gt_birth_rows, pred_birth_rows, threshold)
+            if frame == start:
+                split_missing, split_extra = [], []
+            frame_pass = not missing and not extra and not split_missing and not split_extra and (max(frame_dists) if frame_dists else 0.0) <= threshold
+            rows.append({
+                "candidate": candidate,
+                "stage": stage,
+                "frame": frame,
+                "gt_count": len(gt_rows),
+                "pred_count": len(pred_rows),
+                "matched": len(matches),
+                "missing_cells": len(missing),
+                "extra_cells": len(extra),
+                "missed_splits": len(split_missing),
+                "extra_splits": len(split_extra),
+                "duplicate_tolerated": len(tolerated),
+                "mean_matched_distance": f"{(sum(frame_dists) / len(frame_dists)) if frame_dists else 0.0:.6f}",
+                "max_matched_distance": f"{max(frame_dists) if frame_dists else 0.0:.6f}",
+                "match_threshold": f"{threshold:.6f}",
+                "frame_pass": int(frame_pass),
+            })
+            for item in tolerated:
+                split_rows.append({"frame": frame, "type": "gt_duplicate_suspect", "detail": d.json.dumps(item, sort_keys=True)})
+            for item in missing:
+                split_rows.append({"frame": frame, "type": "missing_cell", "detail": d.json.dumps(item, sort_keys=True)})
+            for item in extra:
+                split_rows.append({"frame": frame, "type": "extra_cell", "detail": d.json.dumps(item, sort_keys=True)})
+            for item in split_missing:
+                split_rows.append({"frame": frame, "type": "missed_split", "detail": d.json.dumps(item, sort_keys=True)})
+            for item in split_extra:
+                split_rows.append({"frame": frame, "type": "extra_new_cell", "detail": d.json.dumps(item, sort_keys=True)})
+            summary["missing_cells"] += len(missing)
+            summary["extra_cells"] += len(extra)
+            summary["missed_splits"] += len(split_missing)
+            summary["extra_splits"] += len(split_extra)
+            summary["matched_cells"] += len(matches)
+            summary["duplicate_tolerated"] += len(tolerated)
+            total_dist += sum(frame_dists)
+            summary["max_matched_distance"] = max(summary["max_matched_distance"], max(frame_dists) if frame_dists else 0.0)
+            if not frame_pass:
+                summary["passed"] = False
+                summary["failed_frames"].append(frame)
+        summary["mean_matched_distance"] = total_dist / summary["matched_cells"] if summary["matched_cells"] else 9999.0
+        summary["score"] = 1000.0 * summary["missed_splits"] + 1000.0 * summary["extra_splits"] + 100.0 * summary["missing_cells"] + 100.0 * summary["extra_cells"] + summary["mean_matched_distance"]
+        metrics_dir = d.DIRS["metrics"] / stage
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        d.write_csv(metrics_dir / f"{candidate}_metrics.csv", [
+            "candidate", "stage", "frame", "gt_count", "pred_count", "matched",
+            "missing_cells", "extra_cells", "missed_splits", "extra_splits",
+            "duplicate_tolerated", "mean_matched_distance", "max_matched_distance", "match_threshold", "frame_pass",
+        ], rows)
+        d.write_csv(metrics_dir / f"{candidate}_events.csv", ["frame", "type", "detail"], split_rows)
+        d.write_json(metrics_dir / f"{candidate}_summary.json", summary)
+        d.append_jsonl(d.DECISIONS, {"time": d.now(), "event": "scored", **summary})
+        return summary, rows
+
+    def corrected_evaluate_frame(run_dir, frame, candidate, stage):
+        first_pred_frame = 0
+        cells_csv = Path(run_dir) / "cells.csv"
+        if cells_csv.exists():
+            with cells_csv.open(newline="") as f:
+                reader = csv.DictReader(f)
+                seen_frames = [d.parse_prediction_frame(row.get("file", row.get("frame", ""))) for row in reader]
+            seen_frames = [fr for fr in seen_frames if fr is not None]
+            if seen_frames:
+                first_pred_frame = min(seen_frames)
+        start = max(first_pred_frame, frame - 1)
+        summary, rows = corrected_evaluate_frames(run_dir, start, frame, candidate, stage)
+        frame_row = next((row for row in rows if int(row["frame"]) == frame), None)
+        if frame_row is not None:
+            frame_summary = dict(summary)
+            frame_summary["passed"] = bool(int(frame_row["frame_pass"]))
+            frame_summary["missing_cells"] = int(frame_row["missing_cells"])
+            frame_summary["extra_cells"] = int(frame_row["extra_cells"])
+            frame_summary["missed_splits"] = int(frame_row["missed_splits"])
+            frame_summary["extra_splits"] = int(frame_row["extra_splits"])
+            return frame_summary, frame_row
+        return summary, None
+
+    d.evaluate_frames = corrected_evaluate_frames
+    d.evaluate_frame = corrected_evaluate_frame
+
     original_start_continuous = d.start_continuous
 
     def start_original(stop_old=False):
@@ -511,6 +631,146 @@ def patch_driver(d):
         run.launch()
         continue_original_from(run, config)
 
+    def start_brightness1_oldinit_trash_elong125_v007_newcode(stop_old=False):
+        d.ensure_dirs()
+        d.generate_gt(force=True)
+        if stop_old:
+            d.stop_old_workers()
+        parent = d.DIRS["configs"] / "original_baseline_n2v2_noncelllumen_initbright1_oldinit_trashmaxelong125_v006.yaml"
+        if not parent.exists():
+            parent = d.DIRS["configs"] / "original_baseline_n2v2_noncelllumen_initbright1_trashmaxelong125_v004.yaml"
+        if not parent.exists():
+            parent = CONFIG_SRC
+        config = d.make_config(
+            "original_baseline_n2v2_noncelllumen_initbright1_oldinit_trashmaxelong125_newcode_v007",
+            parent,
+            {
+                "cell.initialBrightness": 1.0,
+                "cell.maxBrightness": 1.0,
+                "cell.trashPcaShapeMaxElongation": 1.25,
+                "simulation.n2v2_preprocess.contrast.gamma": 1.45,
+                "simulation.light_preprocess_gamma": 1.0,
+            },
+            "fresh restart after debug/recompile with normalized old-init trash seeds and trash elongation cap",
+            "use the newly compiled binary while preserving original pipeline, N2V2 preprocessing, CellLumen off, brightness 1, and the known trash elongation fix",
+        )
+        old_initial = ROOT.parent / "tuning_fluo_gt_20260529/continuous_gt_watch_r26/runs/r26_oldinit_t004_compare/r26_oldinit_t004_compare_classic_oldinit_currentcost/initial_used.csv"
+        initial = d.DIRS["initials"] / "initial_000_oldinit_with_trash_normalized_newcode_v007.csv"
+        with old_initial.open(newline="") as src, initial.open("w", newline="") as dst:
+            reader = csv.DictReader(src)
+            fields = ["file", "name", "x", "y", "z", "aRadius", "bRadius", "cRadius", "theta_x", "theta_y", "theta_z", "isTrash"]
+            writer = csv.DictWriter(dst, fieldnames=fields)
+            writer.writeheader()
+            for row in reader:
+                radius = row.get("bRadius") or row.get("majorRadius") or row.get("minorRadius") or "10"
+                name = row.get("name", "")
+                writer.writerow({
+                    "file": row.get("file", "t000.tif"),
+                    "name": name,
+                    "x": row.get("x", ""),
+                    "y": row.get("y", ""),
+                    "z": row.get("z", ""),
+                    "aRadius": row.get("majorRadius") or radius,
+                    "bRadius": radius,
+                    "cRadius": row.get("minorRadius") or radius,
+                    "theta_x": row.get("theta_x", "0"),
+                    "theta_y": row.get("theta_y", "0"),
+                    "theta_z": row.get("theta_z", "0"),
+                    "isTrash": "1" if name.startswith("trash") else "0",
+                })
+        run = d.Run(
+            "original_baseline_n2v2_noncelllumen_initbright1_oldinit_trashmaxelong125_newcode_v007",
+            "original_n2v2_initbright1_oldinit_trashmaxelong125_newcode_000_200_gt_to_194_v007",
+            0,
+            LAST_RUN_FRAME,
+            config,
+            initial,
+            d.CONT_THREADS,
+        )
+        d.append_log("Starting fresh new-code old-init trash max elongation fix", [
+            "user instruction: prune existing old runs and start a new run based on the newly debugged/recompiled code",
+            "process prune: stopped active v006 watcher/CellUniverse and stale gamma canary workers before launch",
+            "initial normalization: old-init rows converted to current `aRadius,bRadius,cRadius,isTrash` schema; `trash_1` and `trash_2` retained",
+            "user-known fix: `cell.trashPcaShapeMaxElongation=1.25`",
+            "overrides: `cell.initialBrightness=1.0`, `cell.maxBrightness=1.0`, `cell.trashPcaShapeMaxElongation=1.25`",
+            "gamma caution: N2V2 contrast gamma held at `1.45`; raw light gamma held at `1.0`",
+            f"parent config: `{parent}`",
+            f"config: `{config}`",
+            f"initial csv: `{initial}`",
+        ])
+        run.launch()
+        continue_original_from(run, config)
+
+    def start_brightness1_oldinit_trash_elong125_v008_newcode_restart(stop_old=False):
+        d.ensure_dirs()
+        d.generate_gt(force=True)
+        if stop_old:
+            d.stop_old_workers()
+        parent = d.DIRS["configs"] / "original_baseline_n2v2_noncelllumen_initbright1_oldinit_trashmaxelong125_v006.yaml"
+        if not parent.exists():
+            parent = d.DIRS["configs"] / "original_baseline_n2v2_noncelllumen_initbright1_trashmaxelong125_v004.yaml"
+        if not parent.exists():
+            parent = CONFIG_SRC
+        config = d.make_config(
+            "original_baseline_n2v2_noncelllumen_initbright1_oldinit_trashmaxelong125_newcode_restart_v008",
+            parent,
+            {
+                "cell.initialBrightness": 1.0,
+                "cell.maxBrightness": 1.0,
+                "cell.trashPcaShapeMaxElongation": 1.25,
+                "simulation.n2v2_preprocess.contrast.gamma": 1.45,
+                "simulation.light_preprocess_gamma": 1.0,
+            },
+            "fresh restart after debug/recompile with normalized old-init trash seeds and trash elongation cap",
+            "use the newly compiled binary while preserving original pipeline, N2V2 preprocessing, CellLumen off, brightness 1, and the known trash elongation fix",
+        )
+        old_initial = ROOT.parent / "tuning_fluo_gt_20260529/continuous_gt_watch_r26/runs/r26_oldinit_t004_compare/r26_oldinit_t004_compare_classic_oldinit_currentcost/initial_used.csv"
+        initial = d.DIRS["initials"] / "initial_000_oldinit_with_trash_normalized_newcode_restart_v008.csv"
+        with old_initial.open(newline="") as src, initial.open("w", newline="") as dst:
+            reader = csv.DictReader(src)
+            fields = ["file", "name", "x", "y", "z", "aRadius", "bRadius", "cRadius", "theta_x", "theta_y", "theta_z", "isTrash"]
+            writer = csv.DictWriter(dst, fieldnames=fields)
+            writer.writeheader()
+            for row in reader:
+                radius = row.get("bRadius") or row.get("majorRadius") or row.get("minorRadius") or "10"
+                name = row.get("name", "")
+                writer.writerow({
+                    "file": row.get("file", "t000.tif"),
+                    "name": name,
+                    "x": row.get("x", ""),
+                    "y": row.get("y", ""),
+                    "z": row.get("z", ""),
+                    "aRadius": row.get("majorRadius") or radius,
+                    "bRadius": radius,
+                    "cRadius": row.get("minorRadius") or radius,
+                    "theta_x": row.get("theta_x", "0"),
+                    "theta_y": row.get("theta_y", "0"),
+                    "theta_z": row.get("theta_z", "0"),
+                    "isTrash": "1" if name.startswith("trash") else "0",
+                })
+        run = d.Run(
+            "original_baseline_n2v2_noncelllumen_initbright1_oldinit_trashmaxelong125_newcode_restart_v008",
+            "original_n2v2_initbright1_oldinit_trashmaxelong125_newcode_restart_000_200_gt_to_194_v008",
+            0,
+            LAST_RUN_FRAME,
+            config,
+            initial,
+            d.CONT_THREADS,
+        )
+        d.append_log("Starting v008 restart after interrupted v007", [
+            "restart reason: v007 passed frame 0 but was interrupted during frame 1, so restart from frame 0 in a fresh namespace",
+            "process prune: stopped active v006 watcher/CellUniverse and stale gamma canary workers before launch",
+            "initial normalization: old-init rows converted to current `aRadius,bRadius,cRadius,isTrash` schema; `trash_1` and `trash_2` retained",
+            "user-known fix: `cell.trashPcaShapeMaxElongation=1.25`",
+            "overrides: `cell.initialBrightness=1.0`, `cell.maxBrightness=1.0`, `cell.trashPcaShapeMaxElongation=1.25`",
+            "gamma caution: N2V2 contrast gamma held at `1.45`; raw light gamma held at `1.0`",
+            f"parent config: `{parent}`",
+            f"config: `{config}`",
+            f"initial csv: `{initial}`",
+        ])
+        run.launch()
+        continue_original_from(run, config)
+
     def start_gamma_resume_frame4(stop_old=False):
         d.ensure_dirs()
         d.generate_gt(force=True)
@@ -553,6 +813,8 @@ def patch_driver(d):
     d.start_brightness1_trash_elong125 = start_brightness1_trash_elong125
     d.start_brightness1_oldinit_trash_elong125 = start_brightness1_oldinit_trash_elong125
     d.start_brightness1_oldinit_trash_elong125_v006 = start_brightness1_oldinit_trash_elong125_v006
+    d.start_brightness1_oldinit_trash_elong125_v007_newcode = start_brightness1_oldinit_trash_elong125_v007_newcode
+    d.start_brightness1_oldinit_trash_elong125_v008_newcode_restart = start_brightness1_oldinit_trash_elong125_v008_newcode_restart
     d.start_gamma_resume_frame4 = start_gamma_resume_frame4
     d.start_original = start_original
     d.start_continuous = original_start_continuous
@@ -576,6 +838,10 @@ def main():
     p_oldinit_trash_elong.add_argument("--stop-old", action="store_true")
     p_oldinit_trash_elong_v006 = sub.add_parser("start-brightness1-oldinit-trash-elong125-v006")
     p_oldinit_trash_elong_v006.add_argument("--stop-old", action="store_true")
+    p_oldinit_trash_elong_v007 = sub.add_parser("start-brightness1-oldinit-trash-elong125-v007-newcode")
+    p_oldinit_trash_elong_v007.add_argument("--stop-old", action="store_true")
+    p_oldinit_trash_elong_v008 = sub.add_parser("start-brightness1-oldinit-trash-elong125-v008-newcode-restart")
+    p_oldinit_trash_elong_v008.add_argument("--stop-old", action="store_true")
     p_gamma.add_argument("--stop-old", action="store_true")
     sub.add_parser("status")
     args = parser.parse_args()
@@ -601,6 +867,10 @@ def main():
         d.start_brightness1_oldinit_trash_elong125(stop_old=args.stop_old)
     elif args.cmd == "start-brightness1-oldinit-trash-elong125-v006":
         d.start_brightness1_oldinit_trash_elong125_v006(stop_old=args.stop_old)
+    elif args.cmd == "start-brightness1-oldinit-trash-elong125-v007-newcode":
+        d.start_brightness1_oldinit_trash_elong125_v007_newcode(stop_old=args.stop_old)
+    elif args.cmd == "start-brightness1-oldinit-trash-elong125-v008-newcode-restart":
+        d.start_brightness1_oldinit_trash_elong125_v008_newcode_restart(stop_old=args.stop_old)
     elif args.cmd == "status":
         d.print_status()
 

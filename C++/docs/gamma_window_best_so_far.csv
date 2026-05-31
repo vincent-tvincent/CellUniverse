@@ -1,8 +1,4 @@
 time,batch,best_gamma_so_far,best_run_so_far,classification,frames_scored,clean_prefix_frames,last_frame,complete_window,note
-2026-05-31T02:52:18-0700,000_024,1.47,000_024__gamma_1p47,stopped_incomplete,2,2,1,0,
-2026-05-31T02:52:18-0700,025_049,1.45,025_049__gamma_1p45,stopped_incomplete,3,3,27,0,
-2026-05-31T02:52:18-0700,050_074,1.45,050_074__gamma_1p45,stopped_incomplete,2,2,51,0,
-2026-05-31T02:52:18-0700,075_099,1.45,075_099__gamma_1p45,stopped_incomplete,1,1,75,0,
-2026-05-31T02:52:18-0700,100_124,1.40,100_124__gamma_1p40__manual2_lower_late_no_valley,running_no_scored_output,0,0,,0,
-2026-05-31T02:52:18-0700,125_149,1.40,125_149__gamma_1p40__manual2_lower_late_no_valley,running_no_scored_output,0,0,,0,
-2026-05-31T02:52:18-0700,150_174,1.40,150_174__gamma_1p40__manual2_lower_late_no_valley,running_no_scored_output,0,0,,0,
+2026-05-31T03:05:56-0700,000_024,1.45,000_024__gamma_1p45__r6_slurm20_canary_original_gamma_1780221813,stopped_incomplete,1,1,0,0,
+2026-05-31T03:05:56-0700,075_099,1.45,075_099__gamma_1p45__r6_recompiled_mid_canary_1780221375,no_scored_output,0,0,,0,
+2026-05-31T03:05:56-0700,125_149,1.40,125_149__gamma_1p40__r6_recompiled_late_lower_no_valley_canary_1780221375,no_scored_output,0,0,,0,

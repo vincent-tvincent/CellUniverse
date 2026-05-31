@@ -21,15 +21,15 @@ from pathlib import Path
 import yaml
 
 REPO = Path('/home/puv/celluniverse/CellUniverse/C++')
-ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_oldparams_interleaved_r5_brightness1_trash125')
+ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_recompiled_r6_20260531_025423')
 GTFILLED_INITIAL_125_149 = ROOT / 'initials/initial_125_149_gtfilled_from_gt_centers.csv'
 DRIVER_PATH = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/continuous_gt_watch_r26/continuous_gt_watch_r26.py')
 PARENT_CONFIG = REPO / 'config/config.yaml'
 BINARY = REPO / 'build/celluniverse'
 INPUT_PATTERN = '/extra/wayne2/src/CellUniverse/celltrackingchallenge.net/Fluo-N3DH-CE-0train/Fluo-N3DH-CE/01/t%03d.tif'
 CPUSET = '0-99'
-THREADS = 16
-MAX_WORKERS = 6
+THREADS = 20
+MAX_WORKERS = 3
 DISK_LIMIT_BYTES = 20 * 1024**3
 REFERENCE_RUNS = {
     'ref_0': Path('/home/puv/output_fluo/output_fluo_0-239_20260525_022357'),

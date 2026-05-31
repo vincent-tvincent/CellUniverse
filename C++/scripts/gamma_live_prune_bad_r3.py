@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 REPO = Path('/home/puv/celluniverse/CellUniverse/C++')
-ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_oldparams_interleaved_r5_brightness1_trash125')
+ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_recompiled_r6_20260531_025423')
 UPDATER_PATH = REPO / 'scripts/gamma_update_known_results_r3.py'
 DRIVER_PATH = REPO / 'scripts/gamma_25frame_tuning_oldparams_interleaved_r3.py'
 GT_DRIVER_PATH = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/continuous_gt_watch_r26/continuous_gt_watch_r26.py')

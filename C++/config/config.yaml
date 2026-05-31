@@ -46,7 +46,6 @@ cell:
 
   initialRadiusScale: 1.0
   initialBrightness: 1.0
-  initialBrightness: 1.0
   backgroundColor: 0.02
 
   minBrightness: 0.001

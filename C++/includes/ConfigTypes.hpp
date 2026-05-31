@@ -788,6 +788,16 @@ public:
     float max_perturb_drift_xy = 0.0f;
     float max_perturb_drift_z = 0.0f;
 
+    // Shared snap-position guard used by random local search and by the
+    // post-loop PCA position update. The effective limit is:
+    // max(min_drift, min(max_drift, snapMaxRadius * radius_fraction)).
+    // Set max_drift <= 0 to disable this guard.
+    float snap_position_guard_min_drift = 10.0f;
+    float snap_position_guard_max_drift = 14.0f;
+    float snap_position_guard_radius_fraction = 0.55f;
+    float snap_position_guard_relaxed_max_drift = 20.0f;
+    float snap_position_guard_relaxed_radius_fraction = 0.85f;
+
     // Birth-relative growth budget (anti-bloat). A cell's radii are capped
     // at `birthRadii × birth_growth_cap_factor` per axis, BUT only when the
     // cell also shows shape elongation >= birth_growth_cap_elong_threshold.
@@ -1001,6 +1011,11 @@ public:
         if (node["position_prior_threshold"]) position_prior_threshold = node["position_prior_threshold"].as<float>();
         if (node["max_perturb_drift_xy"]) max_perturb_drift_xy = node["max_perturb_drift_xy"].as<float>();
         if (node["max_perturb_drift_z"]) max_perturb_drift_z = node["max_perturb_drift_z"].as<float>();
+        if (node["snap_position_guard_min_drift"]) snap_position_guard_min_drift = node["snap_position_guard_min_drift"].as<float>();
+        if (node["snap_position_guard_max_drift"]) snap_position_guard_max_drift = node["snap_position_guard_max_drift"].as<float>();
+        if (node["snap_position_guard_radius_fraction"]) snap_position_guard_radius_fraction = node["snap_position_guard_radius_fraction"].as<float>();
+        if (node["snap_position_guard_relaxed_max_drift"]) snap_position_guard_relaxed_max_drift = node["snap_position_guard_relaxed_max_drift"].as<float>();
+        if (node["snap_position_guard_relaxed_radius_fraction"]) snap_position_guard_relaxed_radius_fraction = node["snap_position_guard_relaxed_radius_fraction"].as<float>();
         if (node["birth_growth_cap_factor"]) birth_growth_cap_factor = node["birth_growth_cap_factor"].as<float>();
         if (node["birth_growth_cap_elong_threshold"]) birth_growth_cap_elong_threshold = node["birth_growth_cap_elong_threshold"].as<float>();
         if (node["expected_daughter_pre_pass_iterations"]) expected_daughter_pre_pass_iterations = node["expected_daughter_pre_pass_iterations"].as<int>();
@@ -1075,6 +1090,11 @@ public:
         std::cout << "split_bridge_cost_rescue_max_gap_density: " << split_bridge_cost_rescue_max_gap_density << '\n';
         std::cout << "split_bridge_cost_rescue_require_two_sided_valley: " << split_bridge_cost_rescue_require_two_sided_valley << '\n';
         std::cout << "overlap_penalty_weight: " << overlap_penalty_weight << '\n';
+        std::cout << "snap_position_guard_min_drift: " << snap_position_guard_min_drift << '\n';
+        std::cout << "snap_position_guard_max_drift: " << snap_position_guard_max_drift << '\n';
+        std::cout << "snap_position_guard_radius_fraction: " << snap_position_guard_radius_fraction << '\n';
+        std::cout << "snap_position_guard_relaxed_max_drift: " << snap_position_guard_relaxed_max_drift << '\n';
+        std::cout << "snap_position_guard_relaxed_radius_fraction: " << snap_position_guard_relaxed_radius_fraction << '\n';
         std::cout << "expected_daughter_force_split_enabled: " << expected_daughter_force_split_enabled << '\n';
         std::cout << "expected_daughter_force_min_separation_parent_fraction: " << expected_daughter_force_min_separation_parent_fraction << '\n';
         std::cout << "expected_daughter_force_min_kept_pixels: " << expected_daughter_force_min_kept_pixels << '\n';
@@ -1319,6 +1339,7 @@ public:
     bool trashPcaShapeFitEnabled{true};
     bool trashPcaShapeUpdatePosition{false};
     float trashPcaShapeMaxOriginalRadiusFactor{2.0f};
+    float trashPcaShapeMaxElongation{0.0f};
     bool trashRemovalEnabled{false};
     float trashRemovalBrightnessThreshold{0.05f};
     // Reference radius for proportional perturbation sigma scaling.
@@ -1424,6 +1445,7 @@ public:
         if (node["trashPcaShapeFitEnabled"]) trashPcaShapeFitEnabled = node["trashPcaShapeFitEnabled"].as<bool>();
         if (node["trashPcaShapeUpdatePosition"]) trashPcaShapeUpdatePosition = node["trashPcaShapeUpdatePosition"].as<bool>();
         if (node["trashPcaShapeMaxOriginalRadiusFactor"]) trashPcaShapeMaxOriginalRadiusFactor = node["trashPcaShapeMaxOriginalRadiusFactor"].as<float>();
+        if (node["trashPcaShapeMaxElongation"]) trashPcaShapeMaxElongation = node["trashPcaShapeMaxElongation"].as<float>();
         if (node["trashRemovalEnabled"]) trashRemovalEnabled = node["trashRemovalEnabled"].as<bool>();
         if (node["trashRemovalBrightnessThreshold"]) trashRemovalBrightnessThreshold = node["trashRemovalBrightnessThreshold"].as<float>();
         if (node["perturbSigmaReferenceRadius"]) perturbSigmaReferenceRadius = node["perturbSigmaReferenceRadius"].as<float>();

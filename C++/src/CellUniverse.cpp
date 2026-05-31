@@ -4819,6 +4819,31 @@ void CellUniverse::optimize(int frameIndex)
         }
     };
 
+    const float snapPositionGuardMinDrift =
+        std::max(0.0f, config.prob.snap_position_guard_min_drift);
+    const float snapPositionGuardMaxDrift =
+        config.prob.snap_position_guard_max_drift;
+    const float snapPositionGuardRadiusFraction =
+        std::max(0.0f, config.prob.snap_position_guard_radius_fraction);
+    const float snapPositionGuardRelaxedMaxDrift =
+        config.prob.snap_position_guard_relaxed_max_drift;
+    const float snapPositionGuardRelaxedRadiusFraction =
+        std::max(0.0f, config.prob.snap_position_guard_relaxed_radius_fraction);
+    auto snapPositionGuardLimit = [&](float snapMaxR, bool relaxed) -> float {
+        const float maxDrift =
+            (relaxed && snapPositionGuardRelaxedMaxDrift > 0.0f)
+                ? snapPositionGuardRelaxedMaxDrift
+                : snapPositionGuardMaxDrift;
+        if (maxDrift <= 0.0f) {
+            return -1.0f;
+        }
+        const float radiusFraction =
+            relaxed ? snapPositionGuardRelaxedRadiusFraction
+                    : snapPositionGuardRadiusFraction;
+        return std::max(snapPositionGuardMinDrift,
+                        std::min(maxDrift, snapMaxR * radiusFraction));
+    };
+
     auto runPcaShapeFit = [&]() {
     // ---- Per-cell iterative PCA shape fit ----
     // Runs after the current-frame perturb/split loop so the final frame
@@ -4884,6 +4909,8 @@ void CellUniverse::optimize(int frameIndex)
         const float trashMaxOriginalRadiusFactor = std::max(
             1.0f,
             config.cell ? config.cell->trashPcaShapeMaxOriginalRadiusFactor : 2.0f);
+        const float trashMaxElongation =
+            config.cell ? config.cell->trashPcaShapeMaxElongation : 0.0f;
         if (trashPcaShapeFitEnabled) {
             for (const auto &cell : frame.cells) {
                 if (!cell.isTrash()) continue;
@@ -4979,13 +5006,13 @@ void CellUniverse::optimize(int frameIndex)
                 const bool pcaPositionGuardRelaxed =
                     pcaPositionGuardRelaxedCells.count(sname) > 0;
                 const float normalCumulativeMoveLimit =
-                    std::max(10.0f, std::min(14.0f, prePcaMaxR * 0.55f));
+                    snapPositionGuardLimit(prePcaMaxR, false);
                 const float cumulativeMoveLimit =
                     pcaPositionGuardRelaxed
-                        ? std::max(10.0f,
-                                   std::min(20.0f, prePcaMaxR * 0.85f))
+                        ? snapPositionGuardLimit(prePcaMaxR, true)
                         : normalCumulativeMoveLimit;
-                if (cumulativeMove > cumulativeMoveLimit) {
+                if (cumulativeMoveLimit > 0.0f &&
+                    cumulativeMove > cumulativeMoveLimit) {
                     frame.cells[ci].setPosition(prePcaPos.x, prePcaPos.y, prePcaPos.z);
                     shapeLogs[ci] << "  [PCA Shape Position Guard] cell=" << sname
                                   << " cumulativeMove=" << cumulativeMove
@@ -5030,6 +5057,26 @@ void CellUniverse::optimize(int frameIndex)
                                       << " pre=(" << preA << "," << preB << "," << preC << ")"
                                       << " post=(" << newA << "," << newB << "," << newC << ")"
                                       << std::endl;
+                    }
+                }
+                if (trashMaxElongation > 1.0f) {
+                    const float preA = frame.cells[ci].getARadius();
+                    const float preB = frame.cells[ci].getBRadius();
+                    const float preC = frame.cells[ci].getCRadius();
+                    const float minR = std::min({preA, preB, preC});
+                    if (minR > 1e-3f) {
+                        const float maxAllowed = minR * trashMaxElongation;
+                        const float newA = std::min(preA, maxAllowed);
+                        const float newB = std::min(preB, maxAllowed);
+                        const float newC = std::min(preC, maxAllowed);
+                        if (newA != preA || newB != preB || newC != preC) {
+                            frame.cells[ci].setRadii(newA, newB, newC);
+                            shapeLogs[ci] << "  [Trash PCA Elongation Cap] cell=" << sname
+                                          << " maxElong=" << trashMaxElongation
+                                          << " pre=(" << preA << "," << preB << "," << preC << ")"
+                                          << " post=(" << newA << "," << newB << "," << newC << ")"
+                                          << std::endl;
+                        }
                     }
                 }
             }
@@ -6693,7 +6740,7 @@ void CellUniverse::optimize(int frameIndex)
                             const float driftFromSnapshot =
                                 static_cast<float>(cv::norm(candidatePos - snap.position));
                             const float driftLimit =
-                                std::max(10.0f, std::min(14.0f, snapMaxR * 0.55f));
+                                snapPositionGuardLimit(snapMaxR, false);
                             bool hasNearbyLumenEvidence = false;
                             if (lumenCenterCandidatesForFrame != nullptr) {
                                 auto centerIt =
@@ -6708,7 +6755,8 @@ void CellUniverse::optimize(int frameIndex)
                                         centerCandidate.signal >= 100.0f;
                                 }
                             }
-                            if (driftFromSnapshot > driftLimit &&
+                            if (driftLimit > 0.0f &&
+                                driftFromSnapshot > driftLimit &&
                                 !hasNearbyLumenEvidence) {
                                 perturbAccept = false;
                                 perturbNote << ";large_random_drift_rejected=1"

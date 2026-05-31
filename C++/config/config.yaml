@@ -45,7 +45,7 @@ cell:
   minAnyRadius: 5
 
   initialRadiusScale: 1.0
-  initialBrightness: 0.5
+  initialBrightness: 1.0
   backgroundColor: 0.0
 
   minBrightness: 0.001
@@ -94,6 +94,9 @@ cell:
   trashPcaShapeFitEnabled: true
   trashPcaShapeUpdatePosition: false
   trashPcaShapeMaxOriginalRadiusFactor: 2.0
+  # Clamp trash PCA radii so max(a,b,c) / min(a,b,c) stays below this.
+  # Set <= 1 to disable. Trash should remain compact and non-mitotic.
+  trashPcaShapeMaxElongation: 1.25
   # Post-optimization cleanup: trash cells dimmer than this threshold are
   # removed after the current frame is fully optimized. Their brightness is
   # averaged into the remaining background before synth export and before the
@@ -559,6 +562,14 @@ prob:
 
   position_prior_weight: 75.0
   position_prior_threshold: 20.0
+  # Shared center-motion guard for random perturb and final PCA position
+  # updates. Effective limit = max(min, min(max, snapRadius * fraction)).
+  # Raise max above the old hard-coded 14 px so fast early-frame motion can pass.
+  snap_position_guard_min_drift: 10.0
+  snap_position_guard_max_drift: 25.0
+  snap_position_guard_radius_fraction: 0.55
+  snap_position_guard_relaxed_max_drift: 30.0
+  snap_position_guard_relaxed_radius_fraction: 0.85
   overlap_penalty_weight: 75000.0
 
   expected_daughter_pre_pass_iterations: 1

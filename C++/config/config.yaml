@@ -46,10 +46,11 @@ cell:
 
   initialRadiusScale: 1.0
   initialBrightness: 1.0
+  initialBrightness: 1.0
   backgroundColor: 0.02
 
   minBrightness: 0.001
-  maxBrightness: 0.98
+  maxBrightness: 1.0
 
   brightnessProbabilityStep: 0.02
   brightnessProbabilityTrust: 0.3

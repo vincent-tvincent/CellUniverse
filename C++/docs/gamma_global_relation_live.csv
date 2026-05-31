@@ -1,0 +1,8 @@
+batch,best_gamma_live,classification,complete_window,clean_prefix_frames,last_frame,first_bad_frame,gt_mean_count,pred_mean_count,mean_dist,max_dist,run
+000_024,1.76,true_fail_or_needs_tuning,0,12,12,12,8.04,3.16,22.245485630494045,58.62161141592749,000_024__gamma_1p762_splitdelay_prob_strong
+025_049,1.47,recovered_after_possible_early_split,1,25,49,,20.64,20.72,9.223827259217156,43.3282787218694,025_049__gamma_1p47
+050_074,1.38,true_fail_or_needs_tuning,0,11,61,61,40.08,15.16,8.786342403818667,41.62454876932603,050_074__gamma_1p38
+075_099,1.43,true_fail_or_needs_tuning,0,14,89,89,71.52,36.16,6.704917047686333,33.06701184624946,075_099__gamma_1p43
+100_124,1.40,true_fail_or_needs_tuning,0,2,102,102,110.56,11.4,6.218156338742349,24.75059245755543,100_124__gamma_1p40
+125_149,1.35,no_scored_output,0,0,,,181.16,0.0,999.0,0.0,125_149__gamma_1p35_splitgate_relax_fastsplit16t
+150_174,1.48,stopped_clean_so_far,0,2,151,,,,4.28720904682402,13.859039504958485,150_174__gamma_1p48_fastsplit16t_restore

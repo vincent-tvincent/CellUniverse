@@ -1345,6 +1345,7 @@ public:
     bool trashPcaShapeFitEnabled{true};
     bool trashPcaShapeUpdatePosition{false};
     float trashPcaShapeMaxOriginalRadiusFactor{2.0f};
+    // Optional trash-only elongation clamp. Values <= 0 disable it.
     float trashPcaShapeMaxElongation{0.0f};
     bool trashRemovalEnabled{false};
     float trashRemovalBrightnessThreshold{0.05f};

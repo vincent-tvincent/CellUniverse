@@ -5113,24 +5113,25 @@ void CellUniverse::optimize(int frameIndex)
                                       << std::endl;
                     }
                 }
-                if (trashMaxElongation > 1.0f) {
+                const float maxTrashElong = config.cell
+                    ? std::max(0.0f, config.cell->trashPcaShapeMaxElongation)
+                    : 0.0f;
+                if (maxTrashElong > 0.0f) {
                     const float preA = frame.cells[ci].getARadius();
                     const float preB = frame.cells[ci].getBRadius();
                     const float preC = frame.cells[ci].getCRadius();
-                    const float minR = std::min({preA, preB, preC});
-                    if (minR > 1e-3f) {
-                        const float maxAllowed = minR * trashMaxElongation;
-                        const float newA = std::min(preA, maxAllowed);
-                        const float newB = std::min(preB, maxAllowed);
-                        const float newC = std::min(preC, maxAllowed);
-                        if (newA != preA || newB != preB || newC != preC) {
-                            frame.cells[ci].setRadii(newA, newB, newC);
-                            shapeLogs[ci] << "  [Trash PCA Elongation Cap] cell=" << sname
-                                          << " maxElong=" << trashMaxElongation
-                                          << " pre=(" << preA << "," << preB << "," << preC << ")"
-                                          << " post=(" << newA << "," << newB << "," << newC << ")"
-                                          << std::endl;
-                        }
+                    const float shortR = std::max(1e-3f, std::min({preA, preB, preC}));
+                    const float maxAllowed = shortR * maxTrashElong;
+                    const float newA = std::min(preA, maxAllowed);
+                    const float newB = std::min(preB, maxAllowed);
+                    const float newC = std::min(preC, maxAllowed);
+                    if (newA != preA || newB != preB || newC != preC) {
+                        frame.cells[ci].setRadii(newA, newB, newC);
+                        shapeLogs[ci] << "  [Trash PCA Elongation Cap] cell=" << sname
+                                      << " maxElong=" << maxTrashElong
+                                      << " pre=(" << preA << "," << preB << "," << preC << ")"
+                                      << " post=(" << newA << "," << newB << "," << newC << ")"
+                                      << std::endl;
                     }
                 }
             }

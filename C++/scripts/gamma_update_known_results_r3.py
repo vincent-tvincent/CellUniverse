@@ -10,7 +10,7 @@ import re
 import time
 from pathlib import Path
 
-ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_oldparams_interleaved_r3')
+ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_oldparams_interleaved_r5_brightness1_trash125')
 REPO = Path('/home/puv/celluniverse/CellUniverse/C++')
 DRIVER_PATH = REPO / 'scripts/gamma_25frame_tuning_oldparams_interleaved_r3.py'
 GT_DRIVER_PATH = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/continuous_gt_watch_r26/continuous_gt_watch_r26.py')
@@ -18,6 +18,19 @@ GT_DRIVER_PATH = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/continuous_
 KNOWN = ROOT / 'metrics/gamma_known_results.csv'
 BEST = REPO / 'docs/gamma_window_best_so_far.csv'
 LOGBOOK = ROOT / 'docs/gamma_tuning_logbook.md'
+GTFILLED_INITIAL_125_149 = ROOT / 'initials/initial_125_149_gtfilled_from_gt_centers.csv'
+INTERRUPT_MARKERS = [
+    'INTERRUPTED_FOR_PRIORITY',
+    'INTERRUPTED_FOR_16T_REALLOC',
+    'INTERRUPTED_FOR_FASTSPLIT_BRANCH',
+    'INTERRUPTED_FOR_TARGETED_SPLITGATE_BRANCH',
+    'INTERRUPTED_FOR_INTERMEDIATE_GAMMA_BRANCH',
+    'INTERRUPTED_FOR_LATE_RELAUNCH',
+    'INTERRUPTED_FOR_WINDOW_REBALANCE',
+    'INTERRUPTED_FOR_EARLY_REGRESSION_BRANCH',
+    'INTERRUPTED_FOR_RESUME126_PROBE',
+    'PRUNED_GT_FAILURE',
+]
 
 
 def now():
@@ -83,24 +96,51 @@ def distance(a, b):
 
 
 def greedy_match(gt_rows, pred_rows, limit):
-    options = []
-    for gt_i, gt_row in enumerate(gt_rows):
-        for pred_i, pred_row in enumerate(pred_rows):
-            dist = distance(gt_row, pred_row)
-            if dist <= limit:
-                options.append((dist, gt_i, pred_i))
-    options.sort()
-    used_gt = set()
-    used_pred = set()
-    distances = []
-    for dist, gt_i, pred_i in options:
-        if gt_i in used_gt or pred_i in used_pred:
-            continue
-        used_gt.add(gt_i)
-        used_pred.add(pred_i)
-        distances.append(dist)
-    return len(used_gt), len(gt_rows) - len(used_gt), len(pred_rows) - len(used_pred), distances
-
+    if not gt_rows:
+        return 0, 0, len(pred_rows), []
+    if not pred_rows:
+        return 0, len(gt_rows), 0, []
+    try:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+        large = 1.0e9
+        cost = np.full((len(gt_rows), len(pred_rows)), large, dtype=float)
+        dist_matrix = np.zeros((len(gt_rows), len(pred_rows)), dtype=float)
+        for gt_i, gt_row in enumerate(gt_rows):
+            for pred_i, pred_row in enumerate(pred_rows):
+                dist_value = distance(gt_row, pred_row)
+                dist_matrix[gt_i, pred_i] = dist_value
+                if dist_value <= limit:
+                    cost[gt_i, pred_i] = dist_value
+        row_ind, col_ind = linear_sum_assignment(cost)
+        used_gt = set()
+        used_pred = set()
+        distances = []
+        for gt_i, pred_i in zip(row_ind, col_ind):
+            dist_value = float(dist_matrix[gt_i, pred_i])
+            if dist_value <= limit:
+                used_gt.add(int(gt_i))
+                used_pred.add(int(pred_i))
+                distances.append(dist_value)
+        return len(used_gt), len(gt_rows) - len(used_gt), len(pred_rows) - len(used_pred), distances
+    except Exception:
+        options = []
+        for gt_i, gt_row in enumerate(gt_rows):
+            for pred_i, pred_row in enumerate(pred_rows):
+                dist_value = distance(gt_row, pred_row)
+                if dist_value <= limit:
+                    options.append((dist_value, gt_i, pred_i))
+        options.sort()
+        used_gt = set()
+        used_pred = set()
+        distances = []
+        for dist_value, gt_i, pred_i in options:
+            if gt_i in used_gt or pred_i in used_pred:
+                continue
+            used_gt.add(gt_i)
+            used_pred.add(pred_i)
+            distances.append(dist_value)
+        return len(used_gt), len(gt_rows) - len(used_gt), len(pred_rows) - len(used_pred), distances
 
 def pid_alive(pid):
     if not pid:
@@ -110,6 +150,49 @@ def pid_alive(pid):
         return True
     except OSError:
         return False
+
+
+def initial_contract_ok(batch_name, run_dir):
+    if batch_name != '125_149':
+        return True
+    meta_path = Path(run_dir) / 'run_meta.json'
+    initial_path = None
+    if meta_path.exists():
+        try:
+            initial_path = json.loads(meta_path.read_text()).get('initial')
+        except Exception:
+            initial_path = None
+    if initial_path and Path(initial_path) == GTFILLED_INITIAL_125_149:
+        return True
+    copied = Path(run_dir) / 'initial_used.csv'
+    try:
+        return copied.exists() and copied.read_bytes() == GTFILLED_INITIAL_125_149.read_bytes()
+    except Exception:
+        return False
+
+
+def interrupted_or_pruned(run_dir):
+    run_dir = Path(run_dir)
+    return any((run_dir / marker).exists() for marker in INTERRUPT_MARKERS)
+
+
+def preprocessing_contract_ok(run_dir):
+    log_path = Path(run_dir) / 'debug_log.txt'
+    if not log_path.exists():
+        return True
+    try:
+        text = log_path.read_text(errors='ignore')
+    except Exception:
+        return False
+    for line in text.splitlines():
+        if '[N2V2] scale=' not in line:
+            continue
+        try:
+            scale = float(line.split('scale=', 1)[1].split()[0])
+        except Exception:
+            return False
+        return scale >= 10.0
+    return True
 
 
 def classify(frames, state):
@@ -168,13 +251,16 @@ def scan_run(gt, batch, gamma, run_dir, state, pid):
         if frame['is_bad']:
             break
         clean_frames += 1
+    classification = classify(frames, state)
+    if state != 'running' and frames and int(frames[-1]['frame']) < int(batch['score_end']):
+        classification = 'stopped_incomplete'
     return {
         'time': now(),
         'batch': batch['name'],
         'gamma': f'{float(gamma):.2f}',
         'run': run_dir.name,
         'state': state,
-        'classification': classify(frames, state),
+        'classification': classification,
         'frames_scored': len(frames),
         'clean_prefix_frames': clean_frames,
         'last_frame': last.get('frame', ''),
@@ -197,6 +283,11 @@ def note_for(batch_name, gamma, run_name, first_bad, last):
     if run_name == '025_049__gamma_1p45_resume28_relaxed' and last and not first_bad:
         return 'resume from frame28 remains clean after frame35 split burst; current local best signal for 25-49'
     if batch_name == '000_024' and gamma == 1.40 and last and not first_bad:
+        last_frame = int(last.get('frame', -1)) if last.get('frame', '') != '' else -1
+        if last_frame >= 12:
+            return 'boundary probe: survived through frame12; must still complete 0-24'
+        if last_frame >= 11:
+            return 'boundary probe: survived through frame11; must still clear frame12 and complete 0-24'
         return 'boundary probe: fixes frame4 missed split so far; must still survive frame11 over-split risk'
     if first_bad and first_bad.get('missing'):
         return 'missed GT cell/split before completing window'
@@ -221,6 +312,7 @@ def best_rows(rows):
                 'true_fail_or_needs_tuning': 3,
                 'running_no_scored_output': 4,
                 'no_scored_output': 5,
+                'stopped_incomplete': 6,
             }.get(row['classification'], 9)
             bad_frame = int(row['first_bad_frame']) if row['first_bad_frame'] != '' else 999
             max_dist = float(row['max_dist_last'] or 999)
@@ -296,7 +388,25 @@ def main():
             if not match:
                 continue
             gamma = float(f"{match.group(1)}.{match.group(2)}")
+            if interrupted_or_pruned(run_dir):
+                continue
+            if not preprocessing_contract_ok(run_dir):
+                continue
+            if not initial_contract_ok(batch['name'], run_dir):
+                continue
             active = active_by_run.get(run_dir.name, {})
+            if not active:
+                meta_path = run_dir / 'run_meta.json'
+                if meta_path.exists():
+                    try:
+                        meta = json.loads(meta_path.read_text())
+                        active = {
+                            'pid': meta.get('pid'),
+                            'run_dir': meta.get('run_dir', str(run_dir)),
+                            'task_id': meta.get('task_id', run_dir.name),
+                        }
+                    except Exception:
+                        active = {}
             pid = active.get('pid')
             state = 'running' if pid_alive(pid) else ('interrupted_or_done' if (run_dir / 'cells.csv').exists() else 'no_cells_output')
             rows.append(scan_run(gt, batch, gamma, run_dir, state, pid))

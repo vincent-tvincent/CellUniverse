@@ -21,28 +21,29 @@ from pathlib import Path
 import yaml
 
 REPO = Path('/home/puv/celluniverse/CellUniverse/C++')
-ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_oldparams_interleaved_r3')
+ROOT = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/gamma_25frame_original_n2v2_oldparams_interleaved_r5_brightness1_trash125')
+GTFILLED_INITIAL_125_149 = ROOT / 'initials/initial_125_149_gtfilled_from_gt_centers.csv'
 DRIVER_PATH = Path('/home/puv/output_fluo/tuning_fluo_gt_20260529/continuous_gt_watch_r26/continuous_gt_watch_r26.py')
 PARENT_CONFIG = REPO / 'config/config.yaml'
 BINARY = REPO / 'build/celluniverse'
 INPUT_PATTERN = '/extra/wayne2/src/CellUniverse/celltrackingchallenge.net/Fluo-N3DH-CE-0train/Fluo-N3DH-CE/01/t%03d.tif'
 CPUSET = '0-99'
-THREADS = 24
-MAX_WORKERS = 4
+THREADS = 16
+MAX_WORKERS = 6
 DISK_LIMIT_BYTES = 20 * 1024**3
 REFERENCE_RUNS = {
     'ref_0': Path('/home/puv/output_fluo/output_fluo_0-239_20260525_022357'),
     'ref_42': Path('/home/puv/output_fluo/output_fluo_42-239_resume_from_022357_20260525_064217'),
     'ref_102': Path('/home/puv/output_fluo/output_fluo_102-239_resume_from_t101_latest_20260526_074318'),
 }
-GAMMAS = [1.45, 1.75, 1.25, 2.1, 1.0]
+GAMMAS = [1.45, 1.46, 1.47, 1.48, 1.49, 1.50, 1.52, 1.43, 1.42, 1.40, 1.385, 1.38, 1.36, 1.35, 1.32, 1.30, 1.28, 1.25, 1.55, 1.60, 1.62, 1.65, 1.68, 1.75, 1.85, 2.10, 1.00]
 BATCHES = [
     {'name': '000_024', 'run_start': 0, 'run_end': 24, 'score_start': 0, 'score_end': 24, 'initial_kind': 'file', 'initial_source': str(REPO / 'config/embryo/initial_embryo_0.csv'), 'ref': 'ref_0'},
     {'name': '025_049', 'run_start': 25, 'run_end': 49, 'score_start': 25, 'score_end': 49, 'initial_kind': 'extract', 'initial_source': str(REFERENCE_RUNS['ref_0'] / 'cells.csv'), 'initial_frame': 25, 'ref': 'ref_0'},
     {'name': '050_074', 'run_start': 50, 'run_end': 74, 'score_start': 50, 'score_end': 74, 'initial_kind': 'extract', 'initial_source': str(REFERENCE_RUNS['ref_42'] / 'cells.csv'), 'initial_frame': 50, 'ref': 'ref_42'},
     {'name': '075_099', 'run_start': 75, 'run_end': 99, 'score_start': 75, 'score_end': 99, 'initial_kind': 'extract', 'initial_source': str(REFERENCE_RUNS['ref_42'] / 'cells.csv'), 'initial_frame': 75, 'ref': 'ref_42'},
     {'name': '100_124', 'run_start': 100, 'run_end': 124, 'score_start': 100, 'score_end': 124, 'initial_kind': 'extract', 'initial_source': str(REFERENCE_RUNS['ref_42'] / 'cells.csv'), 'initial_frame': 100, 'ref': 'ref_42'},
-    {'name': '125_149', 'run_start': 125, 'run_end': 149, 'score_start': 125, 'score_end': 149, 'initial_kind': 'file', 'initial_source': str(REPO / 'config/embryo/initial_embryo_125_from_f124_fusion.csv'), 'ref': 'ref_102'},
+    {'name': '125_149', 'run_start': 125, 'run_end': 149, 'score_start': 125, 'score_end': 149, 'initial_kind': 'file', 'initial_source': str(GTFILLED_INITIAL_125_149), 'ref': 'ref_102'},
     {'name': '150_174', 'run_start': 150, 'run_end': 174, 'score_start': 150, 'score_end': 174, 'initial_kind': 'file', 'initial_source': str(REPO / 'config/embryo/initial_embryo_150_from_f149_fusion.csv'), 'ref': 'ref_102'},
     # Deferred: created after the best 150..174 run finishes, by copying its frame 174 state to t175.
     {'name': '175_199_gt_to194', 'run_start': 175, 'run_end': 194, 'score_start': 175, 'score_end': 194, 'initial_kind': 'deferred_best_previous', 'depends_on': '150_174', 'source_frame': 174, 'target_frame': 175, 'ref': None},
@@ -148,6 +149,10 @@ def rewrite_frame_in_csv(src, source_frame, target_frame, out):
 
 
 def prepare_initial(batch):
+    if batch.get('name') == '125_149':
+        if not GTFILLED_INITIAL_125_149.exists():
+            raise RuntimeError(f'missing corrected 125_149 initial: {GTFILLED_INITIAL_125_149}')
+        return GTFILLED_INITIAL_125_149
     out = DIRS['initials'] / f"initial_{batch['name']}.csv"
     if out.exists():
         return out
@@ -169,6 +174,9 @@ def make_config(batch, gamma):
         'cell_lumen.enabled': False,
         'cell_lumen.fusionEnabled': False,
         'cell_lumen.fusionSplitPriorEnabled': False,
+        'cell.initialBrightness': 1.0,
+        'cell.maxBrightness': 1.0,
+        'cell.trashPcaShapeMaxOriginalRadiusFactor': 1.25,
         'simulation.preprocess_mode': 'n2v2',
         'simulation.n2v2_preprocess.enable_network': True,
         'simulation.n2v2_preprocess.contrast.gamma': float(gamma),
@@ -219,7 +227,7 @@ def launch_task(batch, gamma):
         f"batch: {batch['name']} score={batch['score_start']}..{batch['score_end']}\n"
         f"threads: {THREADS} cpuset: {CPUSET}\n==========================================\n"
     ).encode())
-    proc = subprocess.Popen(cmd, cwd=str(BINARY.parent), stdout=log, stderr=subprocess.STDOUT, env=env_for_threads(), start_new_session=True, close_fds=False)
+    proc = subprocess.Popen(cmd, cwd=str(BINARY.parent), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env_for_threads(), start_new_session=True, close_fds=True)
     meta = {'task_id': tid, 'batch': batch, 'gamma': gamma, 'pid': proc.pid, 'status': 'running', 'run_dir': str(run_dir), 'config': str(config), 'initial': str(initial), 'threads': THREADS, 'cpuset': CPUSET, 'launched_at': now()}
     write_json(run_dir / 'run_meta.json', meta)
     append_jsonl(DECISIONS, {'time': now(), 'event': 'run_launched', **meta})
@@ -269,21 +277,48 @@ def threshold(frame):
 
 
 def greedy_match(gt_rows, pred_rows, th):
-    opts = []
-    for gi, g in enumerate(gt_rows):
-        for pi, p in enumerate(pred_rows):
-            d = dist(g, p)
+    if not gt_rows:
+        return [], [], list(pred_rows)
+    if not pred_rows:
+        return [], list(gt_rows), []
+    try:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+        large = 1.0e9
+        cost = np.full((len(gt_rows), len(pred_rows)), large, dtype=float)
+        dist_matrix = np.zeros((len(gt_rows), len(pred_rows)), dtype=float)
+        for gi, g in enumerate(gt_rows):
+            for pi, p in enumerate(pred_rows):
+                d = dist(g, p)
+                dist_matrix[gi, pi] = d
+                if d <= th:
+                    cost[gi, pi] = d
+        row_ind, col_ind = linear_sum_assignment(cost)
+        matches = []
+        ug, up = set(), set()
+        for gi, pi in zip(row_ind, col_ind):
+            d = float(dist_matrix[gi, pi])
             if d <= th:
-                opts.append((d, gi, pi))
-    opts.sort()
-    ug, up, matches = set(), set(), []
-    for d, gi, pi in opts:
-        if gi in ug or pi in up: continue
-        ug.add(gi); up.add(pi); matches.append((gt_rows[gi], pred_rows[pi], d))
-    missing = [g for i,g in enumerate(gt_rows) if i not in ug]
-    extra = [p for i,p in enumerate(pred_rows) if i not in up]
-    return matches, missing, extra
-
+                ug.add(int(gi)); up.add(int(pi))
+                matches.append((gt_rows[int(gi)], pred_rows[int(pi)], d))
+        missing = [g for i, g in enumerate(gt_rows) if i not in ug]
+        extra = [p for i, p in enumerate(pred_rows) if i not in up]
+        return matches, missing, extra
+    except Exception:
+        opts = []
+        for gi, g in enumerate(gt_rows):
+            for pi, p in enumerate(pred_rows):
+                d = dist(g, p)
+                if d <= th:
+                    opts.append((d, gi, pi))
+        opts.sort()
+        ug, up, matches = set(), set(), []
+        for d, gi, pi in opts:
+            if gi in ug or pi in up: continue
+            ug.add(gi); up.add(pi); matches.append((gt_rows[gi], pred_rows[pi], d))
+        missing = [g for i,g in enumerate(gt_rows) if i not in ug]
+        extra = [p for i,p in enumerate(pred_rows) if i not in up]
+        return matches, missing, extra
 
 def births(pred, frame):
     if frame <= 0: return []
@@ -347,12 +382,43 @@ def append_metric(row):
     write_csv(METRICS, [row], fields)
 
 
+
+def run_contract_current(row):
+    run_dir = row.get('run_dir')
+    if not run_dir:
+        return True
+    run_path = Path(run_dir)
+    if row.get('batch') == '125_149':
+        meta_path = run_path / 'run_meta.json'
+        initial = None
+        if meta_path.exists():
+            try:
+                initial = json.loads(meta_path.read_text()).get('initial')
+            except Exception:
+                initial = None
+        if initial and Path(initial) != GTFILLED_INITIAL_125_149:
+            return False
+        if not initial:
+            try:
+                if not ((run_path / 'initial_used.csv').exists() and (run_path / 'initial_used.csv').read_bytes() == GTFILLED_INITIAL_125_149.read_bytes()):
+                    return False
+            except Exception:
+                return False
+    log_path = run_path / 'debug_log.txt'
+    if log_path.exists():
+        try:
+            for line in log_path.read_text(errors='ignore').splitlines():
+                if '[N2V2] scale=' in line:
+                    return float(line.split('scale=', 1)[1].split()[0]) >= 10.0
+        except Exception:
+            return False
+    return True
+
+
 def load_completed_ids():
     done = set()
-    if METRICS.exists():
-        with METRICS.open(newline='') as f:
-            for r in csv.DictReader(f):
-                done.add((r['batch'], float(r['gamma'])))
+    for r in read_metric_rows():
+        done.add((r['batch'], float(r['gamma'])))
     return done
 
 
@@ -404,7 +470,7 @@ def all_tasks(include_deferred=False):
 def read_metric_rows():
     if not METRICS.exists():
         return []
-    return list(csv.DictReader(METRICS.open(newline='')))
+    return [row for row in csv.DictReader(METRICS.open(newline='')) if run_contract_current(row)]
 
 
 def batch_completed(batch_name):

@@ -572,6 +572,8 @@ prob:
   snap_position_guard_radius_fraction: 1.5
   snap_position_guard_relaxed_max_drift: 65.0
   snap_position_guard_relaxed_radius_fraction: 2.0
+  snap_position_guard_crowding_enabled: true
+  snap_position_guard_crowding_fraction: 1.0
   overlap_penalty_weight: 75000.0
 
   expected_daughter_pre_pass_iterations: 1

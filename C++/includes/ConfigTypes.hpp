@@ -797,6 +797,8 @@ public:
     float snap_position_guard_radius_fraction = 0.55f;
     float snap_position_guard_relaxed_max_drift = 20.0f;
     float snap_position_guard_relaxed_radius_fraction = 0.85f;
+    bool snap_position_guard_crowding_enabled = false;
+    float snap_position_guard_crowding_fraction = 1.0f;
 
     // Birth-relative growth budget (anti-bloat). A cell's radii are capped
     // at `birthRadii × birth_growth_cap_factor` per axis, BUT only when the
@@ -1016,6 +1018,8 @@ public:
         if (node["snap_position_guard_radius_fraction"]) snap_position_guard_radius_fraction = node["snap_position_guard_radius_fraction"].as<float>();
         if (node["snap_position_guard_relaxed_max_drift"]) snap_position_guard_relaxed_max_drift = node["snap_position_guard_relaxed_max_drift"].as<float>();
         if (node["snap_position_guard_relaxed_radius_fraction"]) snap_position_guard_relaxed_radius_fraction = node["snap_position_guard_relaxed_radius_fraction"].as<float>();
+        if (node["snap_position_guard_crowding_enabled"]) snap_position_guard_crowding_enabled = node["snap_position_guard_crowding_enabled"].as<bool>();
+        if (node["snap_position_guard_crowding_fraction"]) snap_position_guard_crowding_fraction = node["snap_position_guard_crowding_fraction"].as<float>();
         if (node["birth_growth_cap_factor"]) birth_growth_cap_factor = node["birth_growth_cap_factor"].as<float>();
         if (node["birth_growth_cap_elong_threshold"]) birth_growth_cap_elong_threshold = node["birth_growth_cap_elong_threshold"].as<float>();
         if (node["expected_daughter_pre_pass_iterations"]) expected_daughter_pre_pass_iterations = node["expected_daughter_pre_pass_iterations"].as<int>();
@@ -1095,6 +1099,8 @@ public:
         std::cout << "snap_position_guard_radius_fraction: " << snap_position_guard_radius_fraction << '\n';
         std::cout << "snap_position_guard_relaxed_max_drift: " << snap_position_guard_relaxed_max_drift << '\n';
         std::cout << "snap_position_guard_relaxed_radius_fraction: " << snap_position_guard_relaxed_radius_fraction << '\n';
+        std::cout << "snap_position_guard_crowding_enabled: " << snap_position_guard_crowding_enabled << '\n';
+        std::cout << "snap_position_guard_crowding_fraction: " << snap_position_guard_crowding_fraction << '\n';
         std::cout << "expected_daughter_force_split_enabled: " << expected_daughter_force_split_enabled << '\n';
         std::cout << "expected_daughter_force_min_separation_parent_fraction: " << expected_daughter_force_min_separation_parent_fraction << '\n';
         std::cout << "expected_daughter_force_min_kept_pixels: " << expected_daughter_force_min_kept_pixels << '\n';

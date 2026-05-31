@@ -4829,6 +4829,52 @@ void CellUniverse::optimize(int frameIndex)
         config.prob.snap_position_guard_relaxed_max_drift;
     const float snapPositionGuardRelaxedRadiusFraction =
         std::max(0.0f, config.prob.snap_position_guard_relaxed_radius_fraction);
+    const bool snapPositionGuardCrowdingEnabled =
+        config.prob.snap_position_guard_crowding_enabled;
+    const float snapPositionGuardCrowdingFraction =
+        std::max(0.0f, config.prob.snap_position_guard_crowding_fraction);
+    float snapPositionGuardCrowdingAverageDistance = -1.0f;
+    float snapPositionGuardCrowdingLimit = -1.0f;
+    if (snapPositionGuardCrowdingEnabled &&
+        snapPositionGuardCrowdingFraction > 0.0f &&
+        frame.cells.size() >= 2) {
+        std::vector<cv::Point3f> nonTrashCenters;
+        nonTrashCenters.reserve(frame.cells.size());
+        for (const auto &cell : frame.cells) {
+            if (cell.isTrash()) {
+                continue;
+            }
+            nonTrashCenters.emplace_back(cell.getX(), cell.getY(), cell.getZ());
+        }
+
+        if (nonTrashCenters.size() >= 2) {
+            double nearestDistanceSum = 0.0;
+            for (size_t i = 0; i < nonTrashCenters.size(); ++i) {
+                float nearestDistanceSq = std::numeric_limits<float>::max();
+                for (size_t j = 0; j < nonTrashCenters.size(); ++j) {
+                    if (i == j) {
+                        continue;
+                    }
+                    nearestDistanceSq = std::min(
+                        nearestDistanceSq,
+                        squaredDistance(nonTrashCenters[i], nonTrashCenters[j]));
+                }
+                nearestDistanceSum += std::sqrt(nearestDistanceSq);
+            }
+            snapPositionGuardCrowdingAverageDistance = static_cast<float>(
+                nearestDistanceSum / static_cast<double>(nonTrashCenters.size()));
+            snapPositionGuardCrowdingLimit =
+                snapPositionGuardCrowdingAverageDistance *
+                snapPositionGuardCrowdingFraction;
+            std::cout << "[Snap Position Guard Crowding] frame " << displayFrame
+                      << " nonTrashCells=" << nonTrashCenters.size()
+                      << " avgNearestDistance="
+                      << snapPositionGuardCrowdingAverageDistance
+                      << " fraction=" << snapPositionGuardCrowdingFraction
+                      << " adaptiveLimit=" << snapPositionGuardCrowdingLimit
+                      << std::endl;
+        }
+    }
     auto snapPositionGuardLimit = [&](float snapMaxR, bool relaxed) -> float {
         const float maxDrift =
             (relaxed && snapPositionGuardRelaxedMaxDrift > 0.0f)
@@ -4840,8 +4886,16 @@ void CellUniverse::optimize(int frameIndex)
         const float radiusFraction =
             relaxed ? snapPositionGuardRelaxedRadiusFraction
                     : snapPositionGuardRadiusFraction;
-        return std::max(snapPositionGuardMinDrift,
-                        std::min(maxDrift, snapMaxR * radiusFraction));
+        const float configuredLimit =
+            std::max(snapPositionGuardMinDrift,
+                     std::min(maxDrift, snapMaxR * radiusFraction));
+        if (snapPositionGuardCrowdingLimit <= 0.0f) {
+            return configuredLimit;
+        }
+        const float adaptiveLimit =
+            std::max(snapPositionGuardMinDrift,
+                     snapPositionGuardCrowdingLimit);
+        return std::min(configuredLimit, adaptiveLimit);
     };
 
     auto runPcaShapeFit = [&]() {

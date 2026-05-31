@@ -87,6 +87,7 @@ private:
    // feedback loops (neither upward bloat nor downward thinning).
    // The bounded ref is used ONLY for the fit-side growth cap.
    std::map<std::string, std::array<float, 3>> cellShapeBirth;
+   std::unordered_map<std::string, int> trashDimFrameCounts;
 
    // M2 state: per-frame paths retained for lazy load and initial-cells map.
    PathVec imagePaths;

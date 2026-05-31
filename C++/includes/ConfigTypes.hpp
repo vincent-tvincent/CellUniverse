@@ -1342,6 +1342,7 @@ public:
     float trashPcaShapeMaxElongation{0.0f};
     bool trashRemovalEnabled{false};
     float trashRemovalBrightnessThreshold{0.05f};
+    int trashRemovalConsecutiveDimFrames{1};
     // Reference radius for proportional perturbation sigma scaling.
     // positionScale = max(cell.a, cell.b, cell.c) / perturbSigmaReferenceRadius.
     // Cells larger than refR take bigger steps; smaller cells take smaller
@@ -1448,6 +1449,7 @@ public:
         if (node["trashPcaShapeMaxElongation"]) trashPcaShapeMaxElongation = node["trashPcaShapeMaxElongation"].as<float>();
         if (node["trashRemovalEnabled"]) trashRemovalEnabled = node["trashRemovalEnabled"].as<bool>();
         if (node["trashRemovalBrightnessThreshold"]) trashRemovalBrightnessThreshold = node["trashRemovalBrightnessThreshold"].as<float>();
+        if (node["trashRemovalConsecutiveDimFrames"]) trashRemovalConsecutiveDimFrames = node["trashRemovalConsecutiveDimFrames"].as<int>();
         if (node["perturbSigmaReferenceRadius"]) perturbSigmaReferenceRadius = node["perturbSigmaReferenceRadius"].as<float>();
         if (node["randomPerturbRadiusRatio"]) randomPerturbRadiusRatio = node["randomPerturbRadiusRatio"].as<float>();
         if (node["randomPerturbBrightCoreGuidanceEnabled"]) randomPerturbBrightCoreGuidanceEnabled = node["randomPerturbBrightCoreGuidanceEnabled"].as<bool>();

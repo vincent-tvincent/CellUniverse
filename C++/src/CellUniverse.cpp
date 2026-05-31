@@ -7096,18 +7096,35 @@ void CellUniverse::optimize(int frameIndex)
     bool trashRemovalUpdatedBackground = false;
     if (config.cell && config.cell->trashRemovalEnabled) {
         const float threshold = config.cell->trashRemovalBrightnessThreshold;
+        const int consecutiveDimFrames =
+            std::max(1, config.cell->trashRemovalConsecutiveDimFrames);
         float removedBrightnessSum = 0.0f;
         std::vector<std::string> removedNames;
 
         auto &cells = frame.cells;
         for (auto it = cells.begin(); it != cells.end();) {
-            if (it->isTrash() && it->getBrightness() < threshold) {
-                removedBrightnessSum += it->getBrightness();
-                removedNames.push_back(it->getName());
-                it = cells.erase(it);
-            } else {
+            if (!it->isTrash()) {
                 ++it;
+                continue;
             }
+
+            const std::string trashName = it->getName();
+            const bool dim = it->getBrightness() < threshold;
+            const int dimFrames = dim
+                ? ++trashDimFrameCounts[trashName]
+                : 0;
+            if (!dim) {
+                trashDimFrameCounts.erase(trashName);
+            }
+
+            if (dim && dimFrames >= consecutiveDimFrames) {
+                removedBrightnessSum += it->getBrightness();
+                removedNames.push_back(trashName);
+                trashDimFrameCounts.erase(trashName);
+                it = cells.erase(it);
+                continue;
+            }
+            ++it;
         }
 
         if (!removedNames.empty()) {
@@ -7115,6 +7132,7 @@ void CellUniverse::optimize(int frameIndex)
                 previousSnapshots.erase(name);
                 cellShapeReference.erase(name);
                 cellShapeBirth.erase(name);
+                trashDimFrameCounts.erase(name);
             }
 
             std::size_t backgroundVoxels =
@@ -7137,6 +7155,7 @@ void CellUniverse::optimize(int frameIndex)
 
             std::cout << "[Trash Removal] frame " << displayFrame
                       << " removed=" << removedNames.size()
+                      << " consecutiveDimFrames=" << consecutiveDimFrames
                       << " brightnessSum=" << removedBrightnessSum
                       << " backgroundVoxels=" << backgroundVoxels
                       << " backgroundDelta=" << backgroundDelta

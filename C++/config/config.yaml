@@ -96,13 +96,15 @@ cell:
   trashPcaShapeMaxOriginalRadiusFactor: 2.0
   # Clamp trash PCA radii so max(a,b,c) / min(a,b,c) stays below this.
   # Set <= 1 to disable. Trash should remain compact and non-mitotic.
-  trashPcaShapeMaxElongation: 1.4
+  trashPcaShapeMaxElongation: 1.8
   # Post-optimization cleanup: trash cells dimmer than this threshold are
   # removed after the current frame is fully optimized. Their brightness is
   # averaged into the remaining background before synth export and before the
   # next frame inherits the environment.
   trashRemovalEnabled: true
   trashRemovalBrightnessThreshold: 0.15
+  # Avoid deleting a labeled trash object from one bad brightness frame.
+  trashRemovalConsecutiveDimFrames: 3
 
   # Radius-proportional perturbation sigma. Position perturbation offsets
   # are scaled by (maxRadius / referenceRadius). Large cells (R=50) take

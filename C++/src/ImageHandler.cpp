@@ -754,6 +754,13 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
         double zSum = 0.0;
         double brightnessSum = 0.0;
         int clusterBoxes = 0;
+        int totalVoxels = 0;
+        float minX = std::numeric_limits<float>::max();
+        float minY = std::numeric_limits<float>::max();
+        float minZ = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float maxY = std::numeric_limits<float>::lowest();
+        float maxZ = std::numeric_limits<float>::lowest();
 
         while (!queue.empty())
         {
@@ -767,6 +774,13 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
             zSum += weight * static_cast<double>(box.center.z);
             brightnessSum += static_cast<double>(box.brightness);
             ++clusterBoxes;
+            totalVoxels += std::max(0, box.voxels);
+            minX = std::min(minX, box.center.x);
+            minY = std::min(minY, box.center.y);
+            minZ = std::min(minZ, box.center.z);
+            maxX = std::max(maxX, box.center.x);
+            maxY = std::max(maxY, box.center.y);
+            maxZ = std::max(maxZ, box.center.z);
 
             static constexpr std::array<std::array<int, 3>, 6> kFaceNeighbors{{
                 {{ 1,  0,  0}}, {{-1,  0,  0}},
@@ -805,6 +819,15 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
             static_cast<float>(zSum / weightSum));
         center.brightness = static_cast<float>(brightnessSum / static_cast<double>(clusterBoxes));
         center.boxes = clusterBoxes;
+        center.sizeVoxels = static_cast<float>(std::max(totalVoxels, clusterBoxes));
+        const float boxSide = std::cbrt(
+            center.sizeVoxels / static_cast<float>(std::max(1, center.boxes)));
+        const float rx = 0.5f * (maxX - minX) + 0.5f * boxSide;
+        const float ry = 0.5f * (maxY - minY) + 0.5f * boxSide;
+        const float rz = 0.5f * (maxZ - minZ) + 0.5f * boxSide;
+        const float minR = std::max(1e-3f, std::min({rx, ry, rz}));
+        const float maxR = std::max({rx, ry, rz});
+        center.shapeElongation = maxR / minR;
         centers.push_back(center);
         maxCenterBrightness = std::max(maxCenterBrightness, center.brightness);
     }

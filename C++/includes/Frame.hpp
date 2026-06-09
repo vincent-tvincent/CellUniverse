@@ -55,6 +55,7 @@ struct BridgeSplitProposal
     int windowBothDaughtersSupported = 0;
     int windowMissingDaughterCount = 0;
     int windowParentPersists = 0;
+    int windowImmediateBothDaughtersSupported = 0;
     float windowSupportScore = 0.0f;
     float balancedWindowBonus = 0.0f;
     float maxOverlapCostFractionOverride = -1.0f;
@@ -84,6 +85,8 @@ public:
         float brightness = 0.0f;
         float sigmaScale = 1.0f;
         int boxes = 0;
+        float sizeVoxels = 0.0f;
+        float shapeElongation = 1.0f;
     };
 
     // Single-pipeline constructor — the analysis-frame / dual-pipeline
@@ -127,6 +130,12 @@ public:
                                  const cv::Point3f *forcedPosition = nullptr);
     double computeOverlapPenalty(float weight) const;
     double computeOverlapForCell(size_t cellIdx, float weight) const;
+    bool findAnyCellBodyOverlap(bool includeTrash,
+                                float scale,
+                                std::string *firstName = nullptr,
+                                std::string *secondName = nullptr,
+                                float *firstInSecond = nullptr,
+                                float *secondInFirst = nullptr) const;
 
     // ---- Triaxial split pipeline (2026-04-11 redesign) ----
     //
@@ -210,11 +219,10 @@ public:
     // (daughters replace parent) or reverts (parent restored). Returns the
     // (costDiff, callback) in the same contract as perturbCell.
     //
-    // bridgeProposal: optional PCA-bridge daughter centroids (left/right)
-    // injected as one extra candidate (label "bridge") at the front of the
-    // candidate list. When supplied, the bridge proposal competes against
-    // the standard data_/snap_ candidates under the same burn-in + bio +
-    // bridge + cost gates — replacing the old standalone bridge accept path.
+    // bridgeProposal: optional PCA-bridge daughter centroids (left/right).
+    // By default it is injected as one extra candidate (label "bridge") at
+    // the front of the candidate list. When bridgeProposalOnly is true, it is
+    // the only split candidate; this is used by CellUniverse 2 bridge-cut mode.
     CostCallbackPair trySplitCellPhased(
         size_t cellIndex,
         const PreviousFrameSnapshot &snapshot,
@@ -225,6 +233,7 @@ public:
         int *splitPerturbDebugPlacementCount = nullptr,
         float splitPerturbDebugBrightness = 0.0f,
         const BridgeSplitProposal *bridgeProposal = nullptr,
+        bool bridgeProposalOnly = false,
         const BridgeSplitProposal *lumenProposal = nullptr,
         bool lumenProposalOnly = false,
         int lumenBurnInIterations = -1,

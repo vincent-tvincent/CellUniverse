@@ -1,0 +1,84 @@
+base_config: config.yaml
+
+# Experimental CellUniverse 2.0 mode.
+#
+# This keeps the normal CellUniverse tracking command and the normal final PCA
+# shape fit, but removes split trials and skips the random/signal-guided
+# perturbation loop. Each frame therefore advances by running the existing PCA
+# fit directly from the copied previous-frame cell state.
+simulation:
+  celluniverse2_enabled: true
+  export_perturb_cell_center_debug_images: true
+  # If a carried-forward cell/trash body is nearly all background, use the
+  # frame's bright signal centers as emergency anchors before the final PCA fit.
+  # The matcher requires the new center to be at least one body unit away and
+  # similar in size/shape, so normal in-place PCA fits are left alone.
+  signal_center_rescue_enabled: true
+  signal_center_rescue_background_delta: 0.03
+  signal_center_rescue_background_stddev_max: 0.04
+  signal_center_rescue_min_distance_body_units: 1.0
+  signal_center_rescue_max_distance_body_units: 6.0
+  signal_center_rescue_max_size_ratio: 3.0
+  signal_center_rescue_max_shape_ratio: 2.5
+  # Local bbox background should represent true surrounding background, not the
+  # brightest halo outside the fitted cell body.
+  adaptive_background_local_bbox_percentile: 20.0
+  n2v2_preprocess:
+    contrast:
+      gamma_split_decay_enabled: true
+      gamma_split_decay_target: 1.0
+      gamma_split_decay_splits_to_target: 120
+
+# Seed each initial CSV cell with medium rendering brightness before the normal
+# per-frame brightness EMA takes over.
+cell:
+  initialBrightness: 0.5
+
+# Separate split-only kill switch. celluniverse2_enabled already suppresses
+# standard random split scheduling. The PCA-bridge cut remains enabled below
+# as a narrow one-shot split path for obvious rod-like wrong fits.
+prob:
+  disable_split_trials: true
+  pca_bridge_split_enabled: true
+  pca_bridge_elongation_ratio: 1.35
+  # CellUniverse 2.0 does not require a dark bridge. Once a rod-like cell is
+  # detected, seed daughters by cutting the rod at its geometric middle and
+  # using brightness-weighted centers of the two halves. The proposal is still
+  # the only split candidate in this mode.
+  pca_bridge_require_dark_bridge: false
+  pca_bridge_middle_cut_centroids: true
+  # Before the final CellUniverse2 PCA fit, flat carried-forward parents can
+  # also seed a split from two distinctive signal centers inside the parent's
+  # snap bbox. Acceptance still goes through the normal split validation gates.
+  signal_center_split_enabled: true
+  signal_center_split_min_parent_elongation: 1.45
+  # Signal-center proposals should follow the carried rod axis. This keeps
+  # later crowded frames from selecting a plausible pair of bright centers on
+  # the wrong split axis before the downstream PCA/cost gates run.
+  signal_center_split_min_axis_alignment: 0.75
+  # Tuned from the latest frame-4 false reject:
+  #   f4 Cell type 1_1 long/mid=1.03, mid/short=1.61
+  #   f4 Cell type 1_2 long/mid=1.09, mid/short=1.33
+  # Frame 18/19 true split-like rods include mid/short around 2.01-2.14
+  # (f19 cell_000/cell_001, f18 cell_00). Allow those through the rod
+  # proposal gate while downstream bio/cost/overlap gates still reject bad
+  # proposals.
+  pca_bridge_min_long_mid_ratio: 1.02
+  pca_bridge_max_mid_short_ratio: 2.15
+  # CellUniverse2 treats the rod-like parent shape itself as split evidence;
+  # do not require a dark valley between the middle-cut daughter seeds.
+  pca_bridge_require_valley: false
+  # Permit only this much rod-cut daughter overlap. Higher overlap is rejected;
+  # accepted daughters are not resized or repaired. A separate future-window
+  # gate below can rescue higher-overlap candidates when the next frames show
+  # two distinct daughter centers in the parent bbox.
+  pca_bridge_soft_daughter_overlap_max: 0.12
+  pca_bridge_future_window_enabled: true
+  pca_bridge_future_window_size: 3
+  pca_bridge_future_window_match_distance: 28.0
+  pca_bridge_future_window_match_distance_per_frame: 4.0
+  pca_bridge_future_window_rescue_overlap_max: 0.25
+  pca_bridge_future_window_min_separation_parent_fraction: 0.50
+  pca_bridge_future_window_min_both_daughter_support: 2
+  pca_bridge_future_window_max_missing_daughters: 0
+  pca_bridge_future_window_max_parent_persists: 0

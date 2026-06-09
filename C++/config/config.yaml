@@ -96,7 +96,7 @@ cell:
   trashPcaShapeMaxOriginalRadiusFactor: 2.0
   # Clamp trash PCA radii so max(a,b,c) / min(a,b,c) stays below this.
   # Set <= 1 to disable. Trash should remain compact and non-mitotic.
-  trashPcaShapeMaxElongation: 1.8
+  trashPcaShapeMaxElongation: 1.4
   # Post-optimization cleanup: trash cells dimmer than this threshold are
   # removed after the current frame is fully optimized. Their brightness is
   # averaged into the remaining background before synth export and before the
@@ -309,6 +309,10 @@ simulation:
   iterations_per_cell: 250
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
+  # Experimental CellUniverse 2.0 mode. When enabled by a YAML config,
+  # movement/split random-search budgets are skipped and the existing final
+  # PCA shape fit becomes the direct per-frame movement/shape update.
+  celluniverse2_enabled: false
   z_scaling: 7
   blur_sigma: 1.1 # 0.0
   preprocess_mode: n2v2
@@ -339,6 +343,9 @@ simulation:
       exclude_zero: true
       scope: stack
       gamma: 1.45
+      gamma_split_decay_enabled: false
+      gamma_split_decay_target: 1.0
+      gamma_split_decay_splits_to_target: 120
       preserve_zero_pixels: true
     output:
       dtype: preserve
@@ -492,6 +499,10 @@ simulation:
 
   adaptive_background_expand_factor: 1.1
   adaptive_background_top_fraction: 0.2
+  # CellUniverse2 local-bbox background uses a low percentile of bbox-local
+  # non-cell voxels. Do not use the global top-fraction aggregation here; near
+  # cells it samples halo/signal and raises the background enough to alter PCA.
+  adaptive_background_local_bbox_percentile: 20.0
 
   asymmetric_cost_weight: 8.0
   # Minimum overshoot (synth - real) to activate asymK. Below this,
@@ -524,6 +535,19 @@ simulation:
   # Maximum recursive split depth. 0 disables recursive splitting while
   # keeping the initial bright-fraction filter active.
   signal_guided_max_recursive_depth: 2
+  # Emergency anchor for cells/trash whose current ellipsoid body is almost all
+  # background. When enabled, move the object to the nearest compatible bright
+  # signal center before the final PCA fit. Disabled by default so the original
+  # pipeline is unchanged.
+  signal_center_rescue_enabled: false
+  signal_center_rescue_background_delta: 0.03
+  signal_center_rescue_background_stddev_max: 0.04
+  signal_center_rescue_min_distance_body_units: 1.0
+  signal_center_rescue_max_distance_body_units: 6.0
+  signal_center_rescue_max_size_ratio: 3.0
+  signal_center_rescue_max_shape_ratio: 2.5
+  signal_center_rescue_size_weight: 0.75
+  signal_center_rescue_shape_weight: 0.35
   # Signal map: copy the fully preprocessed frame, iteratively blur it, and
   # rescale after each blur to recover the original bright-center mean.
   signal_map_enabled: true
@@ -551,6 +575,7 @@ prob:
   # elongated cells get progressively higher.
   P_split_base: 0.03
   P_split_max: 0.5
+  disable_split_trials: false
 
   split_cost: 500
   split_cost_fraction: 0.01
@@ -565,8 +590,9 @@ prob:
   position_prior_weight: 75.0
   position_prior_threshold: 20.0
   # Shared center-motion guard for random perturb and final PCA position
-  # updates. Effective limit = max(min, min(max, snapRadius * fraction)).
-  # Raised above the old hard-coded 14 px so fast early-frame motion can pass.
+  # updates. Base limit = max(min, min(max, snapRadius * fraction)).
+  # If crowding is enabled, the final limit is also capped by the average
+  # nearest-neighbor distance among non-trash cells times crowding_fraction.
   snap_position_guard_min_drift: 10.0
   snap_position_guard_max_drift: 55.0
   snap_position_guard_radius_fraction: 1.5
@@ -652,3 +678,12 @@ prob:
   pca_bridge_max_radius_fraction: 0.90
   pca_bridge_min_cost_improvement: 0.0
   pca_bridge_overlap_weight: -1.0
+  # CellUniverse2-only proposal source. For a carried-forward flat parent,
+  # look for two localized signal centers inside its snap bbox and try that
+  # pair as one deterministic split candidate before normal PCA fitting.
+  signal_center_split_enabled: false
+  signal_center_split_min_parent_elongation: 1.45
+  signal_center_split_min_separation_radius_scale: 0.55
+  signal_center_split_max_separation_radius_scale: 2.2
+  signal_center_split_max_midpoint_radius_scale: 1.25
+  signal_center_split_min_axis_alignment: 0.0

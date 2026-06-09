@@ -133,11 +133,17 @@ private:
    float resumePreviousAdaptiveBackground = 0.0f;
    float resumePreviousMeanBrightness = 0.0f;
    size_t resumePreviousCellCount = 0;
+   int initialNonTrashCellCount = 0;
+   int cumulativeAcceptedSplits = 0;
 
    void prepareSignalCentersForFrame(int frameIndex,
                                      const std::vector<cv::Mat> &realFrame,
                                      bool keepLoaded);
    int rollingPreprocessWindowSize() const;
+   size_t countNonTrashCellsInFrame(int frameIndex) const;
+   double effectiveN2V2ContrastGamma() const;
+   BaseConfig configForPreprocessing(int frameIndex) const;
+   void invalidatePreparedFramesAfter(int frameIndex);
    PreparedFrameStack loadPreparedFrameStack(int frameIndex);
    void cachePreparedFrameStack(int frameIndex);
    void applyCellLumenRescue(int frameIndex, const std::vector<cv::Mat> &preparedFrame);

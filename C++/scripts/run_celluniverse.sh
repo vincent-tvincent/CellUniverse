@@ -6,13 +6,13 @@ CPP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_ROOT="$CPP_ROOT/outputs"
 
 # run_celluniverse.sh -i
-# run_celluniverse.sh <preset_config.ini> [preset_name]
+# run_celluniverse.sh <preset_config.ini> [preset_name] [--yaml config.yaml]
 #
 # Mode 1:
 #   ./run_celluniverse.sh /path/to/user_input_configurations.ini preset_name
 # Mode 2:
 #   ./run_celluniverse.sh -i
-#   -> interactive loop that asks for config path and preset.
+#   -> interactive loop that asks for config path, preset, and YAML config.
 
 if [ -t 2 ]; then
   RED="\033[31m"
@@ -61,6 +61,28 @@ resolve_path() {
   else
     printf '%s/%s\n' "$base" "$p"
   fi
+}
+
+resolve_existing_yaml_path() {
+  local p="$1"
+  local base="$2"
+  local expanded=""
+  local candidate=""
+
+  expanded="$(expand_home "$(trim "$p")")"
+  if [[ "$expanded" == /* ]]; then
+    printf '%s\n' "$expanded"
+    return 0
+  fi
+
+  for candidate in "$base/$expanded" "$CPP_ROOT/$expanded" "$(pwd)/$expanded"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  printf '%s/%s\n' "$base" "$expanded"
 }
 
 validate_input_path() {
@@ -292,6 +314,294 @@ choose_preset() {
       done
     fi
     echo "[WARN] invalid preset selection." >&2
+  done
+}
+
+add_yaml_candidate() {
+  local -n yaml_ref=$1
+  local candidate="$2"
+  local existing=""
+
+  [ -f "$candidate" ] || return 0
+  case "$candidate" in
+    *.yaml|*.yml) ;;
+    *) return 0 ;;
+  esac
+
+  candidate="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+  for existing in "${yaml_ref[@]}"; do
+    [ "$existing" = "$candidate" ] && return 0
+  done
+  yaml_ref+=("$candidate")
+}
+
+list_yaml_candidates() {
+  local target_ref="$1"
+  local -n yaml_ref=$1
+  local default_yaml="$2"
+  local f=""
+
+  yaml_ref=()
+  add_yaml_candidate "$target_ref" "$default_yaml"
+
+  for f in "$CPP_ROOT"/config/*.yaml "$CPP_ROOT"/config/*.yml; do
+    add_yaml_candidate "$target_ref" "$f"
+  done
+
+  for f in "$INI_DIR"/*.yaml "$INI_DIR"/*.yml; do
+    add_yaml_candidate "$target_ref" "$f"
+  done
+}
+
+show_yaml_list() {
+  local -n yaml_ref=$1
+  local default_yaml="$2"
+  local count="${#yaml_ref[@]}"
+  local i=1
+  local label=""
+  local cols
+
+  cols="$(get_term_width)"
+  {
+    echo "Available YAML configs ($count total):"
+    echo "Hint: blank keeps the preset default. You can also type a number or path."
+    for f in "${yaml_ref[@]}"; do
+      label="$f"
+      if [ "$f" = "$default_yaml" ]; then
+        label="$label [preset default]"
+      fi
+      printf '  %3d) %s\n' "$i" "$label"
+      i=$((i + 1))
+    done
+  } | fold -s -w "$cols" >&2
+}
+
+choose_yaml_arrow_menu() {
+  local -n yaml_ref=$1
+  local default_yaml="$2"
+  local count="${#yaml_ref[@]}"
+  local selected=0
+  local offset=0
+  local rows visible key rest i idx prefix line cols max_name typed_number label
+
+  [ "$count" -gt 0 ] || return 1
+  [ -r /dev/tty ] && [ -w /dev/tty ] || return 1
+
+  for i in "${!yaml_ref[@]}"; do
+    if [ "${yaml_ref[$i]}" = "$default_yaml" ]; then
+      selected="$i"
+      break
+    fi
+  done
+
+  rows="$(get_term_height)"
+  cols="$(get_term_width)"
+  visible=$((rows - 7))
+  if [ "$visible" -lt 8 ]; then
+    visible=8
+  fi
+  if [ "$visible" -gt "$count" ]; then
+    visible="$count"
+  fi
+  max_name=$((cols - 10))
+  if [ "$max_name" -lt 20 ]; then
+    max_name=20
+  fi
+  typed_number=""
+
+  draw_menu() {
+    printf '\033[H\033[J' > /dev/tty
+    printf 'Available YAML configs (%s total)\n' "$count" > /dev/tty
+    printf 'Keys: Up/Down or j/k = move | PageUp/PageDown = jump | number+Enter = select by number\n' > /dev/tty
+    printf '      Enter = select highlighted | Backspace = edit number | q = text prompt\n' > /dev/tty
+    printf 'Hint: select a YAML override after choosing the run preset.\n\n' > /dev/tty
+    i=0
+    while [ "$i" -lt "$visible" ]; do
+      idx=$((offset + i))
+      [ "$idx" -lt "$count" ] || break
+      label="${yaml_ref[$idx]}"
+      if [ "$label" = "$default_yaml" ]; then
+        label="$label [preset default]"
+      fi
+      line="$label"
+      if [ "${#line}" -gt "$max_name" ]; then
+        line="${line:0:$((max_name - 3))}..."
+      fi
+      if [ "$idx" -eq "$selected" ]; then
+        prefix=">"
+      else
+        prefix=" "
+      fi
+      printf '%s %3d) %s\n' "$prefix" "$((idx + 1))" "$line" > /dev/tty
+      i=$((i + 1))
+    done
+    printf '\nShowing %d-%d of %d.\n' "$((offset + 1))" "$((offset + visible))" "$count" > /dev/tty
+    if [ -n "$typed_number" ]; then
+      printf 'Typed number: %s\n' "$typed_number" > /dev/tty
+    fi
+  }
+
+  printf '\033[?25l' > /dev/tty
+  trap "printf '\033[?25h' > /dev/tty" RETURN
+  while true; do
+    draw_menu
+    IFS= read -rsn1 key < /dev/tty || { printf '\033[?25h' > /dev/tty; trap - RETURN; return 1; }
+    case "$key" in
+      "")
+        if [ -n "$typed_number" ]; then
+          if [ "$typed_number" -ge 1 ] && [ "$typed_number" -le "$count" ]; then
+            selected=$((typed_number - 1))
+            printf '\033[?25h\033[H\033[J' > /dev/tty
+            printf '%s\n' "${yaml_ref[$selected]}"
+            trap - RETURN
+            return 0
+          fi
+          typed_number=""
+          continue
+        fi
+        printf '\033[?25h\033[H\033[J' > /dev/tty
+        printf '%s\n' "${yaml_ref[$selected]}"
+        trap - RETURN
+        return 0
+        ;;
+      q|Q)
+        if [ -n "$typed_number" ]; then
+          typed_number=""
+          continue
+        fi
+        printf '\033[?25h\033[H\033[J' > /dev/tty
+        trap - RETURN
+        return 1
+        ;;
+      $'\177'|$'\b')
+        typed_number="${typed_number%?}"
+        continue
+        ;;
+      [0-9])
+        typed_number="${typed_number}${key}"
+        if [ "$typed_number" -ge 1 ] && [ "$typed_number" -le "$count" ]; then
+          selected=$((typed_number - 1))
+          if [ "$selected" -lt "$offset" ]; then
+            offset="$selected"
+          elif [ "$selected" -ge $((offset + visible)) ]; then
+            offset=$((selected - visible + 1))
+          fi
+        fi
+        continue
+        ;;
+      j)
+        key="B"
+        ;;
+      k)
+        key="A"
+        ;;
+      $'\033')
+        IFS= read -rsn1 rest < /dev/tty || rest=""
+        if [ "$rest" = "[" ]; then
+          IFS= read -rsn1 key < /dev/tty || key=""
+          if [[ "$key" =~ [0-9] ]]; then
+            IFS= read -rsn1 rest < /dev/tty || rest=""
+          fi
+        fi
+        ;;
+    esac
+
+    case "$key" in
+      A)
+        typed_number=""
+        [ "$selected" -gt 0 ] && selected=$((selected - 1))
+        ;;
+      B)
+        typed_number=""
+        [ "$selected" -lt $((count - 1)) ] && selected=$((selected + 1))
+        ;;
+      5)
+        typed_number=""
+        selected=$((selected - visible))
+        [ "$selected" -lt 0 ] && selected=0
+        ;;
+      6)
+        typed_number=""
+        selected=$((selected + visible))
+        [ "$selected" -ge "$count" ] && selected=$((count - 1))
+        ;;
+    esac
+
+    if [ "$selected" -lt "$offset" ]; then
+      offset="$selected"
+    elif [ "$selected" -ge $((offset + visible)) ]; then
+      offset=$((selected - visible + 1))
+    fi
+  done
+}
+
+choose_yaml_config() {
+  local default_yaml="$1"
+  local requested="${2:-}"
+  local selected_yaml=""
+  local answer=""
+  local resolved=""
+  local line=""
+  local -a yaml_candidates=()
+
+  if [ -n "$requested" ]; then
+    resolved="$(resolve_existing_yaml_path "$requested" "$INI_DIR")"
+    [ -f "$resolved" ] || { err "[FATAL] config yaml not found: $resolved"; exit 1; }
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  if [ "$INTERACTIVE" -eq 0 ]; then
+    printf '%s\n' "$default_yaml"
+    return 0
+  fi
+
+  list_yaml_candidates yaml_candidates "$default_yaml"
+  [ "${#yaml_candidates[@]}" -gt 0 ] || { err "[FATAL] no YAML configs found."; exit 1; }
+
+  if [ -t 0 ] && [ -t 2 ]; then
+    if selected_yaml="$(choose_yaml_arrow_menu yaml_candidates "$default_yaml")"; then
+      printf '%s\n' "$selected_yaml"
+      return 0
+    fi
+  fi
+
+  show_yaml_list yaml_candidates "$default_yaml"
+  while true; do
+    if ! read -r -p "Select config YAML (number, path, 'list'; blank = preset default): " answer; then
+      err "[FATAL] no input provided."
+      exit 1
+    fi
+
+    answer="$(trim "$answer")"
+    if [ -z "$answer" ]; then
+      printf '%s\n' "$default_yaml"
+      return 0
+    fi
+
+    if [ "$answer" = "list" ] || [ "$answer" = "l" ] || [ "$answer" = "?" ]; then
+      show_yaml_list yaml_candidates "$default_yaml"
+      continue
+    fi
+
+    if [[ "$answer" =~ ^[0-9]+$ ]] && [ "$answer" -ge 1 ] && [ "$answer" -le "${#yaml_candidates[@]}" ]; then
+      printf '%s\n' "${yaml_candidates[$((answer - 1))]}"
+      return 0
+    fi
+
+    for line in "${yaml_candidates[@]}"; do
+      if [ "$line" = "$answer" ] || [ "$(basename "$line")" = "$answer" ]; then
+        printf '%s\n' "$line"
+        return 0
+      fi
+    done
+
+    resolved="$(resolve_existing_yaml_path "$answer" "$INI_DIR")"
+    if [ -f "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+    echo "[WARN] config yaml not found: $resolved" >&2
   done
 }
 
@@ -595,12 +905,13 @@ INTERACTIVE=0
 INI_FILE=""
 PRESET_ARG=""
 CORES_ARG=""
+YAML_ARG=""
 
 usage() {
   echo "Usage:" >&2
-  echo "  $0 -i [--cores N]" >&2
+  echo "  $0 -i [--cores N] [--yaml config.yaml]" >&2
   echo "  $0 <preset_config.ini> [preset_name] [cores]" >&2
-  echo "  $0 <preset_config.ini> [preset_name] --cores N" >&2
+  echo "  $0 <preset_config.ini> [preset_name] [--cores N] [--yaml config.yaml]" >&2
 }
 
 POSITIONAL=()
@@ -625,6 +936,19 @@ while [ "$#" -gt 0 ]; do
       ;;
     --cores=*|--threads=*)
       CORES_ARG="${1#*=}"
+      shift
+      ;;
+    --yaml|--config-yaml|--cell-config)
+      if [ "$#" -lt 2 ]; then
+        err "[FATAL] $1 requires a YAML file argument."
+        usage
+        exit 1
+      fi
+      YAML_ARG="$2"
+      shift 2
+      ;;
+    --yaml=*|--config-yaml=*|--cell-config=*)
+      YAML_ARG="${1#*=}"
       shift
       ;;
     -*)
@@ -717,7 +1041,8 @@ RESUME_SRC_RAW="$(ini_get "$INI_FILE" "$PRESET" "resume_source_dir")"
 BUILD_DIR="$(resolve_path "$BUILD_DIR_RAW" "$INI_DIR")"
 INPUT_PATH="$(resolve_path "$INPUT_PATH_RAW" "$INI_DIR")"
 OUTPUT_BASE_DIR="$(resolve_path "$OUTPUT_BASE_RAW" "$INI_DIR")"
-CELL_CONFIG_FILE="$(resolve_path "$CELL_CONFIG_RAW" "$INI_DIR")"
+CELL_CONFIG_DEFAULT="$(resolve_path "$CELL_CONFIG_RAW" "$INI_DIR")"
+CELL_CONFIG_FILE="$(choose_yaml_config "$CELL_CONFIG_DEFAULT" "$YAML_ARG")"
 INITIAL_FILE="$(resolve_path "$INITIAL_RAW" "$INI_DIR")"
 
 CLI_ARGS_FILE=""

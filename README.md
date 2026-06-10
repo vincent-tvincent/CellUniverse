@@ -21,7 +21,13 @@ CellUniverse/
   docs/              # Published paper (PDF)
   debug-synthetic-images/   # Debug output directory
 ```
+## Target Users
+- Computational Biologists & Bioimage Analysts looking for automated tracking of cell lineages.
+- Researchers analyzing bacterial growth, tissue development, or cellular migration.
 
+## Project Deployment Status
+Local-only Application: The project runs entirely locally on hardware ranging from academic SSH clusters (e.g., UC Irvine's ICS Openlab) to personal laptops (Linux & macOS). There is currently no public web-hosted interface.
+    
 ## C++ (Active)
 
 The C++ implementation tracks cells in 3D using triaxial ellipsoid models fitted to multi-page TIFF z-stacks. It is the only actively developed version.

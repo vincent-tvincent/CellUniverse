@@ -57,9 +57,19 @@ struct BridgeSplitProposal
     int windowParentPersists = 0;
     int windowImmediateBothDaughtersSupported = 0;
     float windowSupportScore = 0.0f;
+    bool immediateFutureCenterBacked = false;
+    bool futureWindowSplitRescue = false;
+    bool bioSeparationSoftRescued = false;
+    float bioSeparationSoftNormalizedExcess = 0.0f;
+    float bioSeparationSoftPenaltyFraction = 0.0f;
+    float bioSeparationObserved = 0.0f;
+    float bioSeparationRequired = 0.0f;
     float balancedWindowBonus = 0.0f;
     float maxOverlapCostFractionOverride = -1.0f;
     float parentDistanceBalance = 1.0f;
+    float centerSnapMaxSeedDistance = 0.0f;
+    float centerSnapScore = 0.0f;
+    bool centerSnapUsedAlignedPairFallback = false;
     float parentPersistencePenalty = 0.0f;
     float neighborClaimPenalty = 0.0f;
     float continuationClaimSoftPenalty = 0.0f;
@@ -70,6 +80,14 @@ struct BridgeSplitProposal
     int gapEndBin = -1;
     int leftPixelCount = 0;
     int rightPixelCount = 0;
+    // Optional seed-radius override for deterministic proposals that should
+    // start as sphere-like daughters before the normal PCA daughter refit.
+    float daughterSphereRadius = -1.0f;
+    // Optional second deterministic seed pair. Used by ambiguous rod-tip
+    // fallback cases where the off-rod daughter may be on either rod tip.
+    bool hasAlternateSeedPair = false;
+    cv::Point3f altD1Pos{0.0f, 0.0f, 0.0f};
+    cv::Point3f altD2Pos{0.0f, 0.0f, 0.0f};
 };
 
 class Frame

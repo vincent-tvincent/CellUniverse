@@ -20,6 +20,21 @@ simulation:
   signal_center_rescue_max_distance_body_units: 6.0
   signal_center_rescue_max_size_ratio: 3.0
   signal_center_rescue_max_shape_ratio: 2.5
+  # Rescue assignment is solved across all background-looking cells at once,
+  # so two cells cannot greedily steal the same bright center. The score cap
+  # blocks very long relocations that previously stole unrelated daughter
+  # centers in crowded later frames.
+  signal_center_rescue_global_assignment_enabled: true
+  signal_center_rescue_max_heuristic_score: 3.0
+  # Young split daughters are localized by trying each plausible bright center
+  # in their sibling half-space, running a short PCA probe, and keeping the
+  # best candidate before the full PCA pass. Unlike the background-body rescue,
+  # this allows close centers because daughters often move less than one body
+  # unit between adjacent frames.
+  signal_center_rescue_split_daughter_probe_enabled: true
+  signal_center_rescue_split_daughter_probe_frames: 2
+  signal_center_rescue_split_daughter_max_distance_body_units: 1.5
+  signal_center_rescue_split_daughter_probe_distance_weight: 0.20
   # Local bbox background should represent true surrounding background, not the
   # brightest halo outside the fitted cell body.
   adaptive_background_local_bbox_percentile: 20.0
@@ -52,6 +67,9 @@ prob:
   # snap bbox. Acceptance still goes through the normal split validation gates.
   signal_center_split_enabled: true
   signal_center_split_min_parent_elongation: 1.45
+  # Allow close axial daughters such as the frame-18 cell_10 split; downstream
+  # CellUniverse2 bio/cost gates still reject unsupported close fake pairs.
+  signal_center_split_min_separation_radius_scale: 0.45
   # Signal-center proposals should follow the carried rod axis. This keeps
   # later crowded frames from selecting a plausible pair of bright centers on
   # the wrong split axis before the downstream PCA/cost gates run.
@@ -64,7 +82,8 @@ prob:
   # proposal gate while downstream bio/cost/overlap gates still reject bad
   # proposals.
   pca_bridge_min_long_mid_ratio: 1.02
-  pca_bridge_max_mid_short_ratio: 2.15
+  pca_bridge_max_mid_short_ratio: 2.45
+  pca_bridge_min_side_voxels: 8
   # CellUniverse2 treats the rod-like parent shape itself as split evidence;
   # do not require a dark valley between the middle-cut daughter seeds.
   pca_bridge_require_valley: false
@@ -82,3 +101,85 @@ prob:
   pca_bridge_future_window_min_both_daughter_support: 2
   pca_bridge_future_window_max_missing_daughters: 0
   pca_bridge_future_window_max_parent_persists: 0
+  # If both daughters are already visible in the immediate future window,
+  # allow an asymmetric current-frame seed instead of rejecting on parent
+  # distance balance alone.
+  pca_bridge_future_window_parent_balance_rescue_min: 0.20
+  # When daughter centers came from the immediate future frame, only let clean
+  # future support override current-frame dim/cost gates for very rod-like
+  # parents. This catches early rod failures such as cell_110 at frame 34 while
+  # avoiding broad future-only split acceptance.
+  pca_bridge_future_window_min_parent_shape_for_cost_rescue: 2.20
+  # Future-centered daughters may be dim in the current frame; keep their
+  # refit positions on their own sides so PCA cannot pull the split pair back
+  # into one short rod before validation.
+  pca_bridge_future_window_refit_halfspace_min_fraction: 0.70
+  # Bring back the original bio separation gate: reject splits where the two
+  # newborn daughters are still too close relative to the snapshot parent.
+  # This targets false early rod cuts like the frame-23/24 cell_011 split.
+  bio_min_daughter_separation_parent_fraction: 1.10
+  # Original midpoint-size sanity gate: newborn daughters should still be
+  # centered around the previous-frame parent, not shifted onto a neighboring
+  # cell or trash target.
+  bio_max_midpoint_parent_fraction: 0.95
+  # Brightness as density: each newborn daughter must contain real signal.
+  # This rejects false daughters sitting in background/dim volume.
+  bio_min_daughter_mean_brightness_absolute: 0.05
+  bio_min_daughter_mean_brightness_parent_fraction: 0.50
+  bio_min_daughter_mean_brightness_background_margin: 0.015
+  # Small tolerance for real but slightly dim daughters: only candidates with
+  # clean future-window support may use this soft band. Below the hard floor
+  # they are still rejected as background-like false daughters.
+  bio_daughter_density_soft_gate_enabled: true
+  bio_daughter_density_soft_min_fraction: 0.75
+  bio_daughter_density_soft_penalty_fraction: 0.25
+  bio_daughter_density_soft_require_future_support: true
+  # Near-miss daughter separation can survive as a scored candidate when the
+  # immediate future window already confirms two daughters. This keeps the
+  # original bio separation as a preference while avoiding one-frame delays
+  # from small threshold misses such as frame-18 cell_00.
+  bio_separation_soft_gate_enabled: true
+  bio_separation_soft_min_fraction: 0.50
+  bio_separation_soft_penalty_fraction: 0.35
+  bio_separation_soft_require_future_support: true
+  # Soft geometry penalties make the looser frame-18 style proposals pay for
+  # suspicious final geometry instead of being rejected/accepted by a cliff.
+  # Large PCA drift and too-wide daughter separation add proportional cost;
+  # close daughters whose center line follows both short axes should also keep
+  # those short axes nearly shared. Daughter shortest-axis lines should
+  # intersect/nearly intersect; parallel axes are accepted only when collinear.
+  split_soft_geometry_gate_enabled: true
+  split_soft_geometry_penalty_fraction: 0.30
+  split_soft_max_daughter_seed_drift_fraction: 0.95
+  split_soft_max_final_separation_parent_fraction: 2.20
+  split_close_axis_soft_gate_enabled: true
+  split_close_axis_distance_scale: 2.40
+  split_close_axis_center_axis_alignment: 0.80
+  split_close_axis_max_angle_degrees: 20.0
+  split_close_axis_penalty_fraction: 0.20
+  split_daughter_axis_interaction_soft_gate_enabled: true
+  split_daughter_axis_interaction_distance_fraction: 0.35
+  split_daughter_axis_interaction_along_fraction: 1.60
+  split_daughter_axis_parallel_angle_degrees: 12.0
+  split_daughter_axis_interaction_penalty_fraction: 0.35
+  split_bio_ignore_trash_neighbors_enabled: true
+  # After split proposal PCA/refit, keep each newborn daughter on its own
+  # side of the original split axis instead of letting both drift inward.
+  split_daughter_refit_keep_seed_halfspace_enabled: true
+  split_daughter_refit_halfspace_min_fraction: 0.15
+  split_daughter_refit_align_short_axis_to_split_enabled: true
+  # For flattened split daughters, initialize rotation from the local bright
+  # voxel plane before PCA refit. The two largest local PCA axes describe the
+  # cell plane; when the in-plane axes are ambiguous, only the plane normal is
+  # trusted and the existing in-plane orientation is preserved.
+  split_daughter_flattened_plane_rotation_enabled: true
+  split_daughter_flattened_plane_min_shape: 1.45
+  split_daughter_flattened_plane_radius_scale: 1.45
+  split_daughter_flattened_plane_min_pixels: 120
+  split_daughter_flattened_plane_min_ratio: 1.35
+  split_daughter_flattened_plane_long_axis_ratio: 1.15
+  split_daughter_flattened_plane_neighbor_guard_enabled: true
+  split_daughter_flattened_plane_neighbor_distance_scale: 2.20
+  split_daughter_flattened_plane_neighbor_axis_alignment: 0.70
+  split_daughter_flattened_plane_neighbor_lateral_scale: 0.75
+  split_daughter_flattened_plane_neighbor_normal_alignment: 0.65

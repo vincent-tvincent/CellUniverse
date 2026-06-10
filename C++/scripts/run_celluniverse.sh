@@ -6,11 +6,15 @@ CPP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_ROOT="$CPP_ROOT/outputs"
 
 # run_celluniverse.sh -i
+# run_celluniverse.sh [preset_name] [--yaml config.yaml]
 # run_celluniverse.sh <preset_config.ini> [preset_name] [--yaml config.yaml]
 #
 # Mode 1:
-#   ./run_celluniverse.sh /path/to/user_input_configurations.ini preset_name
+#   ./run_celluniverse.sh preset_name
+#   -> uses scripts/run_config.ini
 # Mode 2:
+#   ./run_celluniverse.sh /path/to/user_input_configurations.ini preset_name
+# Mode 3:
 #   ./run_celluniverse.sh -i
 #   -> interactive loop that asks for config path, preset, and YAML config.
 
@@ -910,6 +914,7 @@ YAML_ARG=""
 usage() {
   echo "Usage:" >&2
   echo "  $0 -i [--cores N] [--yaml config.yaml]" >&2
+  echo "  $0 <preset_name> [--cores N] [--yaml config.yaml]" >&2
   echo "  $0 <preset_config.ini> [preset_name] [cores]" >&2
   echo "  $0 <preset_config.ini> [preset_name] [--cores N] [--yaml config.yaml]" >&2
 }
@@ -974,15 +979,20 @@ elif [ "${#POSITIONAL[@]}" -eq 0 ]; then
   usage
   exit 1
 elif [ "${#POSITIONAL[@]}" -le 3 ]; then
-  INI_FILE="${POSITIONAL[0]}"
-  PRESET_ARG="${POSITIONAL[1]:-}"
-  if [ "${#POSITIONAL[@]}" -eq 3 ]; then
-    if [ -n "$CORES_ARG" ]; then
-      err "[FATAL] core count provided both positionally and with --cores."
-      usage
-      exit 1
+  if [ "${#POSITIONAL[@]}" -eq 1 ] && [ ! -f "$(expand_home "${POSITIONAL[0]}")" ]; then
+    INI_FILE="$SCRIPT_DIR/run_config.ini"
+    PRESET_ARG="${POSITIONAL[0]}"
+  else
+    INI_FILE="${POSITIONAL[0]}"
+    PRESET_ARG="${POSITIONAL[1]:-}"
+    if [ "${#POSITIONAL[@]}" -eq 3 ]; then
+      if [ -n "$CORES_ARG" ]; then
+        err "[FATAL] core count provided both positionally and with --cores."
+        usage
+        exit 1
+      fi
+      CORES_ARG="${POSITIONAL[2]}"
     fi
-    CORES_ARG="${POSITIONAL[2]}"
   fi
 else
   err "[FATAL] invalid arguments."

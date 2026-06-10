@@ -2259,7 +2259,8 @@ bool bioCheckDaughters(
     const ProbabilityConfig &probConfig,
     std::string &reasonOut,
     bool skipExistingCellBuriedCheck = false,
-    bool skipNeighborBridgeCheck = false)
+    bool skipNeighborBridgeCheck = false,
+    bool ignoreTrashNeighbors = false)
 {
     const auto cellVolume = [](const Ellipsoid &c) {
         return static_cast<double>(c.getARadius()) *
@@ -2318,6 +2319,7 @@ bool bioCheckDaughters(
         for (size_t i = 0; i < allCells.size(); ++i) {
             if (i == d1Idx || i == d2Idx) continue;
             const Ellipsoid &other = allCells[i];
+            if (ignoreTrashNeighbors && other.isTrash()) continue;
             if (other.isPointInsideEllipsoid(cv::Point3f(
                     daughter1.getX(), daughter1.getY(), daughter1.getZ()), 1.0f)) {
                 reasonOut = "d1_buried_in_" + other.getName();
@@ -2365,6 +2367,7 @@ bool bioCheckDaughters(
         for (size_t i = 0; i < allCells.size(); ++i) {
             if (i == d1Idx || i == d2Idx) continue;
             const Ellipsoid &other = allCells[i];
+            if (ignoreTrashNeighbors && other.isTrash()) continue;
             const cv::Point3f oPos(other.getX(), other.getY(), other.getZ());
             const float d1ToOther = static_cast<float>(cv::norm(oPos - d1Pos));
             const float d2ToOther = static_cast<float>(cv::norm(oPos - d2Pos));
@@ -2648,6 +2651,275 @@ static void rotationMatrixToEulerZYX(const cv::Matx33d &R,
         tx = std::atan2(-R(1, 2), R(1, 1));
         tz = 0.0;
     }
+}
+
+static cv::Point3f normalizedOr(const cv::Point3f &v,
+                                const cv::Point3f &fallback)
+{
+    const double n = cv::norm(v);
+    if (n < 1e-9) return fallback;
+    return cv::Point3f(static_cast<float>(v.x / n),
+                       static_cast<float>(v.y / n),
+                       static_cast<float>(v.z / n));
+}
+
+static bool estimateFlattenedPlaneRotation(
+    const std::vector<BrightPixel> &pixels,
+    const Ellipsoid &cell,
+    float minPlaneRatio,
+    float minLongAxisRatio,
+    double &targetTx,
+    double &targetTy,
+    double &targetTz,
+    float &planeRatio,
+    float &longAxisRatio,
+    cv::Point3f &planeNormal,
+    cv::Point3f &planeLongAxis,
+    std::string &mode)
+{
+    if (pixels.size() < 3) return false;
+
+    double sx = 0.0, sy = 0.0, sz = 0.0, wsum = 0.0;
+    for (const auto &bp : pixels) {
+        const double w = static_cast<double>(bp.weight) * bp.weight;
+        sx += bp.pos.x * w;
+        sy += bp.pos.y * w;
+        sz += bp.pos.z * w;
+        wsum += w;
+    }
+    if (wsum < 1e-9) return false;
+
+    const double mx = sx / wsum;
+    const double my = sy / wsum;
+    const double mz = sz / wsum;
+    double cxx = 0.0, cxy = 0.0, cxz = 0.0;
+    double cyy = 0.0, cyz = 0.0, czz = 0.0;
+    for (const auto &bp : pixels) {
+        const double w = static_cast<double>(bp.weight) * bp.weight;
+        const double dx = bp.pos.x - mx;
+        const double dy = bp.pos.y - my;
+        const double dz = bp.pos.z - mz;
+        cxx += w * dx * dx; cxy += w * dx * dy; cxz += w * dx * dz;
+        cyy += w * dy * dy; cyz += w * dy * dz;
+        czz += w * dz * dz;
+    }
+    cxx /= wsum; cxy /= wsum; cxz /= wsum;
+    cyy /= wsum; cyz /= wsum; czz /= wsum;
+
+    cv::Matx33d cov(cxx, cxy, cxz, cxy, cyy, cyz, cxz, cyz, czz);
+    cv::Matx33d eigvecs;
+    cv::Vec3d eigvals;
+    cv::eigen(cov, eigvals, eigvecs);
+    const double l0 = std::max(0.0, eigvals[0]);
+    const double l1 = std::max(0.0, eigvals[1]);
+    const double l2 = std::max(0.0, eigvals[2]);
+    if (l1 <= 1e-9 || l2 <= 1e-9) return false;
+
+    planeRatio = static_cast<float>(l1 / std::max(l2, 1e-9));
+    longAxisRatio = static_cast<float>(l0 / std::max(l1, 1e-9));
+    if (planeRatio < minPlaneRatio) return false;
+
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    cv::Point3f curAxis[3];
+    for (int i = 0; i < 3; ++i) {
+        const int base = 3 * i;
+        curAxis[i] = normalizedOr(
+            cv::Point3f(static_cast<float>(R_T[base]),
+                        static_cast<float>(R_T[base + 1]),
+                        static_cast<float>(R_T[base + 2])),
+            cv::Point3f(i == 0 ? 1.0f : 0.0f,
+                        i == 1 ? 1.0f : 0.0f,
+                        i == 2 ? 1.0f : 0.0f));
+    }
+
+    cv::Point3f pcaAxis[3];
+    for (int i = 0; i < 3; ++i) {
+        pcaAxis[i] = normalizedOr(
+            cv::Point3f(static_cast<float>(eigvecs(i, 0)),
+                        static_cast<float>(eigvecs(i, 1)),
+                        static_cast<float>(eigvecs(i, 2))),
+            curAxis[i]);
+    }
+
+    cv::Point3f axisA;
+    cv::Point3f axisB;
+    cv::Point3f axisC = pcaAxis[2];
+    if (axisC.dot(curAxis[2]) < 0.0f) axisC *= -1.0f;
+    planeNormal = axisC;
+
+    if (longAxisRatio >= minLongAxisRatio) {
+        axisA = pcaAxis[0];
+        if (axisA.dot(curAxis[0]) < 0.0f) axisA *= -1.0f;
+        axisA = normalizedOr(axisA - axisC * axisA.dot(axisC), curAxis[0]);
+        axisB = axisC.cross(axisA);
+        mode = "plane_and_long_axis";
+    } else {
+        axisA = curAxis[0] - axisC * curAxis[0].dot(axisC);
+        if (cv::norm(axisA) < 1e-6) {
+            axisA = pcaAxis[0] - axisC * pcaAxis[0].dot(axisC);
+        }
+        axisA = normalizedOr(axisA, pcaAxis[0]);
+        axisB = axisC.cross(axisA);
+        mode = "plane_only";
+    }
+    axisB = normalizedOr(axisB, pcaAxis[1]);
+    planeLongAxis = axisA;
+
+    cv::Matx33d R(axisA.x, axisB.x, axisC.x,
+                  axisA.y, axisB.y, axisC.y,
+                  axisA.z, axisB.z, axisC.z);
+    if (cv::determinant(R) < 0.0) {
+        axisB *= -1.0f;
+        R = cv::Matx33d(axisA.x, axisB.x, axisC.x,
+                        axisA.y, axisB.y, axisC.y,
+                        axisA.z, axisB.z, axisC.z);
+    }
+
+    rotationMatrixToEulerZYX(R, targetTx, targetTy, targetTz);
+    return true;
+}
+
+static bool rotationFromConstrainedPlaneNormal(
+    const Ellipsoid &cell,
+    const cv::Point3f &normal,
+    const cv::Point3f &preferredLongAxis,
+    double &targetTx,
+    double &targetTy,
+    double &targetTz)
+{
+    const cv::Point3f axisC =
+        normalizedOr(normal, cv::Point3f(0.0f, 0.0f, 1.0f));
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    const cv::Point3f curA =
+        normalizedOr(cv::Point3f(static_cast<float>(R_T[0]),
+                                 static_cast<float>(R_T[1]),
+                                 static_cast<float>(R_T[2])),
+                     cv::Point3f(1.0f, 0.0f, 0.0f));
+
+    cv::Point3f axisA =
+        preferredLongAxis - axisC * preferredLongAxis.dot(axisC);
+    if (cv::norm(axisA) < 1e-6) {
+        axisA = curA - axisC * curA.dot(axisC);
+    }
+    axisA = normalizedOr(axisA, curA);
+    cv::Point3f axisB = normalizedOr(axisC.cross(axisA),
+                                     cv::Point3f(0.0f, 1.0f, 0.0f));
+
+    cv::Matx33d R(axisA.x, axisB.x, axisC.x,
+                  axisA.y, axisB.y, axisC.y,
+                  axisA.z, axisB.z, axisC.z);
+    if (cv::determinant(R) < 0.0) {
+        axisB *= -1.0f;
+        R = cv::Matx33d(axisA.x, axisB.x, axisC.x,
+                        axisA.y, axisB.y, axisC.y,
+                        axisA.z, axisB.z, axisC.z);
+    }
+
+    rotationMatrixToEulerZYX(R, targetTx, targetTy, targetTz);
+    return true;
+}
+
+
+static int shortestAxisSlotFor(const Ellipsoid &cell)
+{
+    int slot = 0;
+    float value = cell.getARadius();
+    if (cell.getBRadius() < value) {
+        slot = 1;
+        value = cell.getBRadius();
+    }
+    if (cell.getCRadius() < value) {
+        slot = 2;
+    }
+    return slot;
+}
+
+static bool rotationAligningShortestAxisToDirection(
+    const Ellipsoid &cell,
+    const cv::Point3f &targetDirection,
+    double &targetTx,
+    double &targetTy,
+    double &targetTz,
+    int *shortSlotOut = nullptr,
+    float *angleBeforeDegOut = nullptr)
+{
+    const cv::Point3f target = normalizedOr(targetDirection,
+                                            cv::Point3f(0.0f, 0.0f, 1.0f));
+    if (cv::norm(targetDirection) < 1e-6) {
+        return false;
+    }
+
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    cv::Point3f curAxis[3];
+    for (int i = 0; i < 3; ++i) {
+        const int base = 3 * i;
+        curAxis[i] = normalizedOr(
+            cv::Point3f(static_cast<float>(R_T[base]),
+                        static_cast<float>(R_T[base + 1]),
+                        static_cast<float>(R_T[base + 2])),
+            cv::Point3f(i == 0 ? 1.0f : 0.0f,
+                        i == 1 ? 1.0f : 0.0f,
+                        i == 2 ? 1.0f : 0.0f));
+    }
+
+    const int shortSlot = shortestAxisSlotFor(cell);
+    if (shortSlotOut) {
+        *shortSlotOut = shortSlot;
+    }
+    if (angleBeforeDegOut) {
+        const double dot = std::clamp(
+            std::abs(static_cast<double>(curAxis[shortSlot].dot(target))),
+            0.0,
+            1.0);
+        *angleBeforeDegOut = static_cast<float>(std::acos(dot) * 180.0 / M_PI);
+    }
+
+    const float radii[3] = {
+        cell.getARadius(),
+        cell.getBRadius(),
+        cell.getCRadius()
+    };
+    int refSlot = -1;
+    float refRadius = -1.0f;
+    for (int i = 0; i < 3; ++i) {
+        if (i == shortSlot) continue;
+        if (radii[i] > refRadius) {
+            refRadius = radii[i];
+            refSlot = i;
+        }
+    }
+    if (refSlot < 0) {
+        return false;
+    }
+    const int remainingSlot = 3 - shortSlot - refSlot;
+
+    cv::Point3f axis[3];
+    axis[shortSlot] = target;
+    axis[refSlot] = curAxis[refSlot] - target * curAxis[refSlot].dot(target);
+    if (cv::norm(axis[refSlot]) < 1e-6) {
+        cv::Point3f u, v;
+        orthonormalFrame(target, u, v);
+        axis[refSlot] = u;
+    }
+    axis[refSlot] = normalizedOr(axis[refSlot], cv::Point3f(1.0f, 0.0f, 0.0f));
+    axis[remainingSlot] = normalizedOr(axis[shortSlot].cross(axis[refSlot]),
+                                       cv::Point3f(0.0f, 1.0f, 0.0f));
+
+    cv::Matx33d R(axis[0].x, axis[1].x, axis[2].x,
+                  axis[0].y, axis[1].y, axis[2].y,
+                  axis[0].z, axis[1].z, axis[2].z);
+    if (cv::determinant(R) < 0.0) {
+        axis[remainingSlot] *= -1.0f;
+        R = cv::Matx33d(axis[0].x, axis[1].x, axis[2].x,
+                        axis[0].y, axis[1].y, axis[2].y,
+                        axis[0].z, axis[1].z, axis[2].z);
+    }
+
+    rotationMatrixToEulerZYX(R, targetTx, targetTy, targetTz);
+    return true;
 }
 
 
@@ -3781,6 +4053,7 @@ CostCallbackPair Frame::trySplitCellPhased(
         cv::Point3f d1Pos;
         cv::Point3f d2Pos;
         std::string label;
+        float sphereRadiusOverride = -1.0f;
     };
 
     // Daughter built radii = volumeScale × snapshot parent radii. Default
@@ -3906,11 +4179,25 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeCand.d1Pos = bridgeProposal->d1Pos;
         bridgeCand.d2Pos = bridgeProposal->d2Pos;
         bridgeCand.label = "bridge_primary";
+        bridgeCand.sphereRadiusOverride = bridgeProposal->daughterSphereRadius;
+        std::vector<Candidate> bridgeCandidates{bridgeCand};
+        if (bridgeProposal->hasAlternateSeedPair) {
+            Candidate altCand;
+            altCand.d1Pos = bridgeProposal->altD1Pos;
+            altCand.d2Pos = bridgeProposal->altD2Pos;
+            altCand.label = "bridge_tip_alt";
+            altCand.sphereRadiusOverride = bridgeProposal->daughterSphereRadius;
+            bridgeCandidates.push_back(altCand);
+        }
         if (bridgeProposalOnly) {
             candidates.clear();
-            candidates.push_back(bridgeCand);
+            candidates.insert(candidates.end(),
+                              bridgeCandidates.begin(),
+                              bridgeCandidates.end());
         } else {
-            candidates.insert(candidates.begin(), bridgeCand);
+            candidates.insert(candidates.begin(),
+                              bridgeCandidates.begin(),
+                              bridgeCandidates.end());
         }
         std::cout << "  [Split Bridge Inject] " << parentName
                   << " only=" << (bridgeProposalOnly ? 1 : 0)
@@ -3918,9 +4205,17 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << "," << bridgeCand.d1Pos.z << ")"
                   << " d2=(" << bridgeCand.d2Pos.x << "," << bridgeCand.d2Pos.y
                   << "," << bridgeCand.d2Pos.z << ")"
+                  << " alt=" << (bridgeProposal->hasAlternateSeedPair ? 1 : 0)
+                  << " altD1=(" << bridgeProposal->altD1Pos.x << ","
+                  << bridgeProposal->altD1Pos.y << ","
+                  << bridgeProposal->altD1Pos.z << ")"
+                  << " altD2=(" << bridgeProposal->altD2Pos.x << ","
+                  << bridgeProposal->altD2Pos.y << ","
+                  << bridgeProposal->altD2Pos.z << ")"
                   << " elong=" << bridgeProposal->elongation
                   << " gapBins=" << bridgeProposal->gapStartBin << "-"
                   << bridgeProposal->gapEndBin
+                  << " sphereRadius=" << bridgeProposal->daughterSphereRadius
                   << std::endl;
     }
 
@@ -4074,6 +4369,10 @@ CostCallbackPair Frame::trySplitCellPhased(
             cand.label == "cell_lumen_primary" && lumenUseDedicatedCostGate;
         const bool candIsPcaBridgeOnly =
             bridgeProposalOnly && cand.label == "bridge_primary";
+        const bool futureBackedBridgeRescue =
+            candIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->futureWindowSplitRescue;
         const float activeDaughterVolumeScale =
             (candIsCellLumenPrior && lumenDaughterVolumeScale > 0.0f)
                 ? lumenDaughterVolumeScale
@@ -4082,6 +4381,25 @@ CostCallbackPair Frame::trySplitCellPhased(
                                          activeDaughterVolumeScale, srcMajor, srcB, srcMinor);
         Ellipsoid child2 = buildDaughter(parentName + "1", cand.d2Pos, parent,
                                          activeDaughterVolumeScale, srcMajor, srcB, srcMinor);
+        auto applySphereRadiusOverride = [](Ellipsoid &daughter, float radius) {
+            if (radius <= 0.0f) return;
+            const auto &cfg = Ellipsoid::cellConfig;
+            const float rA = std::clamp(
+                radius,
+                static_cast<float>(cfg.minARadius),
+                static_cast<float>(cfg.maxARadius));
+            const float rB = std::clamp(
+                radius,
+                static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.minBRadius : cfg.minARadius),
+                static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.maxBRadius : cfg.maxARadius));
+            const float rC = std::clamp(
+                radius,
+                static_cast<float>(cfg.minCRadius),
+                static_cast<float>(cfg.maxCRadius));
+            daughter.setRadii(rA, rB, rC);
+        };
+        applySphereRadiusOverride(child1, cand.sphereRadiusOverride);
+        applySphereRadiusOverride(child2, cand.sphereRadiusOverride);
 
         // Replace parent with daughters.
         cells.erase(cells.begin() + cellIndex);
@@ -4244,6 +4562,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         const bool bothDaughtersBright =
             (d1LocalBright >= activeMinDaughterBright) &&
             (d2LocalBright >= activeMinDaughterBright);
+        const bool futureWindowDimBypass =
+            futureBackedBridgeRescue && !bothDaughtersBright;
 
         // Quick valley pre-filter: project the parent's pixel cloud onto
         // the d1→d2 axis and measure gap vs max(edges). Same logic as the
@@ -4321,7 +4641,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             candIsPcaBridgeOnly && !probConfig.pca_bridge_require_valley;
         const bool lumenPrefilterValleyIsSoft =
             candIsCellLumenPrior && lumenUseDedicatedCostGate && lumenSoftGateEnabled;
-        const bool candPassesPreFilter = bothDaughtersBright &&
+        const bool candPassesPreFilter = (bothDaughtersBright || futureWindowDimBypass) &&
                                          (bypassPcaBridgeValley ||
                                           lumenPrefilterValleyIsSoft ||
                                           candValleyFromBright < valleyLimit);
@@ -4334,6 +4654,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " minBright=" << activeMinDaughterBright
                       << " valley=" << candValleyFromBright
                       << (bothDaughtersBright ? "" : " EDGE_DIM")
+                      << (futureWindowDimBypass ? " FUTURE_DIM_BYPASS" : "")
                       << (bypassPcaBridgeValley ? " VALLEY_BYPASS" : "")
                       << (candValleyFromBright >= valleyLimit && !lumenPrefilterValleyIsSoft && !bypassPcaBridgeValley
                               ? " NO_VALLEY" : "")
@@ -4458,13 +4779,41 @@ CostCallbackPair Frame::trySplitCellPhased(
         //     past ~1.1× built due to immature sibling-Voronoi boundary
         //     absorbing neighbor/halo pixels during refit.
         if (daughterRefitIters > 0) {
+            const bool winningFutureBackedBridgeRescue =
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->futureWindowSplitRescue &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue;
             const float minFrac = std::max(0.0f, std::min(1.0f,
                 probConfig.split_daughter_refit_min_radius_fraction));
             const float maxFrac = std::max(1.0f,
                 probConfig.split_daughter_refit_max_radius_fraction);
-            const float dBuiltA = volumeScale * srcMajor;
-            const float dBuiltB = volumeScale * srcB;
-            const float dBuiltC = volumeScale * srcMinor;
+            const bool bestUsesSphereOverride =
+                bridgeProposalOnly &&
+                (bestLabel == "bridge_primary" || bestLabel == "bridge_tip_alt") &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->daughterSphereRadius > 0.0f;
+            float dBuiltA = volumeScale * srcMajor;
+            float dBuiltB = volumeScale * srcB;
+            float dBuiltC = volumeScale * srcMinor;
+            if (bestUsesSphereOverride) {
+                const auto &cfg = Ellipsoid::cellConfig;
+                const float r = bridgeProposal->daughterSphereRadius;
+                dBuiltA = std::clamp(
+                    r,
+                    static_cast<float>(cfg.minARadius),
+                    static_cast<float>(cfg.maxARadius));
+                dBuiltB = std::clamp(
+                    r,
+                    static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.minBRadius : cfg.minARadius),
+                    static_cast<float>(cfg.maxBRadius > 0.0 ? cfg.maxBRadius : cfg.maxARadius));
+                dBuiltC = std::clamp(
+                    r,
+                    static_cast<float>(cfg.minCRadius),
+                    static_cast<float>(cfg.maxCRadius));
+            }
             const float floorA = minFrac * dBuiltA;
             const float floorB = minFrac * dBuiltB;
             const float floorC = minFrac * dBuiltC;
@@ -4491,6 +4840,218 @@ CostCallbackPair Frame::trySplitCellPhased(
                                          cells[idx].getY(),
                                          cells[idx].getZ());
                 ClaimSet others = buildRefitClaimSet(idx);
+                bool flattenedPlaneRotationApplied = false;
+                if (simulationConfig.celluniverse2_enabled &&
+                    probConfig.split_daughter_flattened_plane_rotation_enabled) {
+                    const float builtMax = std::max({dBuiltA, dBuiltB, dBuiltC});
+                    const float builtMin = std::max(
+                        1e-3f,
+                        std::min({dBuiltA, dBuiltB, dBuiltC}));
+                    const float builtShape = builtMax / builtMin;
+                    if (builtShape >=
+                        std::max(1.0f,
+                                 probConfig.split_daughter_flattened_plane_min_shape)) {
+                        const float planeRadius =
+                            std::max(4.0f,
+                                     probConfig
+                                         .split_daughter_flattened_plane_radius_scale *
+                                         builtMax);
+                        GatherStats planeStats;
+                        const std::vector<cv::Point3f> selfPlaneClaim{prePos};
+                        const auto planePixels = gatherBrightPixelsVoronoi(
+                            _realFrame,
+                            _backgroundValue,
+                            prePos,
+                            planeRadius,
+                            selfPlaneClaim,
+                            others,
+                            &planeStats);
+                        double targetTx = cells[idx].getThetaX();
+                        double targetTy = cells[idx].getThetaY();
+                        double targetTz = cells[idx].getThetaZ();
+                        float planeRatio = 0.0f;
+                        float longAxisRatio = 0.0f;
+                        cv::Point3f planeNormal(0.0f, 0.0f, 1.0f);
+                        cv::Point3f planeLongAxis(1.0f, 0.0f, 0.0f);
+                        std::string mode;
+                        const bool ok =
+                            static_cast<int>(planePixels.size()) >=
+                                probConfig
+                                    .split_daughter_flattened_plane_min_pixels &&
+                            estimateFlattenedPlaneRotation(
+                                planePixels,
+                                cells[idx],
+                                std::max(
+                                    1.0f,
+                                    probConfig
+                                        .split_daughter_flattened_plane_min_ratio),
+                                std::max(
+                                    1.0f,
+                                    probConfig
+                                        .split_daughter_flattened_plane_long_axis_ratio),
+                                targetTx,
+                                targetTy,
+                                targetTz,
+                                planeRatio,
+                                longAxisRatio,
+                                planeNormal,
+                                planeLongAxis,
+                                mode);
+                        bool neighborConstrained = false;
+                        std::string neighborGuardDetail;
+                        if (ok &&
+                            probConfig
+                                .split_daughter_flattened_plane_neighbor_guard_enabled) {
+                            cv::Point3f shortAxis(0.0f, 0.0f, 1.0f);
+                            float shortLen = 0.0f;
+                            cells[idx].worldSplitAxis(shortAxis, shortLen);
+                            shortAxis = normalizedOr(
+                                shortAxis,
+                                cv::Point3f(0.0f, 0.0f, 1.0f));
+                            const float maxNeighborDist =
+                                std::max(
+                                    0.0f,
+                                    probConfig
+                                        .split_daughter_flattened_plane_neighbor_distance_scale) *
+                                builtMax;
+                            const float maxLateral =
+                                std::max(
+                                    0.0f,
+                                    probConfig
+                                        .split_daughter_flattened_plane_neighbor_lateral_scale) *
+                                builtMax;
+                            const float minAxisAlign =
+                                std::clamp(
+                                    probConfig
+                                        .split_daughter_flattened_plane_neighbor_axis_alignment,
+                                    0.0f,
+                                    1.0f);
+                            const float minNormalAlign =
+                                std::clamp(
+                                    probConfig
+                                        .split_daughter_flattened_plane_neighbor_normal_alignment,
+                                    0.0f,
+                                    1.0f);
+                            float bestNeighborNormalAlign = 1.0f;
+                            float bestNeighborAxisAlign = 0.0f;
+                            float bestNeighborDist = 0.0f;
+                            std::string bestNeighborName;
+                            cv::Point3f bestNeighborDir(0.0f, 0.0f, 1.0f);
+
+                            for (const auto &kv : others) {
+                                for (const auto &op : kv.second) {
+                                    cv::Point3f delta = op - prePos;
+                                    const float dist =
+                                        static_cast<float>(cv::norm(delta));
+                                    if (dist < 1e-3f || dist > maxNeighborDist) {
+                                        continue;
+                                    }
+                                    const cv::Point3f dir =
+                                        delta * (1.0f / dist);
+                                    const float axisAlign =
+                                        std::abs(dir.dot(shortAxis));
+                                    const float axial = dist * axisAlign;
+                                    const float lateral = std::sqrt(std::max(
+                                        0.0f,
+                                        dist * dist - axial * axial));
+                                    if (axisAlign < minAxisAlign ||
+                                        lateral > maxLateral) {
+                                        continue;
+                                    }
+
+                                    const float normalAlign =
+                                        std::abs(dir.dot(planeNormal));
+                                    if (normalAlign < bestNeighborNormalAlign) {
+                                        bestNeighborNormalAlign = normalAlign;
+                                        bestNeighborAxisAlign = axisAlign;
+                                        bestNeighborDist = dist;
+                                        bestNeighborName = kv.first;
+                                        bestNeighborDir = dir;
+                                    }
+                                }
+                            }
+
+                            if (bestNeighborName.empty()) {
+                                bestNeighborNormalAlign = 1.0f;
+                            } else {
+                                if (bestNeighborDir.dot(planeNormal) < 0.0f) {
+                                    bestNeighborDir *= -1.0f;
+                                }
+                                if (bestNeighborNormalAlign < minNormalAlign) {
+                                    rotationFromConstrainedPlaneNormal(
+                                        cells[idx],
+                                        bestNeighborDir,
+                                        planeLongAxis,
+                                        targetTx,
+                                        targetTy,
+                                        targetTz);
+                                    planeNormal = bestNeighborDir;
+                                    mode += "_neighbor_constrained";
+                                    neighborConstrained = true;
+                                }
+                                std::ostringstream ss;
+                                ss << " neighbor=" << bestNeighborName
+                                   << " dist=" << bestNeighborDist
+                                   << " axisAlign=" << bestNeighborAxisAlign
+                                   << " normalAlign="
+                                   << bestNeighborNormalAlign
+                                   << " minNormalAlign="
+                                   << minNormalAlign
+                                   << " constrained="
+                                   << (neighborConstrained ? 1 : 0);
+                                neighborGuardDetail = ss.str();
+                            }
+                        }
+                        if (ok) {
+                            const float oldTx = cells[idx].getThetaX();
+                            const float oldTy = cells[idx].getThetaY();
+                            const float oldTz = cells[idx].getThetaZ();
+                            cells[idx].setRotation(
+                                static_cast<float>(targetTx),
+                                static_cast<float>(targetTy),
+                                static_cast<float>(targetTz));
+                            flattenedPlaneRotationApplied = true;
+                            std::cout << "  [Split Daughter Plane Rotation] "
+                                      << parentName
+                                      << " " << label
+                                      << " mode=" << mode
+                                      << " pixels=" << planePixels.size()
+                                      << " planeRatio=" << planeRatio
+                                      << " longAxisRatio=" << longAxisRatio
+                                      << " planeNormal=("
+                                      << planeNormal.x << ","
+                                      << planeNormal.y << ","
+                                      << planeNormal.z << ")"
+                                      << neighborGuardDetail
+                                      << " builtShape=" << builtShape
+                                      << " radius=" << planeRadius
+                                      << " oldTheta=(" << oldTx << ","
+                                      << oldTy << "," << oldTz << ")"
+                                      << " newTheta=(" << targetTx << ","
+                                      << targetTy << "," << targetTz << ")"
+                                      << std::endl;
+                        } else {
+                            std::cout << "  [Split Daughter Plane Rotation Skip] "
+                                      << parentName
+                                      << " " << label
+                                      << " reason=pca_gate"
+                                      << " pixels=" << planePixels.size()
+                                      << " minPixels="
+                                      << probConfig
+                                             .split_daughter_flattened_plane_min_pixels
+                                      << " planeRatio=" << planeRatio
+                                      << " longAxisRatio=" << longAxisRatio
+                                      << " planeNormal=("
+                                      << planeNormal.x << ","
+                                      << planeNormal.y << ","
+                                      << planeNormal.z << ")"
+                                      << neighborGuardDetail
+                                      << " builtShape=" << builtShape
+                                      << " radius=" << planeRadius
+                                      << std::endl;
+                        }
+                    }
+                }
                 // Position update ENABLED for daughter refit (distinct
                 // from mature cells' shape fit, which keeps it off to
                 // let calibration own position). At birth the daughter's
@@ -4512,6 +5073,52 @@ CostCallbackPair Frame::trySplitCellPhased(
                 const float fitB = std::clamp(cells[idx].getBRadius(), floorB, ceilB);
                 const float fitC = std::clamp(cells[idx].getCRadius(), floorC, ceilC);
                 cells[idx].setRadii(fitA, fitB, fitC);
+                if (flattenedPlaneRotationApplied) {
+                    const cv::Point3f beforeExtraPos(cells[idx].getX(),
+                                                     cells[idx].getY(),
+                                                     cells[idx].getZ());
+                    const float beforeExtraA = cells[idx].getARadius();
+                    const float beforeExtraB = cells[idx].getBRadius();
+                    const float beforeExtraC = cells[idx].getCRadius();
+                    calibrateCellShapeViaPca(
+                        idx, others,
+                        daughterRefitIters,
+                        Ellipsoid::cellConfig.pcaShapeRadiusScale,
+                        Ellipsoid::cellConfig.pcaShapeMinPixels,
+                        Ellipsoid::cellConfig.pcaShapeMaskScale,
+                        Ellipsoid::cellConfig.pcaShapeConvergeRadius,
+                        Ellipsoid::cellConfig.pcaShapeConvergeAngleDeg,
+                        /*updatePosition=*/true,
+                        Ellipsoid::cellConfig.pcaShapeMaxPosShiftFraction,
+                        dBuiltA, dBuiltB, dBuiltC);
+                    const float extraFitA =
+                        std::clamp(cells[idx].getARadius(), floorA, ceilA);
+                    const float extraFitB =
+                        std::clamp(cells[idx].getBRadius(), floorB, ceilB);
+                    const float extraFitC =
+                        std::clamp(cells[idx].getCRadius(), floorC, ceilC);
+                    cells[idx].setRadii(extraFitA, extraFitB, extraFitC);
+                    const cv::Point3f afterExtraPos(cells[idx].getX(),
+                                                    cells[idx].getY(),
+                                                    cells[idx].getZ());
+                    std::cout << "  [Split Daughter Plane Rotation Extra PCA] "
+                              << parentName
+                              << " " << label
+                              << " iters=" << daughterRefitIters
+                              << " pre=(" << beforeExtraA << ","
+                              << beforeExtraB << "," << beforeExtraC << ")"
+                              << " post=(" << extraFitA << ","
+                              << extraFitB << "," << extraFitC << ")"
+                              << " prePos=(" << beforeExtraPos.x << ","
+                              << beforeExtraPos.y << "," << beforeExtraPos.z
+                              << ")"
+                              << " postPos=(" << afterExtraPos.x << ","
+                              << afterExtraPos.y << "," << afterExtraPos.z
+                              << ")"
+                              << " posShift="
+                              << cv::norm(afterExtraPos - beforeExtraPos)
+                              << std::endl;
+                }
                 const cv::Point3f postPos(cells[idx].getX(),
                                           cells[idx].getY(),
                                           cells[idx].getZ());
@@ -4531,6 +5138,135 @@ CostCallbackPair Frame::trySplitCellPhased(
 
             refitOne(d1IdxRefine, "d1");
             refitOne(d2IdxRefine, "d2");
+
+            if (simulationConfig.celluniverse2_enabled &&
+                probConfig.split_daughter_refit_keep_seed_halfspace_enabled) {
+                cv::Point3f seedAxis = preRefineD2 - preRefineD1;
+                const float seedDistance = static_cast<float>(cv::norm(seedAxis));
+                if (seedDistance > 1e-3f) {
+                    seedAxis *= (1.0f / seedDistance);
+                    const cv::Point3f seedMidpoint =
+                        0.5f * (preRefineD1 + preRefineD2);
+                    const float requestedHalfspaceMinFraction =
+                        winningFutureBackedBridgeRescue
+                            ? std::max(
+                                  probConfig.split_daughter_refit_halfspace_min_fraction,
+                                  probConfig.pca_bridge_future_window_refit_halfspace_min_fraction)
+                            : probConfig.split_daughter_refit_halfspace_min_fraction;
+                    const float minFraction = std::clamp(
+                        requestedHalfspaceMinFraction,
+                        0.0f,
+                        0.95f);
+                    const float minSigned = 0.5f * seedDistance * minFraction;
+
+                    auto keepOnSeedSide = [&](size_t idx,
+                                              float sideSign,
+                                              const char *label) {
+                        const cv::Point3f pos(cells[idx].getX(),
+                                              cells[idx].getY(),
+                                              cells[idx].getZ());
+                        const float coord = (pos - seedMidpoint).dot(seedAxis);
+                        float clampedCoord = coord;
+                        if (sideSign < 0.0f && coord > -minSigned) {
+                            clampedCoord = -minSigned;
+                        } else if (sideSign > 0.0f && coord < minSigned) {
+                            clampedCoord = minSigned;
+                        }
+                        if (std::abs(clampedCoord - coord) <= 1e-4f) {
+                            return;
+                        }
+
+                        const cv::Point3f corrected =
+                            pos + seedAxis * (clampedCoord - coord);
+                        cells[idx].setPosition(corrected.x,
+                                               corrected.y,
+                                               corrected.z);
+                        std::cout << "  [Split Daughter Halfspace Clamp] "
+                                  << parentName
+                                  << " " << label
+                                  << " seedDistance=" << seedDistance
+                                  << " minFraction=" << minFraction
+                                  << " futureBackedBridge="
+                                  << (winningFutureBackedBridgeRescue ? 1 : 0)
+                                  << " coord=" << coord
+                                  << " clampedCoord=" << clampedCoord
+                                  << " from=(" << pos.x << "," << pos.y
+                                  << "," << pos.z << ")"
+                                  << " to=(" << corrected.x << ","
+                                  << corrected.y << "," << corrected.z
+                                  << ")"
+                                  << std::endl;
+                    };
+
+                    keepOnSeedSide(d1IdxRefine, -1.0f, "d1");
+                    keepOnSeedSide(d2IdxRefine, 1.0f, "d2");
+                }
+            }
+
+            if (simulationConfig.celluniverse2_enabled &&
+                probConfig.split_daughter_refit_align_short_axis_to_split_enabled) {
+                const cv::Point3f alignedD1(cells[d1IdxRefine].getX(),
+                                            cells[d1IdxRefine].getY(),
+                                            cells[d1IdxRefine].getZ());
+                const cv::Point3f alignedD2(cells[d2IdxRefine].getX(),
+                                            cells[d2IdxRefine].getY(),
+                                            cells[d2IdxRefine].getZ());
+                cv::Point3f splitDir = alignedD2 - alignedD1;
+                const float splitLen = static_cast<float>(cv::norm(splitDir));
+                if (splitLen > 1e-3f) {
+                    splitDir *= (1.0f / splitLen);
+                    auto alignDaughterShortAxis = [&](size_t idx,
+                                                       const char *label) {
+                        const float oldTx = cells[idx].getThetaX();
+                        const float oldTy = cells[idx].getThetaY();
+                        const float oldTz = cells[idx].getThetaZ();
+                        cv::Point3f oldShortAxis;
+                        float oldShortLen = 0.0f;
+                        cells[idx].worldSplitAxis(oldShortAxis, oldShortLen);
+                        double targetTx = oldTx;
+                        double targetTy = oldTy;
+                        double targetTz = oldTz;
+                        int shortSlot = 0;
+                        float angleBefore = 0.0f;
+                        if (!rotationAligningShortestAxisToDirection(
+                                cells[idx],
+                                splitDir,
+                                targetTx,
+                                targetTy,
+                                targetTz,
+                                &shortSlot,
+                                &angleBefore)) {
+                            return;
+                        }
+                        cells[idx].setRotation(static_cast<float>(targetTx),
+                                               static_cast<float>(targetTy),
+                                               static_cast<float>(targetTz));
+                        cv::Point3f newShortAxis;
+                        float newShortLen = 0.0f;
+                        cells[idx].worldSplitAxis(newShortAxis, newShortLen);
+                        const float alignment = std::abs(newShortAxis.dot(splitDir));
+                        std::cout << "  [Split Daughter Axis Align] "
+                                  << parentName
+                                  << " " << label
+                                  << " splitLen=" << splitLen
+                                  << " shortSlot=" << shortSlot
+                                  << " angleBeforeDeg=" << angleBefore
+                                  << " alignment=" << alignment
+                                  << " oldAxis=(" << oldShortAxis.x << ","
+                                  << oldShortAxis.y << "," << oldShortAxis.z
+                                  << ")"
+                                  << " splitDir=(" << splitDir.x << ","
+                                  << splitDir.y << "," << splitDir.z << ")"
+                                  << " oldTheta=(" << oldTx << ","
+                                  << oldTy << "," << oldTz << ")"
+                                  << " newTheta=(" << targetTx << ","
+                                  << targetTy << "," << targetTz << ")"
+                                  << std::endl;
+                    };
+                    alignDaughterShortAxis(d1IdxRefine, "d1");
+                    alignDaughterShortAxis(d2IdxRefine, "d2");
+                }
+            }
 
             // Radii changed → regenerate synth. Under bbox mode, only
             // re-render the z-slices affected by the two daughters (whose
@@ -4655,6 +5391,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     const bool useCellLumenGateParams = bestIsCellLumenPrior && lumenUseDedicatedCostGate;
     const bool useCellLumenSoftGate = useCellLumenGateParams && lumenSoftGateEnabled;
     double lumenSoftGatePenaltyCost = 0.0;
+    double splitSoftGeometryPenaltyCost = 0.0;
     int lumenLocalNeighborCount = 0;
     if (useCellLumenSoftGate && lumenDynamicOverlapEnabled) {
         const cv::Point3f parentPos(parent.getX(), parent.getY(), parent.getZ());
@@ -4688,6 +5425,40 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestLabel=" << bestLabel
                   << std::endl;
     };
+    auto addSplitSoftGeometryPenalty = [&](const std::string &reason,
+                                           double normalizedExcess,
+                                           double penaltyFraction) {
+        if (!simulationConfig.celluniverse2_enabled ||
+            !probConfig.split_soft_geometry_gate_enabled ||
+            normalizedExcess <= 0.0 ||
+            penaltyFraction <= 0.0) {
+            return;
+        }
+        const double penalty = baselineImageCost * normalizedExcess * penaltyFraction;
+        splitSoftGeometryPenaltyCost += penalty;
+        std::cout << "[Split Soft Geometry Gate] " << parentName
+                  << " reason=" << reason
+                  << " normalizedExcess=" << normalizedExcess
+                  << " penaltyFraction=" << penaltyFraction
+                  << " penaltyCost=" << penalty
+                  << " runningPenalty=" << splitSoftGeometryPenaltyCost
+                  << " baselineImageCost=" << baselineImageCost
+                  << " bestLabel=" << bestLabel
+                  << std::endl;
+    };
+
+    if (simulationConfig.celluniverse2_enabled &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationSoftRescued) {
+        addSplitSoftGeometryPenalty(
+            "bio_separation_near_miss",
+            static_cast<double>(
+                std::max(0.0f,
+                         bridgeProposal->bioSeparationSoftNormalizedExcess)),
+            static_cast<double>(
+                std::max(0.0f,
+                         bridgeProposal->bioSeparationSoftPenaltyFraction)));
+    }
 
     // Drift from seed. A valid split is allowed to locally refine, but the
     // daughters should not explain the frame by walking far away from the
@@ -4698,6 +5469,45 @@ CostCallbackPair Frame::trySplitCellPhased(
         bestD2Pos - bestSeedD2));
     const float seedAxisLen = static_cast<float>(cv::norm(bestSeedD2 - bestSeedD1));
     const float finalAxisLen = static_cast<float>(cv::norm(bestD2Pos - bestD1Pos));
+    const float parentMaxRadiusForSoftGeometry =
+        std::max(1.0f, std::max({srcMajor, srcB, srcMinor}));
+    if (simulationConfig.celluniverse2_enabled &&
+        probConfig.split_soft_geometry_gate_enabled) {
+        const float softDriftFraction =
+            std::max(0.0f,
+                     probConfig.split_soft_max_daughter_seed_drift_fraction);
+        const float softDriftLimit =
+            softDriftFraction * parentMaxRadiusForSoftGeometry;
+        if (softDriftLimit > 0.0f) {
+            const float maxDrift = std::max(drift1, drift2);
+            const double normalizedExcess =
+                static_cast<double>(std::max(0.0f, maxDrift - softDriftLimit)) /
+                std::max(1.0, static_cast<double>(softDriftLimit));
+            addSplitSoftGeometryPenalty(
+                "daughter_seed_drift",
+                normalizedExcess,
+                static_cast<double>(
+                    std::max(0.0f, probConfig.split_soft_geometry_penalty_fraction)));
+        }
+
+        const float softFinalSepFraction =
+            std::max(0.0f,
+                     probConfig
+                         .split_soft_max_final_separation_parent_fraction);
+        const float softFinalSepLimit =
+            softFinalSepFraction * parentMaxRadiusForSoftGeometry;
+        if (softFinalSepLimit > 0.0f) {
+            const double normalizedExcess =
+                static_cast<double>(
+                    std::max(0.0f, finalAxisLen - softFinalSepLimit)) /
+                std::max(1.0, static_cast<double>(softFinalSepLimit));
+            addSplitSoftGeometryPenalty(
+                "daughter_final_separation",
+                normalizedExcess,
+                static_cast<double>(
+                    std::max(0.0f, probConfig.split_soft_geometry_penalty_fraction)));
+        }
+    }
     const float seedDx = bestSeedD2.x - bestSeedD1.x;
     const float seedDy = bestSeedD2.y - bestSeedD1.y;
     const float seedDz = bestSeedD2.z - bestSeedD1.z;
@@ -4925,14 +5735,92 @@ CostCallbackPair Frame::trySplitCellPhased(
         const float d1AxisAngle = foldedAxisAngleDeg(parentShortAxis, d1ShortAxis);
         const float d2AxisAngle = foldedAxisAngleDeg(parentShortAxis, d2ShortAxis);
 
+        auto foldedAxisAlignment = [](const cv::Point3f &a,
+                                      const cv::Point3f &b) -> float {
+            const double an = cv::norm(a);
+            const double bn = cv::norm(b);
+            if (an <= 1e-9 || bn <= 1e-9) {
+                return 0.0f;
+            }
+            return static_cast<float>(std::abs(
+                (static_cast<double>(a.x) * b.x +
+                 static_cast<double>(a.y) * b.y +
+                 static_cast<double>(a.z) * b.z) / (an * bn)));
+        };
+        const cv::Point3f daughterSplitAxis = bestD2Pos - bestD1Pos;
+        const float daughterSplitAxisLen =
+            static_cast<float>(cv::norm(daughterSplitAxis));
+        const float d1SplitLineAlignment =
+            foldedAxisAlignment(daughterSplitAxis, d1ShortAxis);
+        const float d2SplitLineAlignment =
+            foldedAxisAlignment(daughterSplitAxis, d2ShortAxis);
+        const bool generatedDaughtersAlignedToSplitAxis =
+            simulationConfig.celluniverse2_enabled &&
+            probConfig.split_daughter_refit_align_short_axis_to_split_enabled &&
+            daughterSplitAxisLen > 1e-3f &&
+            d1SplitLineAlignment >= 0.98f &&
+            d2SplitLineAlignment >= 0.98f;
+
         if (d1AxisAngle > effectiveAllowedAngle || d2AxisAngle > effectiveAllowedAngle) {
+            const float worstAxisAngle = std::max(d1AxisAngle, d2AxisAngle);
+            const double normalizedAxisExcess =
+                static_cast<double>(
+                    std::max(0.0f, worstAxisAngle - effectiveAllowedAngle)) /
+                std::max(1.0, 90.0 - static_cast<double>(effectiveAllowedAngle));
             const bool deterministicAxisWaived =
                 simulationConfig.celluniverse2_enabled &&
                 bestIsDeterministicSingleProposal &&
                 (bestIsSignalCenterProposal ||
                  (bridgeProposal != nullptr &&
                   bridgeProposal->windowImmediateBothDaughtersSupported > 0));
-            if (deterministicAxisWaived) {
+            if (simulationConfig.celluniverse2_enabled &&
+                generatedDaughtersAlignedToSplitAxis) {
+                std::cout << "[Split Soft Gate Waived] " << parentName
+                          << " reason=daughter_short_axis_alignment"
+                          << " splitAxisAligned=1"
+                          << " splitAxisLen=" << daughterSplitAxisLen
+                          << " d1SplitLineAlignment=" << d1SplitLineAlignment
+                          << " d2SplitLineAlignment=" << d2SplitLineAlignment
+                          << " parentElongation=" << parentElongation
+                          << " allowedAngleDeg=" << effectiveAllowedAngle
+                          << " d1ParentAxisAngleDeg=" << d1AxisAngle
+                          << " d2ParentAxisAngleDeg=" << d2AxisAngle
+                          << " normalizedExcess=" << normalizedAxisExcess
+                          << " signalCenterProposal="
+                          << (bestIsSignalCenterProposal ? 1 : 0)
+                          << " immediateFutureSupport="
+                          << (bridgeProposal != nullptr
+                                  ? bridgeProposal->windowImmediateBothDaughtersSupported
+                                  : 0)
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+            } else if (simulationConfig.celluniverse2_enabled) {
+                addSplitSoftGeometryPenalty(
+                    "daughter_short_axis_alignment",
+                    normalizedAxisExcess,
+                    static_cast<double>(
+                        std::max(0.0f,
+                                 probConfig.split_close_axis_penalty_fraction)));
+                std::cout << "[Split Soft Gate] " << parentName
+                          << " reason=daughter_short_axis_alignment"
+                          << " parentElongation=" << parentElongation
+                          << " allowedAngleDeg=" << effectiveAllowedAngle
+                          << " d1AngleDeg=" << d1AxisAngle
+                          << " d2AngleDeg=" << d2AxisAngle
+                          << " d1SplitLineAlignment=" << d1SplitLineAlignment
+                          << " d2SplitLineAlignment=" << d2SplitLineAlignment
+                          << " normalizedExcess=" << normalizedAxisExcess
+                          << " signalCenterProposal="
+                          << (bestIsSignalCenterProposal ? 1 : 0)
+                          << " immediateFutureSupport="
+                          << (bridgeProposal != nullptr
+                                  ? bridgeProposal->windowImmediateBothDaughtersSupported
+                                  : 0)
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+            } else if (deterministicAxisWaived) {
                 std::cout << "[Split Soft Gate] " << parentName
                           << " reason=deterministic_daughter_axis_alignment"
                           << " parentElongation=" << parentElongation
@@ -4950,13 +5838,9 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << std::endl;
             } else {
             if (useCellLumenSoftGate) {
-                const float worstAxisAngle = std::max(d1AxisAngle, d2AxisAngle);
-                const double normalizedExcess =
-                    static_cast<double>(std::max(0.0f, worstAxisAngle - effectiveAllowedAngle)) /
-                    std::max(1.0, 90.0 - static_cast<double>(effectiveAllowedAngle));
                 addLumenSoftGatePenalty(
                     "daughter_short_axis_misaligned",
-                    normalizedExcess,
+                    normalizedAxisExcess,
                     static_cast<double>(lumenSoftAxisPenaltyFraction));
             } else {
             std::cout << "[Split Reject bio] " << parentName
@@ -4979,6 +5863,203 @@ CostCallbackPair Frame::trySplitCellPhased(
             restoreLiveParent();
             return {0.0, noop};
             }
+            }
+        }
+
+        if (simulationConfig.celluniverse2_enabled &&
+            probConfig.split_daughter_axis_interaction_soft_gate_enabled) {
+            const auto normalizeAxis = [](const cv::Point3f &axis) {
+                const float norm = static_cast<float>(cv::norm(axis));
+                if (norm <= 1e-6f) {
+                    return cv::Point3f(0.0f, 0.0f, 0.0f);
+                }
+                return cv::Point3f(axis.x / norm, axis.y / norm, axis.z / norm);
+            };
+            const cv::Point3f d1Axis = normalizeAxis(d1ShortAxis);
+            const cv::Point3f d2Axis = normalizeAxis(d2ShortAxis);
+            if (cv::norm(d1Axis) > 0.0 && cv::norm(d2Axis) > 0.0) {
+                const float d1ShortRadius = std::min({
+                    bestD1.getARadius(), bestD1.getBRadius(), bestD1.getCRadius()});
+                const float d2ShortRadius = std::min({
+                    bestD2.getARadius(), bestD2.getBRadius(), bestD2.getCRadius()});
+                const float d1MaxRadius = std::max({
+                    bestD1.getARadius(), bestD1.getBRadius(), bestD1.getCRadius()});
+                const float d2MaxRadius = std::max({
+                    bestD2.getARadius(), bestD2.getBRadius(), bestD2.getCRadius()});
+                const float avgShortRadius =
+                    std::max(1.0f, 0.5f * (d1ShortRadius + d2ShortRadius));
+                const float avgMaxRadius =
+                    std::max(1.0f, 0.5f * (d1MaxRadius + d2MaxRadius));
+                const float allowedLineDistance =
+                    std::max(0.0f,
+                             probConfig
+                                 .split_daughter_axis_interaction_distance_fraction) *
+                    avgShortRadius;
+                const float allowedAlongDistance =
+                    std::max(0.0f,
+                             probConfig
+                                 .split_daughter_axis_interaction_along_fraction) *
+                    avgMaxRadius;
+
+                const cv::Point3f w0 = bestD1Pos - bestD2Pos;
+                const float axisDot = std::clamp(d1Axis.dot(d2Axis), -1.0f, 1.0f);
+                const float foldedAxisDot = std::abs(axisDot);
+                const float parallelAngle = std::clamp(
+                    probConfig.split_daughter_axis_parallel_angle_degrees,
+                    0.0f,
+                    89.0f);
+                const float parallelCos =
+                    std::cos(parallelAngle * static_cast<float>(M_PI) / 180.0f);
+                const bool nearlyParallel = foldedAxisDot >= parallelCos;
+                const float denom = 1.0f - axisDot * axisDot;
+                float lineDistance = 0.0f;
+                float d1LineParam = 0.0f;
+                float d2LineParam = 0.0f;
+                float normalizedAlongExcess = 0.0f;
+
+                if (denom <= 1e-4f || nearlyParallel) {
+                    const cv::Point3f daughterDelta = bestD2Pos - bestD1Pos;
+                    const float projection = d1Axis.dot(daughterDelta);
+                    const cv::Point3f perpendicular(
+                        daughterDelta.x - d1Axis.x * projection,
+                        daughterDelta.y - d1Axis.y * projection,
+                        daughterDelta.z - d1Axis.z * projection);
+                    lineDistance = static_cast<float>(cv::norm(perpendicular));
+                    d1LineParam = projection;
+                    d2LineParam = 0.0f;
+                } else {
+                    const float d = d1Axis.dot(w0);
+                    const float e = d2Axis.dot(w0);
+                    d1LineParam = (axisDot * e - d) / denom;
+                    d2LineParam = (e - axisDot * d) / denom;
+                    const cv::Point3f closestOnD1(
+                        bestD1Pos.x + d1Axis.x * d1LineParam,
+                        bestD1Pos.y + d1Axis.y * d1LineParam,
+                        bestD1Pos.z + d1Axis.z * d1LineParam);
+                    const cv::Point3f closestOnD2(
+                        bestD2Pos.x + d2Axis.x * d2LineParam,
+                        bestD2Pos.y + d2Axis.y * d2LineParam,
+                        bestD2Pos.z + d2Axis.z * d2LineParam);
+                    lineDistance = static_cast<float>(
+                        cv::norm(closestOnD1 - closestOnD2));
+                    const float alongExcess =
+                        std::max(0.0f,
+                                 std::max(std::abs(d1LineParam),
+                                          std::abs(d2LineParam)) -
+                                     allowedAlongDistance);
+                    normalizedAlongExcess =
+                        alongExcess / std::max(1.0f, allowedAlongDistance);
+                }
+
+                const float distanceExcess =
+                    std::max(0.0f, lineDistance - allowedLineDistance);
+                const float normalizedDistanceExcess =
+                    distanceExcess / std::max(1.0f, allowedLineDistance);
+                const double normalizedExcess =
+                    static_cast<double>(normalizedDistanceExcess +
+                                        normalizedAlongExcess);
+                addSplitSoftGeometryPenalty(
+                    "daughter_short_axis_intersection",
+                    normalizedExcess,
+                    static_cast<double>(
+                        std::max(
+                            0.0f,
+                            probConfig
+                                .split_daughter_axis_interaction_penalty_fraction)));
+                if (normalizedExcess > 0.0) {
+                    std::cout << "[Split Soft Gate] " << parentName
+                              << " reason=daughter_short_axis_intersection"
+                              << " lineDistance=" << lineDistance
+                              << " allowedLineDistance=" << allowedLineDistance
+                              << " normalizedDistanceExcess="
+                              << normalizedDistanceExcess
+                              << " d1LineParam=" << d1LineParam
+                              << " d2LineParam=" << d2LineParam
+                              << " allowedAlongDistance=" << allowedAlongDistance
+                              << " normalizedAlongExcess="
+                              << normalizedAlongExcess
+                              << " nearlyParallel=" << (nearlyParallel ? 1 : 0)
+                              << " axisAngleDeg="
+                              << foldedAxisAngleDeg(d1Axis, d2Axis)
+                              << " bestIdx=" << bestIdx
+                              << " bestLabel=" << bestLabel
+                              << std::endl;
+                }
+            }
+        }
+
+        if (simulationConfig.celluniverse2_enabled &&
+            probConfig.split_close_axis_soft_gate_enabled) {
+            cv::Point3f daughterDelta = bestD2Pos - bestD1Pos;
+            const float daughterDistance =
+                static_cast<float>(cv::norm(daughterDelta));
+            if (daughterDistance > 1e-3f) {
+                daughterDelta *= (1.0f / daughterDistance);
+                const float maxD1R = std::max({
+                    bestD1.getARadius(), bestD1.getBRadius(), bestD1.getCRadius()});
+                const float maxD2R = std::max({
+                    bestD2.getARadius(), bestD2.getBRadius(), bestD2.getCRadius()});
+                const float closeLimit =
+                    std::max(0.0f,
+                             probConfig.split_close_axis_distance_scale) *
+                    std::max(1.0f, 0.5f * (maxD1R + maxD2R));
+                const float minCenterAxisAlign =
+                    std::clamp(
+                        probConfig.split_close_axis_center_axis_alignment,
+                        0.0f,
+                        1.0f);
+                const float d1CenterAlign =
+                    std::abs(daughterDelta.dot(d1ShortAxis)) /
+                    std::max(1e-6f, static_cast<float>(cv::norm(d1ShortAxis)));
+                const float d2CenterAlign =
+                    std::abs(daughterDelta.dot(d2ShortAxis)) /
+                    std::max(1e-6f, static_cast<float>(cv::norm(d2ShortAxis)));
+                if (closeLimit > 0.0f &&
+                    daughterDistance <= closeLimit &&
+                    d1CenterAlign >= minCenterAxisAlign &&
+                    d2CenterAlign >= minCenterAxisAlign) {
+                    const float daughterShortAxisAngle =
+                        foldedAxisAngleDeg(d1ShortAxis, d2ShortAxis);
+                    const float allowedDaughterAxisAngle =
+                        std::max(
+                            0.0f,
+                            probConfig.split_close_axis_max_angle_degrees);
+                    const double normalizedExcess =
+                        static_cast<double>(
+                            std::max(
+                                0.0f,
+                                daughterShortAxisAngle -
+                                    allowedDaughterAxisAngle)) /
+                        std::max(
+                            1.0,
+                            90.0 -
+                                static_cast<double>(
+                                    std::min(89.0f,
+                                             allowedDaughterAxisAngle)));
+                    addSplitSoftGeometryPenalty(
+                        "close_daughter_short_axis_mismatch",
+                        normalizedExcess,
+                        static_cast<double>(
+                            std::max(
+                                0.0f,
+                                probConfig
+                                    .split_close_axis_penalty_fraction)));
+                    if (normalizedExcess > 0.0) {
+                        std::cout << "[Split Soft Gate] " << parentName
+                                  << " reason=close_daughter_short_axis_mismatch"
+                                  << " daughterDistance=" << daughterDistance
+                                  << " closeLimit=" << closeLimit
+                                  << " d1CenterAlign=" << d1CenterAlign
+                                  << " d2CenterAlign=" << d2CenterAlign
+                                  << " daughterShortAxisAngle="
+                                  << daughterShortAxisAngle
+                                  << " allowedAngle="
+                                  << allowedDaughterAxisAngle
+                                  << " bestIdx=" << bestIdx
+                                  << " bestLabel=" << bestLabel
+                                  << std::endl;
+                    }
+                }
             }
         }
     }
@@ -5571,12 +6652,72 @@ CostCallbackPair Frame::trySplitCellPhased(
     }
 
     // 5b. Size ratio, volume fraction, and buried checks.
+    ProbabilityConfig finalBioConfig = probConfig;
+    const bool finalBioSeparationSoftRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationSoftRescued;
+    const bool finalBioFutureSeparationRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->futureWindowSplitRescue &&
+        probConfig.pca_bridge_future_window_min_separation_parent_fraction > 0.0f;
+    if (finalBioSeparationSoftRescue || finalBioFutureSeparationRescue) {
+        float activeSeparationFraction =
+            std::max(0.0f, probConfig.bio_min_daughter_separation_parent_fraction);
+        if (finalBioFutureSeparationRescue) {
+            activeSeparationFraction = std::min(
+                activeSeparationFraction,
+                std::max(
+                    0.0f,
+                    probConfig.pca_bridge_future_window_min_separation_parent_fraction));
+        }
+        if (finalBioSeparationSoftRescue) {
+            activeSeparationFraction = std::min(
+                activeSeparationFraction,
+                std::max(0.0f, probConfig.bio_min_daughter_separation_parent_fraction) *
+                    std::clamp(probConfig.bio_separation_soft_min_fraction, 0.0f, 1.0f));
+        }
+        finalBioConfig.bio_min_daughter_separation_parent_fraction =
+            activeSeparationFraction;
+    }
+    const float midpointParentFraction =
+        std::max(0.0f, probConfig.bio_max_midpoint_parent_fraction);
+    if (midpointParentFraction > 0.0f && snapshotValid) {
+        const cv::Point3f daughterMidpoint(
+            0.5f * (bestD1Pos.x + bestD2Pos.x),
+            0.5f * (bestD1Pos.y + bestD2Pos.y),
+            0.5f * (bestD1Pos.z + bestD2Pos.z));
+        const float midpointDistance =
+            static_cast<float>(cv::norm(daughterMidpoint - snapshot.position));
+        const float midpointLimit = midpointParentFraction * std::max(1.0f, srcMaxR);
+        if (midpointDistance > midpointLimit) {
+            std::cout << "[Split Reject bio] " << parentName
+                      << " reason=daughter_midpoint_parent_drift"
+                      << " midpointDistance=" << midpointDistance
+                      << " limit=" << midpointLimit
+                      << " fraction=" << midpointParentFraction
+                      << " parentMaxR=" << srcMaxR
+                      << " midpoint=(" << daughterMidpoint.x << ","
+                      << daughterMidpoint.y << "," << daughterMidpoint.z << ")"
+                      << " snapshot=(" << snapshot.position.x << ","
+                      << snapshot.position.y << "," << snapshot.position.z << ")"
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << std::endl;
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+    }
+
     std::string bioReason;
     if (!bioCheckDaughters(bestD1, bestD2, refParentVolume, srcMaxR,
                            bestCells, d1IdxBest, d2IdxBest,
-                           probConfig, bioReason,
+                           finalBioConfig, bioReason,
                            useCellLumenGateParams && lumenSkipExistingCellBuriedCheck,
-                           useCellLumenGateParams && lumenSkipNeighborBridgeCheck)) {
+                           useCellLumenGateParams && lumenSkipNeighborBridgeCheck,
+                           simulationConfig.celluniverse2_enabled &&
+                               probConfig.split_bio_ignore_trash_neighbors_enabled)) {
         std::cout << "[Split Reject bio] " << parentName
                   << " reason=" << bioReason
                   << " d1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
@@ -5587,6 +6728,132 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << std::endl;
         restoreLiveParent();
         return {0.0, noop};
+    }
+
+    const float minDaughterMeanAbs =
+        std::max(0.0f, probConfig.bio_min_daughter_mean_brightness_absolute);
+    const float minDaughterMeanParentFraction =
+        std::max(0.0f, probConfig.bio_min_daughter_mean_brightness_parent_fraction);
+    const float minDaughterBackgroundMargin =
+        std::max(0.0f,
+                 probConfig.bio_min_daughter_mean_brightness_background_margin);
+    if (!_realFrame.empty() &&
+        (minDaughterMeanAbs > 0.0f ||
+         minDaughterMeanParentFraction > 0.0f ||
+         minDaughterBackgroundMargin > 0.0f)) {
+        const auto parentBrightnessStats = parent.measureBrightnessStats(_realFrame);
+        const auto d1BrightnessStats = bestD1.measureBrightnessStats(_realFrame);
+        const auto d2BrightnessStats = bestD2.measureBrightnessStats(_realFrame);
+        const float localBackground = _backgroundValue;
+        const float parentSignal =
+            std::max(0.0f, parentBrightnessStats.first - localBackground);
+        const float adaptiveSignalThreshold = std::max(
+            minDaughterBackgroundMargin,
+            minDaughterMeanParentFraction * parentSignal);
+        const float densityThreshold = localBackground + adaptiveSignalThreshold;
+        const float minDaughterMean =
+            std::min(d1BrightnessStats.first, d2BrightnessStats.first);
+        if (minDaughterMean < densityThreshold) {
+            const float softMinFraction = std::clamp(
+                probConfig.bio_daughter_density_soft_min_fraction, 0.0f, 1.0f);
+            const float hardDensityThreshold =
+                localBackground + minDaughterMeanAbs * softMinFraction;
+            const bool belowObviousBackgroundFloor =
+                minDaughterMeanAbs <= 0.0f ||
+                minDaughterMean < hardDensityThreshold;
+            const bool densityFutureSupportOk =
+                !probConfig.bio_daughter_density_soft_require_future_support ||
+                (bridgeProposal != nullptr && bridgeProposal->futureWindowSplitRescue);
+            const bool softEligible =
+                simulationConfig.celluniverse2_enabled &&
+                probConfig.bio_daughter_density_soft_gate_enabled &&
+                densityFutureSupportOk &&
+                !belowObviousBackgroundFloor;
+            const double normalizedExcess =
+                static_cast<double>(densityThreshold - minDaughterMean) /
+                std::max(1e-6, static_cast<double>(densityThreshold - localBackground));
+            if (softEligible) {
+                addSplitSoftGeometryPenalty(
+                    "daughter_density_brightness_near_miss",
+                    normalizedExcess,
+                    static_cast<double>(std::max(
+                        0.0f,
+                        probConfig.bio_daughter_density_soft_penalty_fraction)));
+                std::cout << "[Split Soft Gate] " << parentName
+                          << " reason=daughter_density_brightness_near_miss"
+                          << " d1Mean=" << d1BrightnessStats.first
+                          << " d1Std=" << d1BrightnessStats.second
+                          << " d2Mean=" << d2BrightnessStats.first
+                          << " d2Std=" << d2BrightnessStats.second
+                          << " parentMean=" << parentBrightnessStats.first
+                          << " background=" << localBackground
+                          << " parentSignal=" << parentSignal
+                          << " threshold=" << densityThreshold
+                          << " adaptiveSignalThreshold=" << adaptiveSignalThreshold
+                          << " hardThreshold=" << hardDensityThreshold
+                          << " normalizedExcess=" << normalizedExcess
+                          << " futureSupportOk=" << (densityFutureSupportOk ? 1 : 0)
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+            } else {
+                std::cout << "[Split Reject bio] " << parentName
+                          << " reason=daughter_density_brightness"
+                          << " d1Mean=" << d1BrightnessStats.first
+                          << " d1Std=" << d1BrightnessStats.second
+                          << " d2Mean=" << d2BrightnessStats.first
+                          << " d2Std=" << d2BrightnessStats.second
+                          << " parentMean=" << parentBrightnessStats.first
+                          << " background=" << localBackground
+                          << " parentSignal=" << parentSignal
+                          << " threshold=" << densityThreshold
+                          << " adaptiveSignalThreshold=" << adaptiveSignalThreshold
+                          << " hardThreshold=" << hardDensityThreshold
+                          << " absoluteMin=" << minDaughterMeanAbs
+                          << " backgroundMargin=" << minDaughterBackgroundMargin
+                          << " parentFraction=" << minDaughterMeanParentFraction
+                          << " belowObviousBackgroundFloor=" << (belowObviousBackgroundFloor ? 1 : 0)
+                          << " softEligible=" << (softEligible ? 1 : 0)
+                          << " futureSupportOk=" << (densityFutureSupportOk ? 1 : 0)
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+                restoreLiveParent();
+                return {0.0, noop};
+            }
+        }
+    }
+
+    if (finalBioSeparationSoftRescue) {
+        const cv::Point3f finalD1Pos(bestD1.getX(), bestD1.getY(), bestD1.getZ());
+        const cv::Point3f finalD2Pos(bestD2.getX(), bestD2.getY(), bestD2.getZ());
+        const float finalDaughterSep =
+            static_cast<float>(cv::norm(finalD2Pos - finalD1Pos));
+        const float requiredSep =
+            std::max(0.0f, probConfig.bio_min_daughter_separation_parent_fraction) *
+            std::max(1.0f, srcMaxR);
+        if (requiredSep > 0.0f && finalDaughterSep < requiredSep) {
+            const double normalizedExcess =
+                static_cast<double>(requiredSep - finalDaughterSep) /
+                std::max(1.0, static_cast<double>(requiredSep));
+            addSplitSoftGeometryPenalty(
+                "final_bio_separation_near_miss",
+                normalizedExcess,
+                static_cast<double>(
+                    std::max(0.0f,
+                             probConfig.bio_separation_soft_penalty_fraction)));
+            std::cout << "[Split Soft Gate] " << parentName
+                      << " reason=final_bio_separation_near_miss"
+                      << " finalSep=" << finalDaughterSep
+                      << " requiredSep=" << requiredSep
+                      << " hardFloorFraction="
+                      << std::clamp(probConfig.bio_separation_soft_min_fraction,
+                                    0.0f, 1.0f)
+                      << " normalizedExcess=" << normalizedExcess
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << std::endl;
+        }
     }
 
     if (simulationConfig.celluniverse2_enabled) {
@@ -5862,20 +7129,97 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << std::endl;
     }
 
+    const float cleanPcaBridgeSnapDistanceLimit =
+        std::max(
+            std::max(0.0f, probConfig.pca_bridge_future_window_match_distance),
+            0.75f * std::max(1.0f, srcMaxR));
+    const bool cleanPcaBridgeFutureSoftSupport =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->futureWindowSplitRescue &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(1, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists <=
+            std::max(0, probConfig.pca_bridge_future_window_max_parent_persists) &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <= cleanPcaBridgeSnapDistanceLimit &&
+        bridgeProposal->parentShapeElongation >= 1.75f &&
+        bridgeCostRescueValleyFromBright <= 0.98f &&
+        bridgeCostRescueGapDensity <= 0.20f &&
+        imageCostDiff <= -std::max(500.0, 0.02 * baselineImageCost) &&
+        costDiff <= std::max(5000.0, 0.02 * baselineImageCost);
+    const bool weakBridgeStartedWorse =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        preCostDiff > 0.0 &&
+        bridgeCostRescueValleyFromBright > 0.65f &&
+        bridgeCostRescueGapDensity > 0.12f &&
+        bridgeProposal->parentShapeElongation <
+            probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue &&
+        !cleanPcaBridgeFutureSoftSupport;
+    if (weakBridgeStartedWorse) {
+        std::cout << "[Split Reject weak pca bridge] " << parentName
+                  << " preCostDiff=" << preCostDiff
+                  << " finalCostDiff=" << costDiff
+                  << " valleyFromBright=" << bridgeCostRescueValleyFromBright
+                  << " gapDensity=" << bridgeCostRescueGapDensity
+                  << " parentShapeElong="
+                  << bridgeProposal->parentShapeElongation
+                  << " minStrongParentShape="
+                  << probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue
+                  << " futureBoth="
+                  << bridgeProposal->windowBothDaughtersSupported
+                  << " futureImmediate="
+                  << bridgeProposal->windowImmediateBothDaughtersSupported
+                  << " futureMissing="
+                  << bridgeProposal->windowMissingDaughterCount
+                  << " centerSnapMaxSeedDistance="
+                  << bridgeProposal->centerSnapMaxSeedDistance
+                  << " cleanSnapDistanceLimit="
+                  << cleanPcaBridgeSnapDistanceLimit
+                  << " alignedPairFallback="
+                  << (bridgeProposal->centerSnapUsedAlignedPairFallback ? 1 : 0)
+                  << " bestIdx=" << bestIdx
+                  << " bestLabel=" << bestLabel
+                  << std::endl;
+        restoreLiveParent();
+        return {0.0, noop};
+    }
+
     const double bridgeRescueLimit =
         static_cast<double>(std::max(
             0.0f, probConfig.split_bridge_cost_rescue_max_positive_fraction)) *
         baselineImageCost;
+    const double geometryAdjustedCostDiff =
+        costDiff + splitSoftGeometryPenaltyCost;
     const bool bridgeCostRescued =
         probConfig.split_bridge_cost_rescue_enabled &&
         bridgeCostRescueEligible &&
-        costDiff >= -adaptiveThreshold &&
-        costDiff <= bridgeRescueLimit;
+        geometryAdjustedCostDiff >= -adaptiveThreshold &&
+        geometryAdjustedCostDiff <= bridgeRescueLimit;
+    const bool futureWindowStrictCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->futureWindowSplitRescue &&
+        bridgeCostRescueEligible &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue &&
+        geometryAdjustedCostDiff <= bridgeRescueLimit;
+    const bool futureWindowSoftCostRescued =
+        cleanPcaBridgeFutureSoftSupport &&
+        costDiff <= std::max(5000.0, 0.02 * baselineImageCost);
+    const bool futureWindowCostRescued =
+        futureWindowStrictCostRescued || futureWindowSoftCostRescued;
     double acceptedCostDiff = costDiff;
     if (bridgeCostRescued) {
         acceptedCostDiff = -std::max(1.0, adaptiveThreshold);
         std::cout << "[Split Cost Rescue] " << parentName
                   << " rawDiff=" << costDiff
+                  << " geometryAdjustedDiff=" << geometryAdjustedCostDiff
+                  << " splitSoftPenalty=" << splitSoftGeometryPenaltyCost
                   << " reportedDiff=" << acceptedCostDiff
                   << " maxPositive=" << bridgeRescueLimit
                   << " baselineImageCost=" << baselineImageCost
@@ -5885,6 +7229,38 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " gapDensity=" << bridgeCostRescueGapDensity
                   << " maxGapDensity=" << probConfig.split_bridge_cost_rescue_max_gap_density
                   << " edgeBright=" << bridgeCostRescueEdgeBright
+                  << " bestIdx=" << bestIdx
+                  << " bestLabel=" << bestLabel
+                  << std::endl;
+    }
+    if (futureWindowCostRescued) {
+        acceptedCostDiff = -std::max(1.0, adaptiveThreshold);
+        std::cout << "[Split Future Window Cost Gate] " << parentName
+                  << " totalDiff=" << costDiff
+                  << " geometryAdjustedDiff=" << geometryAdjustedCostDiff
+                  << " splitSoftPenalty=" << splitSoftGeometryPenaltyCost
+                  << " imageDiff=" << imageCostDiff
+                  << " overlapDiff=" << overlapCostDiff
+                  << " reportedDiff=" << acceptedCostDiff
+                  << " parentShapeElong="
+                  << bridgeProposal->parentShapeElongation
+                  << " minParentShape="
+                  << probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue
+                  << " softRescue=" << (futureWindowSoftCostRescued ? 1 : 0)
+                  << " strictRescue=" << (futureWindowStrictCostRescued ? 1 : 0)
+                  << " centerSnapMaxSeedDistance="
+                  << bridgeProposal->centerSnapMaxSeedDistance
+                  << " cleanSnapDistanceLimit=" << cleanPcaBridgeSnapDistanceLimit
+                  << " alignedPairFallback="
+                  << (bridgeProposal->centerSnapUsedAlignedPairFallback ? 1 : 0)
+                  << " futureBoth="
+                  << bridgeProposal->windowBothDaughtersSupported
+                  << " futureImmediate="
+                  << bridgeProposal->windowImmediateBothDaughtersSupported
+                  << " futureMissing="
+                  << bridgeProposal->windowMissingDaughterCount
+                  << " parentPersists="
+                  << bridgeProposal->windowParentPersists
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
@@ -6039,15 +7415,18 @@ CostCallbackPair Frame::trySplitCellPhased(
     }
     const double rawLumenGateDiff =
         useCellLumenImageGate ? imageCostDiff : costDiff;
-    const double lumenGateDiff = rawLumenGateDiff + lumenSoftGatePenaltyCost;
+    const double totalSoftGatePenaltyCost =
+        lumenSoftGatePenaltyCost + splitSoftGeometryPenaltyCost;
+    const double lumenGateDiff =
+        rawLumenGateDiff + totalSoftGatePenaltyCost;
     bool lumenPositiveGateHasImageSupport = true;
     const double lumenPositiveGateRequiredImageGain =
         std::max(static_cast<double>(std::max(0.0f, lumenPositiveGateMinImageGain)),
-                 lumenSoftGatePenaltyCost *
+                 totalSoftGatePenaltyCost *
                      static_cast<double>(std::max(0.0f, lumenPositiveGateMinImageGainPenaltyRatio)));
     const double lumenPositiveGateSoftPenaltyFraction =
         (baselineImageCost > 1e-9)
-            ? lumenSoftGatePenaltyCost / baselineImageCost
+            ? totalSoftGatePenaltyCost / baselineImageCost
             : std::numeric_limits<double>::infinity();
     const float lumenParentShapeElongation =
         (lumenProposal != nullptr) ? lumenProposal->parentShapeElongation : 1.0f;
@@ -6289,6 +7668,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " gateDiff=" << lumenGateDiff
                   << " rawGateDiff=" << rawLumenGateDiff
                   << " softPenalty=" << lumenSoftGatePenaltyCost
+                  << " splitSoftPenalty=" << splitSoftGeometryPenaltyCost
                   << " gateMode=" << (useCellLumenImageGate ? "image" : "total")
                   << " totalDiff=" << costDiff
                   << " imageDiff=" << imageCostDiff
@@ -6339,6 +7719,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " continuationClaimSoftPenalty=" << lumenContinuationClaimSoftPenalty
                   << " riskyContinuationClaim=" << (lumenRiskyContinuationClaim ? 1 : 0)
                   << " softPenalty=" << lumenSoftGatePenaltyCost
+                  << " splitSoftPenalty=" << splitSoftGeometryPenaltyCost
                   << " totalDiff=" << costDiff
                   << " overlapDiff=" << overlapCostDiff
                   << " maxPositive=" << lumenMaxPositiveCost
@@ -6349,12 +7730,14 @@ CostCallbackPair Frame::trySplitCellPhased(
 
     const double rejectGateDiff = useCellLumenImageGate
                                       ? lumenGateDiff
-                                      : costDiff + lumenSoftGatePenaltyCost;
-    if (!bridgeCostRescued && !lumenCostAccepted && rejectGateDiff >= -adaptiveThreshold) {
+                                      : costDiff + totalSoftGatePenaltyCost;
+    if (!bridgeCostRescued && !futureWindowCostRescued && !lumenCostAccepted &&
+        rejectGateDiff >= -adaptiveThreshold) {
         std::cout << "[Split Reject cost] " << parentName
                   << " diff=" << rejectGateDiff
                   << " rawGateDiff=" << rawLumenGateDiff
                   << " softPenalty=" << lumenSoftGatePenaltyCost
+                  << " splitSoftPenalty=" << splitSoftGeometryPenaltyCost
                   << " totalDiff=" << costDiff
                   << " imageDiff=" << imageCostDiff
                   << " overlapDiff=" << overlapCostDiff

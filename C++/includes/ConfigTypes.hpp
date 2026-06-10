@@ -202,6 +202,12 @@ public:
     float signal_center_rescue_max_shape_ratio = 2.5f;
     float signal_center_rescue_size_weight = 0.75f;
     float signal_center_rescue_shape_weight = 0.35f;
+    bool signal_center_rescue_global_assignment_enabled = false;
+    float signal_center_rescue_max_heuristic_score = 0.0f;
+    bool signal_center_rescue_split_daughter_probe_enabled = false;
+    int signal_center_rescue_split_daughter_probe_frames = 2;
+    float signal_center_rescue_split_daughter_max_distance_body_units = 1.5f;
+    float signal_center_rescue_split_daughter_probe_distance_weight = 0.20f;
     bool signal_map_enabled = true;
     float signal_map_blur_sigma = 2.5f;
     int signal_map_max_iterations = 15;
@@ -581,6 +587,12 @@ public:
         if (node["signal_center_rescue_max_shape_ratio"]) signal_center_rescue_max_shape_ratio = node["signal_center_rescue_max_shape_ratio"].as<float>();
         if (node["signal_center_rescue_size_weight"]) signal_center_rescue_size_weight = node["signal_center_rescue_size_weight"].as<float>();
         if (node["signal_center_rescue_shape_weight"]) signal_center_rescue_shape_weight = node["signal_center_rescue_shape_weight"].as<float>();
+        if (node["signal_center_rescue_global_assignment_enabled"]) signal_center_rescue_global_assignment_enabled = node["signal_center_rescue_global_assignment_enabled"].as<bool>();
+        if (node["signal_center_rescue_max_heuristic_score"]) signal_center_rescue_max_heuristic_score = node["signal_center_rescue_max_heuristic_score"].as<float>();
+        if (node["signal_center_rescue_split_daughter_probe_enabled"]) signal_center_rescue_split_daughter_probe_enabled = node["signal_center_rescue_split_daughter_probe_enabled"].as<bool>();
+        if (node["signal_center_rescue_split_daughter_probe_frames"]) signal_center_rescue_split_daughter_probe_frames = node["signal_center_rescue_split_daughter_probe_frames"].as<int>();
+        if (node["signal_center_rescue_split_daughter_max_distance_body_units"]) signal_center_rescue_split_daughter_max_distance_body_units = node["signal_center_rescue_split_daughter_max_distance_body_units"].as<float>();
+        if (node["signal_center_rescue_split_daughter_probe_distance_weight"]) signal_center_rescue_split_daughter_probe_distance_weight = node["signal_center_rescue_split_daughter_probe_distance_weight"].as<float>();
         if (node["signal_map_enabled"]) signal_map_enabled = node["signal_map_enabled"].as<bool>();
         if (node["signal_map_blur_sigma"]) signal_map_blur_sigma = node["signal_map_blur_sigma"].as<float>();
         if (node["signal_map_max_iterations"]) signal_map_max_iterations = node["signal_map_max_iterations"].as<int>();
@@ -730,6 +742,12 @@ public:
         std::cout << "signal_center_rescue_max_shape_ratio: " << signal_center_rescue_max_shape_ratio << '\n';
         std::cout << "signal_center_rescue_size_weight: " << signal_center_rescue_size_weight << '\n';
         std::cout << "signal_center_rescue_shape_weight: " << signal_center_rescue_shape_weight << '\n';
+        std::cout << "signal_center_rescue_global_assignment_enabled: " << signal_center_rescue_global_assignment_enabled << '\n';
+        std::cout << "signal_center_rescue_max_heuristic_score: " << signal_center_rescue_max_heuristic_score << '\n';
+        std::cout << "signal_center_rescue_split_daughter_probe_enabled: " << signal_center_rescue_split_daughter_probe_enabled << '\n';
+        std::cout << "signal_center_rescue_split_daughter_probe_frames: " << signal_center_rescue_split_daughter_probe_frames << '\n';
+        std::cout << "signal_center_rescue_split_daughter_max_distance_body_units: " << signal_center_rescue_split_daughter_max_distance_body_units << '\n';
+        std::cout << "signal_center_rescue_split_daughter_probe_distance_weight: " << signal_center_rescue_split_daughter_probe_distance_weight << '\n';
         std::cout << "signal_map_enabled: " << signal_map_enabled << '\n';
         std::cout << "signal_map_blur_sigma: " << signal_map_blur_sigma << '\n';
         std::cout << "signal_map_max_iterations: " << signal_map_max_iterations << '\n';
@@ -909,6 +927,21 @@ public:
     bool split_geometry_gate_enabled = true;
     float split_max_daughter_seed_drift_fraction = 1.25f;
     float split_max_daughter_axis_expansion = 1.8f;
+    bool split_soft_geometry_gate_enabled = true;
+    float split_soft_geometry_penalty_fraction = 0.30f;
+    float split_soft_max_daughter_seed_drift_fraction = 0.95f;
+    float split_soft_max_final_separation_parent_fraction = 2.20f;
+    bool split_close_axis_soft_gate_enabled = true;
+    float split_close_axis_distance_scale = 2.40f;
+    float split_close_axis_center_axis_alignment = 0.80f;
+    float split_close_axis_max_angle_degrees = 20.0f;
+    float split_close_axis_penalty_fraction = 0.20f;
+    bool split_daughter_axis_interaction_soft_gate_enabled = true;
+    float split_daughter_axis_interaction_distance_fraction = 0.35f;
+    float split_daughter_axis_interaction_along_fraction = 1.60f;
+    float split_daughter_axis_parallel_angle_degrees = 12.0f;
+    float split_daughter_axis_interaction_penalty_fraction = 0.35f;
+    bool split_bio_ignore_trash_neighbors_enabled = false;
     bool split_axis_alignment_gate_enabled = true;
     float split_axis_alignment_sphere_angle_degrees = 120.0f;
     float split_axis_alignment_elongation_shrink = 0.75f;
@@ -925,6 +958,24 @@ public:
     // daughters sit inside the same parent-sized blob, while allowing true
     // divisions whose daughter centers separate across the parent body.
     float bio_min_daughter_separation_parent_fraction = 0.0f;
+    // Reject when the midpoint between newborn daughters drifts too far from
+    // the previous-frame parent center. Disabled at 0.0.
+    float bio_max_midpoint_parent_fraction = 0.0f;
+    // Brightness-density gate for newborn daughters. Uses signal above local
+    // background so gamma/contrast changes do not turn this into a fixed
+    // postprocessed brightness cutoff. The absolute value is only an obvious
+    // background floor, not the main acceptance threshold.
+    float bio_min_daughter_mean_brightness_absolute = 0.0f;
+    float bio_min_daughter_mean_brightness_parent_fraction = 0.0f;
+    float bio_min_daughter_mean_brightness_background_margin = 0.0f;
+    bool bio_daughter_density_soft_gate_enabled = true;
+    float bio_daughter_density_soft_min_fraction = 0.75f;
+    float bio_daughter_density_soft_penalty_fraction = 0.25f;
+    bool bio_daughter_density_soft_require_future_support = true;
+    bool bio_separation_soft_gate_enabled = false;
+    float bio_separation_soft_min_fraction = 0.75f;
+    float bio_separation_soft_penalty_fraction = 0.35f;
+    bool bio_separation_soft_require_future_support = true;
 
     // Single-daughter volume gate. Reject when either daughter's volume
     // exceeds `bio_max_single_daughter_volume_fraction * refParentVolume`.
@@ -1001,6 +1052,20 @@ public:
     // is immature and the mask absorbs neighbor/halo pixels. Typically
     // 1.1 (10% over built).
     float split_daughter_refit_max_radius_fraction = 1.1f;
+    bool split_daughter_refit_keep_seed_halfspace_enabled = false;
+    float split_daughter_refit_halfspace_min_fraction = 0.0f;
+    bool split_daughter_refit_align_short_axis_to_split_enabled = false;
+    bool split_daughter_flattened_plane_rotation_enabled = false;
+    float split_daughter_flattened_plane_min_shape = 1.45f;
+    float split_daughter_flattened_plane_radius_scale = 1.45f;
+    int split_daughter_flattened_plane_min_pixels = 120;
+    float split_daughter_flattened_plane_min_ratio = 1.35f;
+    float split_daughter_flattened_plane_long_axis_ratio = 1.15f;
+    bool split_daughter_flattened_plane_neighbor_guard_enabled = true;
+    float split_daughter_flattened_plane_neighbor_distance_scale = 2.2f;
+    float split_daughter_flattened_plane_neighbor_axis_alignment = 0.70f;
+    float split_daughter_flattened_plane_neighbor_lateral_scale = 0.75f;
+    float split_daughter_flattened_plane_neighbor_normal_alignment = 0.65f;
 
     // Built-time per-axis radius scale for newly-spawned daughters.
     // Daughter radii = scale × snapshot parent radii.
@@ -1048,6 +1113,9 @@ public:
     int pca_bridge_future_window_min_both_daughter_support = 1;
     int pca_bridge_future_window_max_missing_daughters = 2;
     int pca_bridge_future_window_max_parent_persists = 0;
+    float pca_bridge_future_window_parent_balance_rescue_min = 0.20f;
+    float pca_bridge_future_window_min_parent_shape_for_cost_rescue = 2.20f;
+    float pca_bridge_future_window_refit_halfspace_min_fraction = 0.70f;
     bool pca_bridge_middle_cut_centroids = false;
     float pca_bridge_black_threshold = 0.05f;
     float pca_bridge_min_black_fraction = 0.75f;
@@ -1107,6 +1175,21 @@ public:
         if (node["split_geometry_gate_enabled"]) split_geometry_gate_enabled = node["split_geometry_gate_enabled"].as<bool>();
         if (node["split_max_daughter_seed_drift_fraction"]) split_max_daughter_seed_drift_fraction = node["split_max_daughter_seed_drift_fraction"].as<float>();
         if (node["split_max_daughter_axis_expansion"]) split_max_daughter_axis_expansion = node["split_max_daughter_axis_expansion"].as<float>();
+        if (node["split_soft_geometry_gate_enabled"]) split_soft_geometry_gate_enabled = node["split_soft_geometry_gate_enabled"].as<bool>();
+        if (node["split_soft_geometry_penalty_fraction"]) split_soft_geometry_penalty_fraction = node["split_soft_geometry_penalty_fraction"].as<float>();
+        if (node["split_soft_max_daughter_seed_drift_fraction"]) split_soft_max_daughter_seed_drift_fraction = node["split_soft_max_daughter_seed_drift_fraction"].as<float>();
+        if (node["split_soft_max_final_separation_parent_fraction"]) split_soft_max_final_separation_parent_fraction = node["split_soft_max_final_separation_parent_fraction"].as<float>();
+        if (node["split_close_axis_soft_gate_enabled"]) split_close_axis_soft_gate_enabled = node["split_close_axis_soft_gate_enabled"].as<bool>();
+        if (node["split_close_axis_distance_scale"]) split_close_axis_distance_scale = node["split_close_axis_distance_scale"].as<float>();
+        if (node["split_close_axis_center_axis_alignment"]) split_close_axis_center_axis_alignment = node["split_close_axis_center_axis_alignment"].as<float>();
+        if (node["split_close_axis_max_angle_degrees"]) split_close_axis_max_angle_degrees = node["split_close_axis_max_angle_degrees"].as<float>();
+        if (node["split_close_axis_penalty_fraction"]) split_close_axis_penalty_fraction = node["split_close_axis_penalty_fraction"].as<float>();
+        if (node["split_daughter_axis_interaction_soft_gate_enabled"]) split_daughter_axis_interaction_soft_gate_enabled = node["split_daughter_axis_interaction_soft_gate_enabled"].as<bool>();
+        if (node["split_daughter_axis_interaction_distance_fraction"]) split_daughter_axis_interaction_distance_fraction = node["split_daughter_axis_interaction_distance_fraction"].as<float>();
+        if (node["split_daughter_axis_interaction_along_fraction"]) split_daughter_axis_interaction_along_fraction = node["split_daughter_axis_interaction_along_fraction"].as<float>();
+        if (node["split_daughter_axis_parallel_angle_degrees"]) split_daughter_axis_parallel_angle_degrees = node["split_daughter_axis_parallel_angle_degrees"].as<float>();
+        if (node["split_daughter_axis_interaction_penalty_fraction"]) split_daughter_axis_interaction_penalty_fraction = node["split_daughter_axis_interaction_penalty_fraction"].as<float>();
+        if (node["split_bio_ignore_trash_neighbors_enabled"]) split_bio_ignore_trash_neighbors_enabled = node["split_bio_ignore_trash_neighbors_enabled"].as<bool>();
         if (node["split_axis_alignment_gate_enabled"]) split_axis_alignment_gate_enabled = node["split_axis_alignment_gate_enabled"].as<bool>();
         if (node["split_axis_alignment_sphere_angle_degrees"]) split_axis_alignment_sphere_angle_degrees = node["split_axis_alignment_sphere_angle_degrees"].as<float>();
         if (node["split_axis_alignment_elongation_shrink"]) split_axis_alignment_elongation_shrink = node["split_axis_alignment_elongation_shrink"].as<float>();
@@ -1121,6 +1204,18 @@ public:
         if (node["bio_combined_volume_min_fraction"]) bio_combined_volume_min_fraction = node["bio_combined_volume_min_fraction"].as<float>();
         if (node["bio_combined_volume_max_fraction"]) bio_combined_volume_max_fraction = node["bio_combined_volume_max_fraction"].as<float>();
         if (node["bio_min_daughter_separation_parent_fraction"]) bio_min_daughter_separation_parent_fraction = node["bio_min_daughter_separation_parent_fraction"].as<float>();
+        if (node["bio_max_midpoint_parent_fraction"]) bio_max_midpoint_parent_fraction = node["bio_max_midpoint_parent_fraction"].as<float>();
+        if (node["bio_min_daughter_mean_brightness_absolute"]) bio_min_daughter_mean_brightness_absolute = node["bio_min_daughter_mean_brightness_absolute"].as<float>();
+        if (node["bio_min_daughter_mean_brightness_parent_fraction"]) bio_min_daughter_mean_brightness_parent_fraction = node["bio_min_daughter_mean_brightness_parent_fraction"].as<float>();
+        if (node["bio_min_daughter_mean_brightness_background_margin"]) bio_min_daughter_mean_brightness_background_margin = node["bio_min_daughter_mean_brightness_background_margin"].as<float>();
+        if (node["bio_daughter_density_soft_gate_enabled"]) bio_daughter_density_soft_gate_enabled = node["bio_daughter_density_soft_gate_enabled"].as<bool>();
+        if (node["bio_daughter_density_soft_min_fraction"]) bio_daughter_density_soft_min_fraction = node["bio_daughter_density_soft_min_fraction"].as<float>();
+        if (node["bio_daughter_density_soft_penalty_fraction"]) bio_daughter_density_soft_penalty_fraction = node["bio_daughter_density_soft_penalty_fraction"].as<float>();
+        if (node["bio_daughter_density_soft_require_future_support"]) bio_daughter_density_soft_require_future_support = node["bio_daughter_density_soft_require_future_support"].as<bool>();
+        if (node["bio_separation_soft_gate_enabled"]) bio_separation_soft_gate_enabled = node["bio_separation_soft_gate_enabled"].as<bool>();
+        if (node["bio_separation_soft_min_fraction"]) bio_separation_soft_min_fraction = node["bio_separation_soft_min_fraction"].as<float>();
+        if (node["bio_separation_soft_penalty_fraction"]) bio_separation_soft_penalty_fraction = node["bio_separation_soft_penalty_fraction"].as<float>();
+        if (node["bio_separation_soft_require_future_support"]) bio_separation_soft_require_future_support = node["bio_separation_soft_require_future_support"].as<bool>();
         if (node["bio_max_single_daughter_volume_fraction"]) bio_max_single_daughter_volume_fraction = node["bio_max_single_daughter_volume_fraction"].as<float>();
         if (node["bio_bridge_max_gap_density"]) bio_bridge_max_gap_density = node["bio_bridge_max_gap_density"].as<float>();
         if (node["bio_bridge_max_valley_ratio"]) bio_bridge_max_valley_ratio = node["bio_bridge_max_valley_ratio"].as<float>();
@@ -1132,6 +1227,20 @@ public:
         if (node["split_daughter_refit_iterations"]) split_daughter_refit_iterations = node["split_daughter_refit_iterations"].as<int>();
         if (node["split_daughter_refit_min_radius_fraction"]) split_daughter_refit_min_radius_fraction = node["split_daughter_refit_min_radius_fraction"].as<float>();
         if (node["split_daughter_refit_max_radius_fraction"]) split_daughter_refit_max_radius_fraction = node["split_daughter_refit_max_radius_fraction"].as<float>();
+        if (node["split_daughter_refit_keep_seed_halfspace_enabled"]) split_daughter_refit_keep_seed_halfspace_enabled = node["split_daughter_refit_keep_seed_halfspace_enabled"].as<bool>();
+        if (node["split_daughter_refit_halfspace_min_fraction"]) split_daughter_refit_halfspace_min_fraction = node["split_daughter_refit_halfspace_min_fraction"].as<float>();
+        if (node["split_daughter_refit_align_short_axis_to_split_enabled"]) split_daughter_refit_align_short_axis_to_split_enabled = node["split_daughter_refit_align_short_axis_to_split_enabled"].as<bool>();
+        if (node["split_daughter_flattened_plane_rotation_enabled"]) split_daughter_flattened_plane_rotation_enabled = node["split_daughter_flattened_plane_rotation_enabled"].as<bool>();
+        if (node["split_daughter_flattened_plane_min_shape"]) split_daughter_flattened_plane_min_shape = node["split_daughter_flattened_plane_min_shape"].as<float>();
+        if (node["split_daughter_flattened_plane_radius_scale"]) split_daughter_flattened_plane_radius_scale = node["split_daughter_flattened_plane_radius_scale"].as<float>();
+        if (node["split_daughter_flattened_plane_min_pixels"]) split_daughter_flattened_plane_min_pixels = node["split_daughter_flattened_plane_min_pixels"].as<int>();
+        if (node["split_daughter_flattened_plane_min_ratio"]) split_daughter_flattened_plane_min_ratio = node["split_daughter_flattened_plane_min_ratio"].as<float>();
+        if (node["split_daughter_flattened_plane_long_axis_ratio"]) split_daughter_flattened_plane_long_axis_ratio = node["split_daughter_flattened_plane_long_axis_ratio"].as<float>();
+        if (node["split_daughter_flattened_plane_neighbor_guard_enabled"]) split_daughter_flattened_plane_neighbor_guard_enabled = node["split_daughter_flattened_plane_neighbor_guard_enabled"].as<bool>();
+        if (node["split_daughter_flattened_plane_neighbor_distance_scale"]) split_daughter_flattened_plane_neighbor_distance_scale = node["split_daughter_flattened_plane_neighbor_distance_scale"].as<float>();
+        if (node["split_daughter_flattened_plane_neighbor_axis_alignment"]) split_daughter_flattened_plane_neighbor_axis_alignment = node["split_daughter_flattened_plane_neighbor_axis_alignment"].as<float>();
+        if (node["split_daughter_flattened_plane_neighbor_lateral_scale"]) split_daughter_flattened_plane_neighbor_lateral_scale = node["split_daughter_flattened_plane_neighbor_lateral_scale"].as<float>();
+        if (node["split_daughter_flattened_plane_neighbor_normal_alignment"]) split_daughter_flattened_plane_neighbor_normal_alignment = node["split_daughter_flattened_plane_neighbor_normal_alignment"].as<float>();
         if (node["split_daughter_volume_scale"]) split_daughter_volume_scale = node["split_daughter_volume_scale"].as<float>();
         if (node["pca_bridge_split_enabled"]) pca_bridge_split_enabled = node["pca_bridge_split_enabled"].as<bool>();
         if (node["pca_bridge_elongation_ratio"]) pca_bridge_elongation_ratio = node["pca_bridge_elongation_ratio"].as<float>();
@@ -1149,6 +1258,9 @@ public:
         if (node["pca_bridge_future_window_min_both_daughter_support"]) pca_bridge_future_window_min_both_daughter_support = node["pca_bridge_future_window_min_both_daughter_support"].as<int>();
         if (node["pca_bridge_future_window_max_missing_daughters"]) pca_bridge_future_window_max_missing_daughters = node["pca_bridge_future_window_max_missing_daughters"].as<int>();
         if (node["pca_bridge_future_window_max_parent_persists"]) pca_bridge_future_window_max_parent_persists = node["pca_bridge_future_window_max_parent_persists"].as<int>();
+        if (node["pca_bridge_future_window_parent_balance_rescue_min"]) pca_bridge_future_window_parent_balance_rescue_min = node["pca_bridge_future_window_parent_balance_rescue_min"].as<float>();
+        if (node["pca_bridge_future_window_min_parent_shape_for_cost_rescue"]) pca_bridge_future_window_min_parent_shape_for_cost_rescue = node["pca_bridge_future_window_min_parent_shape_for_cost_rescue"].as<float>();
+        if (node["pca_bridge_future_window_refit_halfspace_min_fraction"]) pca_bridge_future_window_refit_halfspace_min_fraction = node["pca_bridge_future_window_refit_halfspace_min_fraction"].as<float>();
         if (node["pca_bridge_middle_cut_centroids"]) pca_bridge_middle_cut_centroids = node["pca_bridge_middle_cut_centroids"].as<bool>();
         if (node["pca_bridge_black_threshold"]) pca_bridge_black_threshold = node["pca_bridge_black_threshold"].as<float>();
         if (node["pca_bridge_min_black_fraction"]) pca_bridge_min_black_fraction = node["pca_bridge_min_black_fraction"].as<float>();
@@ -1201,6 +1313,21 @@ public:
         std::cout << "split_geometry_gate_enabled: " << split_geometry_gate_enabled << '\n';
         std::cout << "split_max_daughter_seed_drift_fraction: " << split_max_daughter_seed_drift_fraction << '\n';
         std::cout << "split_max_daughter_axis_expansion: " << split_max_daughter_axis_expansion << '\n';
+        std::cout << "split_soft_geometry_gate_enabled: " << split_soft_geometry_gate_enabled << '\n';
+        std::cout << "split_soft_geometry_penalty_fraction: " << split_soft_geometry_penalty_fraction << '\n';
+        std::cout << "split_soft_max_daughter_seed_drift_fraction: " << split_soft_max_daughter_seed_drift_fraction << '\n';
+        std::cout << "split_soft_max_final_separation_parent_fraction: " << split_soft_max_final_separation_parent_fraction << '\n';
+        std::cout << "split_close_axis_soft_gate_enabled: " << split_close_axis_soft_gate_enabled << '\n';
+        std::cout << "split_close_axis_distance_scale: " << split_close_axis_distance_scale << '\n';
+        std::cout << "split_close_axis_center_axis_alignment: " << split_close_axis_center_axis_alignment << '\n';
+        std::cout << "split_close_axis_max_angle_degrees: " << split_close_axis_max_angle_degrees << '\n';
+        std::cout << "split_close_axis_penalty_fraction: " << split_close_axis_penalty_fraction << '\n';
+        std::cout << "split_daughter_axis_interaction_soft_gate_enabled: " << split_daughter_axis_interaction_soft_gate_enabled << '\n';
+        std::cout << "split_daughter_axis_interaction_distance_fraction: " << split_daughter_axis_interaction_distance_fraction << '\n';
+        std::cout << "split_daughter_axis_interaction_along_fraction: " << split_daughter_axis_interaction_along_fraction << '\n';
+        std::cout << "split_daughter_axis_parallel_angle_degrees: " << split_daughter_axis_parallel_angle_degrees << '\n';
+        std::cout << "split_daughter_axis_interaction_penalty_fraction: " << split_daughter_axis_interaction_penalty_fraction << '\n';
+        std::cout << "split_bio_ignore_trash_neighbors_enabled: " << split_bio_ignore_trash_neighbors_enabled << '\n';
         std::cout << "split_axis_alignment_gate_enabled: " << split_axis_alignment_gate_enabled << '\n';
         std::cout << "split_axis_alignment_sphere_angle_degrees: " << split_axis_alignment_sphere_angle_degrees << '\n';
         std::cout << "split_axis_alignment_elongation_shrink: " << split_axis_alignment_elongation_shrink << '\n';
@@ -1208,8 +1335,34 @@ public:
         std::cout << "split_daughter_overlap_gate_enabled: " << split_daughter_overlap_gate_enabled << '\n';
         std::cout << "split_max_daughter_overlap_fraction: " << split_max_daughter_overlap_fraction << '\n';
         std::cout << "split_daughter_overlap_scale: " << split_daughter_overlap_scale << '\n';
+        std::cout << "split_daughter_refit_keep_seed_halfspace_enabled: " << split_daughter_refit_keep_seed_halfspace_enabled << '\n';
+        std::cout << "split_daughter_refit_halfspace_min_fraction: " << split_daughter_refit_halfspace_min_fraction << '\n';
+        std::cout << "split_daughter_refit_align_short_axis_to_split_enabled: " << split_daughter_refit_align_short_axis_to_split_enabled << '\n';
+        std::cout << "split_daughter_flattened_plane_rotation_enabled: " << split_daughter_flattened_plane_rotation_enabled << '\n';
+        std::cout << "split_daughter_flattened_plane_min_shape: " << split_daughter_flattened_plane_min_shape << '\n';
+        std::cout << "split_daughter_flattened_plane_radius_scale: " << split_daughter_flattened_plane_radius_scale << '\n';
+        std::cout << "split_daughter_flattened_plane_min_pixels: " << split_daughter_flattened_plane_min_pixels << '\n';
+        std::cout << "split_daughter_flattened_plane_min_ratio: " << split_daughter_flattened_plane_min_ratio << '\n';
+        std::cout << "split_daughter_flattened_plane_long_axis_ratio: " << split_daughter_flattened_plane_long_axis_ratio << '\n';
+        std::cout << "split_daughter_flattened_plane_neighbor_guard_enabled: " << split_daughter_flattened_plane_neighbor_guard_enabled << '\n';
+        std::cout << "split_daughter_flattened_plane_neighbor_distance_scale: " << split_daughter_flattened_plane_neighbor_distance_scale << '\n';
+        std::cout << "split_daughter_flattened_plane_neighbor_axis_alignment: " << split_daughter_flattened_plane_neighbor_axis_alignment << '\n';
+        std::cout << "split_daughter_flattened_plane_neighbor_lateral_scale: " << split_daughter_flattened_plane_neighbor_lateral_scale << '\n';
+        std::cout << "split_daughter_flattened_plane_neighbor_normal_alignment: " << split_daughter_flattened_plane_neighbor_normal_alignment << '\n';
         std::cout << "bio_daughter_size_ratio_max: " << bio_daughter_size_ratio_max << std::endl;
         std::cout << "bio_min_daughter_separation_parent_fraction: " << bio_min_daughter_separation_parent_fraction << '\n';
+        std::cout << "bio_max_midpoint_parent_fraction: " << bio_max_midpoint_parent_fraction << '\n';
+        std::cout << "bio_min_daughter_mean_brightness_absolute: " << bio_min_daughter_mean_brightness_absolute << '\n';
+        std::cout << "bio_min_daughter_mean_brightness_parent_fraction: " << bio_min_daughter_mean_brightness_parent_fraction << '\n';
+        std::cout << "bio_min_daughter_mean_brightness_background_margin: " << bio_min_daughter_mean_brightness_background_margin << '\n';
+        std::cout << "bio_daughter_density_soft_gate_enabled: " << bio_daughter_density_soft_gate_enabled << '\n';
+        std::cout << "bio_daughter_density_soft_min_fraction: " << bio_daughter_density_soft_min_fraction << '\n';
+        std::cout << "bio_daughter_density_soft_penalty_fraction: " << bio_daughter_density_soft_penalty_fraction << '\n';
+        std::cout << "bio_daughter_density_soft_require_future_support: " << bio_daughter_density_soft_require_future_support << '\n';
+        std::cout << "bio_separation_soft_gate_enabled: " << bio_separation_soft_gate_enabled << '\n';
+        std::cout << "bio_separation_soft_min_fraction: " << bio_separation_soft_min_fraction << '\n';
+        std::cout << "bio_separation_soft_penalty_fraction: " << bio_separation_soft_penalty_fraction << '\n';
+        std::cout << "bio_separation_soft_require_future_support: " << bio_separation_soft_require_future_support << '\n';
         std::cout << "pca_bridge_split_enabled: " << pca_bridge_split_enabled << '\n';
         std::cout << "pca_bridge_elongation_ratio: " << pca_bridge_elongation_ratio << '\n';
         std::cout << "pca_bridge_min_long_mid_ratio: " << pca_bridge_min_long_mid_ratio << '\n';
@@ -1226,6 +1379,9 @@ public:
         std::cout << "pca_bridge_future_window_min_both_daughter_support: " << pca_bridge_future_window_min_both_daughter_support << '\n';
         std::cout << "pca_bridge_future_window_max_missing_daughters: " << pca_bridge_future_window_max_missing_daughters << '\n';
         std::cout << "pca_bridge_future_window_max_parent_persists: " << pca_bridge_future_window_max_parent_persists << '\n';
+        std::cout << "pca_bridge_future_window_parent_balance_rescue_min: " << pca_bridge_future_window_parent_balance_rescue_min << '\n';
+        std::cout << "pca_bridge_future_window_min_parent_shape_for_cost_rescue: " << pca_bridge_future_window_min_parent_shape_for_cost_rescue << '\n';
+        std::cout << "pca_bridge_future_window_refit_halfspace_min_fraction: " << pca_bridge_future_window_refit_halfspace_min_fraction << '\n';
         std::cout << "pca_bridge_middle_cut_centroids: " << pca_bridge_middle_cut_centroids << '\n';
         std::cout << "signal_center_split_enabled: " << signal_center_split_enabled << '\n';
         std::cout << "signal_center_split_min_parent_elongation: " << signal_center_split_min_parent_elongation << '\n';

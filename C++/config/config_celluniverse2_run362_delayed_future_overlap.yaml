@@ -1,0 +1,8 @@
+base_config: config_celluniverse2_run361_delayed_future_buried_scale.yaml
+
+prob:
+  # After softening delayed-future buried ownership, the same crowded family
+  # moved to very small hard-overlap rejects. Allow only a modest overlap for
+  # this delayed-future branch instead of widening the general hard-overlap
+  # gate.
+  split_delayed_future_hard_overlap_tolerance: 0.08

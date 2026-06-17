@@ -13,6 +13,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(UNIX AND NOT APPLE)
+    string(FIND "${CMAKE_CUDA_FLAGS}" "-U_GNU_SOURCE" CELLUNIVERSE_CUDA_UNDEF_GNU_SOURCE)
+    if(CELLUNIVERSE_CUDA_UNDEF_GNU_SOURCE EQUAL -1)
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -U_GNU_SOURCE"
+            CACHE STRING "Flags used by the CUDA compiler" FORCE)
+    endif()
+endif()
+
 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
     set(_detected_macos_arch "${CMAKE_HOST_SYSTEM_PROCESSOR}")
     if(NOT _detected_macos_arch)
@@ -42,6 +50,9 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # Link-time optimization (IPO / LTO) for Release.
+option(CELLUNIVERSE_ENABLE_LTO "Enable IPO/LTO for Release builds" OFF)
+option(CELLUNIVERSE_GCC15_SAFE_OPT
+       "Keep Release -O3 while disabling GCC 15 optimizer passes that ICE on large translation units." ON)
 include(CheckIPOSupported)
 check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
 
@@ -103,6 +114,23 @@ option(CELLUNIVERSE_PREFER_LOCAL_LIBTORCH
        "Prefer external/libtorch over any cached or system Torch package." ON)
 option(CELLUNIVERSE_AUTO_INSTALL_LIBTORCH
        "Run scripts/install_libtorch.sh during configure if external/libtorch is missing." ON)
+if(UNIX AND NOT APPLE AND NOT CMAKE_CUDA_COMPILER)
+    find_program(CELLUNIVERSE_NVCC_EXECUTABLE
+        NAMES nvcc
+        HINTS
+            "$ENV{CUDA_HOME}"
+            "$ENV{CUDA_PATH}"
+            /usr/local/cuda
+            /usr/local/cuda-13.0
+        PATH_SUFFIXES bin
+    )
+    if(CELLUNIVERSE_NVCC_EXECUTABLE)
+        set(CMAKE_CUDA_COMPILER "${CELLUNIVERSE_NVCC_EXECUTABLE}"
+            CACHE FILEPATH "CUDA compiler" FORCE)
+        set(ENV{CUDACXX} "${CELLUNIVERSE_NVCC_EXECUTABLE}")
+        message(STATUS "Auto-selected CUDA compiler: ${CELLUNIVERSE_NVCC_EXECUTABLE}")
+    endif()
+endif()
 if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS)
     set(CELLUNIVERSE_LOCAL_LIBTORCH "${CMAKE_CURRENT_SOURCE_DIR}/external/libtorch")
     set(CELLUNIVERSE_LOCAL_TORCH_CONFIG
@@ -186,6 +214,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
         ${cwd}/src
 )
 
+if(CELLUNIVERSE_GCC15_SAFE_OPT AND
+   CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    set_property(SOURCE ${cwd}/src/Frame.cpp APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Release>:-fno-rerun-cse-after-loop>)
+endif()
+
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
 if(OpenMP_CXX_FOUND)
@@ -197,6 +232,15 @@ if(CELLUNIVERSE_BUILD_N2V2_PREPROCESS AND Torch_FOUND)
     target_sources(${PROJECT_NAME} PRIVATE
             ${cwd}/src/N2V2Preprocessor.cpp
     )
+    if(CELLUNIVERSE_GCC15_SAFE_OPT AND
+       CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+       CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+        set_property(SOURCE ${cwd}/src/N2V2Preprocessor.cpp APPEND PROPERTY COMPILE_OPTIONS
+            $<$<CONFIG:Release>:-O1>
+            $<$<CONFIG:Release>:-fno-tree-fre>
+            $<$<CONFIG:Release>:-fno-dce>
+            $<$<CONFIG:Release>:-fno-cprop-registers>)
+    endif()
     target_link_libraries(${PROJECT_NAME} ${TORCH_LIBRARIES})
     target_compile_definitions(${PROJECT_NAME} PRIVATE CELLUNIVERSE_HAS_N2V2_PREPROCESS=1)
     if(TORCH_CXX_FLAGS_LIST)
@@ -211,7 +255,7 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:-O3 -DNDEBUG>
     $<$<AND:$<CONFIG:Release>,$<NOT:$<PLATFORM_ID:Darwin>>,$<CXX_COMPILER_ID:GNU,Clang>>:-march=native>
 )
-if(IPO_SUPPORTED)
+if(IPO_SUPPORTED AND CELLUNIVERSE_ENABLE_LTO)
     set_property(TARGET ${PROJECT_NAME} PROPERTY
         INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()

@@ -1,0 +1,8 @@
+base_config: config_celluniverse2_tuning.yaml
+
+prob:
+  # Delayed-future bridge cases like frame-85 cell_11100 have no immediate
+  # daughter support, but do show a bright later future pair and acceptable
+  # balance. Give only that branch a stronger daughter-side halfspace clamp
+  # during refit instead of broadening the global halfspace floor.
+  split_delayed_future_refit_halfspace_min_fraction: 0.70

@@ -1,0 +1,7 @@
+base_config: config_celluniverse2_tuning.yaml
+
+prob:
+  # Delayed-future PCA bridge cases can land just inside a crowded neighbor
+  # even when later future support is clean. Soften only the existing-cell
+  # buried-center test for this branch instead of skipping ownership checks.
+  split_delayed_future_existing_cell_buried_scale: 0.85

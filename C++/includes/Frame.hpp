@@ -6,6 +6,7 @@
 #include <string>
 #include <ostream>
 #include <unordered_map>
+#include <limits>
 #include <opencv2/opencv.hpp>
 #include "types.hpp"
 #include "ConfigTypes.hpp"
@@ -57,6 +58,15 @@ struct BridgeSplitProposal
     int windowParentPersists = 0;
     int windowImmediateBothDaughtersSupported = 0;
     float windowSupportScore = 0.0f;
+    float windowBestMatchedMinBrightness = 0.0f;
+    float windowImmediateMatchedMinBrightness = 0.0f;
+    float windowImmediateMatchedPairDistance =
+        std::numeric_limits<float>::infinity();
+    int windowBestMatchedOffset = 0;
+    cv::Point3f windowBestMatchedD1Pos{0.0f, 0.0f, 0.0f};
+    cv::Point3f windowBestMatchedD2Pos{0.0f, 0.0f, 0.0f};
+    cv::Point3f windowImmediateMatchedD1Pos{0.0f, 0.0f, 0.0f};
+    cv::Point3f windowImmediateMatchedD2Pos{0.0f, 0.0f, 0.0f};
     bool immediateFutureCenterBacked = false;
     bool futureWindowSplitRescue = false;
     bool bioSeparationSoftRescued = false;
@@ -67,9 +77,14 @@ struct BridgeSplitProposal
     float balancedWindowBonus = 0.0f;
     float maxOverlapCostFractionOverride = -1.0f;
     float parentDistanceBalance = 1.0f;
+    bool centerSnapApplied = false;
     float centerSnapMaxSeedDistance = 0.0f;
     float centerSnapScore = 0.0f;
     bool centerSnapUsedAlignedPairFallback = false;
+    float signalCenterScore = -1.0f;
+    float signalCenterSeparationRatio = 0.0f;
+    float signalCenterMidpointDistance = 0.0f;
+    float signalCenterAxisAlignment = 0.0f;
     float parentPersistencePenalty = 0.0f;
     float neighborClaimPenalty = 0.0f;
     float continuationClaimSoftPenalty = 0.0f;
@@ -88,6 +103,11 @@ struct BridgeSplitProposal
     bool hasAlternateSeedPair = false;
     cv::Point3f altD1Pos{0.0f, 0.0f, 0.0f};
     cv::Point3f altD2Pos{0.0f, 0.0f, 0.0f};
+    bool pcaBridgeHasDarkBridge = false;
+    bool pcaBridgeFutureAxisProjected = false;
+    bool pcaBridgeRevertedFarFutureSnap = false;
+    float pcaBridgeRevertedSnapDistance = 0.0f;
+    float pcaBridgeRevertedSnapTrustLimit = 0.0f;
 };
 
 class Frame

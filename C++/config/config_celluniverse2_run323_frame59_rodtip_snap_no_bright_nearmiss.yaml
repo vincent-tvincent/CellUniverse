@@ -1,0 +1,1183 @@
+base_config: config.yaml
+
+# Experimental CellUniverse 2.0 mode.
+#
+# This keeps the normal CellUniverse tracking command and the normal final PCA
+# shape fit, but removes split trials and skips the random/signal-guided
+# perturbation loop. Each frame therefore advances by running the existing PCA
+# fit directly from the copied previous-frame cell state.
+simulation:
+  celluniverse2_enabled: true
+  export_perturb_cell_center_debug_images: true
+  # If a carried-forward cell/trash body is nearly all background, use the
+  # frame's bright signal centers as emergency anchors before the final PCA fit.
+  # The matcher requires the new center to be at least one body unit away and
+  # similar in size/shape, so normal in-place PCA fits are left alone.
+  signal_center_rescue_enabled: true
+  signal_center_rescue_background_delta: 0.03
+  signal_center_rescue_background_stddev_max: 0.04
+  signal_center_rescue_min_distance_body_units: 0.75
+  signal_center_rescue_max_distance_body_units: 6.0
+  signal_center_rescue_max_size_ratio: 3.0
+  signal_center_rescue_max_shape_ratio: 2.5
+  # Rescue assignment is solved across all background-looking cells at once,
+  # so two cells cannot greedily steal the same bright center. The score cap
+  # blocks very long relocations that previously stole unrelated daughter
+  # centers in crowded later frames.
+  signal_center_rescue_global_assignment_enabled: true
+  signal_center_rescue_max_heuristic_score: 3.0
+  # Young split daughters are localized by trying each plausible bright center
+  # in their sibling half-space, running a short PCA probe, and keeping the
+  # best candidate before the full PCA pass. Unlike the background-body rescue,
+  # this allows close centers because daughters often move less than one body
+  # unit between adjacent frames.
+  signal_center_rescue_split_daughter_probe_enabled: true
+  signal_center_rescue_split_daughter_probe_frames: 3
+  signal_center_rescue_split_daughter_max_distance_body_units: 1.5
+  signal_center_rescue_split_daughter_probe_distance_weight: 0.40
+  # If an older split daughter has become background, cannot find any
+  # compatible signal center, and then severely overlaps another live cell,
+  # remove it as a stale blocker instead of protecting/restoring it forever.
+  celluniverse2_stale_daughter_cleanup_enabled: true
+  celluniverse2_stale_daughter_cleanup_min_age: 4
+  celluniverse2_stale_daughter_cleanup_overlap: 0.50
+  # Local bbox background should represent true surrounding background, not the
+  # brightest halo outside the fitted cell body.
+  adaptive_background_local_bbox_percentile: 20.0
+  n2v2_preprocess:
+    contrast:
+      gamma_split_decay_enabled: true
+      gamma_split_decay_target: 1.0
+      gamma_split_decay_splits_to_target: 120
+
+# Seed each initial CSV cell with medium rendering brightness before the normal
+# per-frame brightness EMA takes over.
+cell:
+  initialBrightness: 0.5
+
+# Separate split-only kill switch. celluniverse2_enabled already suppresses
+# standard random split scheduling. The PCA-bridge cut remains enabled below
+# as a narrow one-shot split path for obvious rod-like wrong fits.
+prob:
+  disable_split_trials: true
+  # Prevent final PCA shape fitting from gradually walking a carried cell into
+  # a neighboring cell body. This is intentionally narrower than the shared
+  # snap-position guard: it only restores position when the cell was previously
+  # clear of that neighbor and the PCA result lands in the neighbor core.
+  celluniverse2_neighbor_pca_drift_guard_enabled: true
+  celluniverse2_neighbor_pca_drift_guard_min_move_abs: 18.0
+  celluniverse2_neighbor_pca_drift_guard_min_move_scale: 0.60
+  celluniverse2_neighbor_pca_drift_guard_body_scale: 0.75
+  celluniverse2_neighbor_pca_drift_guard_pre_clearance_abs: 28.0
+  celluniverse2_neighbor_pca_drift_guard_pre_clearance_scale: 1.00
+  pca_bridge_split_enabled: true
+  pca_bridge_elongation_ratio: 1.35
+  # CellUniverse 2.0 does not require a dark bridge. Once a rod-like cell is
+  # detected, seed daughters by cutting the rod at its geometric middle and
+  # using brightness-weighted centers of the two halves. The proposal is still
+  # the only split candidate in this mode.
+  pca_bridge_require_dark_bridge: false
+  pca_bridge_middle_cut_centroids: true
+  # Before the final CellUniverse2 PCA fit, flat carried-forward parents can
+  # also seed a split from two distinctive signal centers inside the parent's
+  # snap bbox. Acceptance still goes through the normal split validation gates.
+  signal_center_split_enabled: true
+  signal_center_split_min_parent_elongation: 1.45
+  signal_center_split_max_midpoint_radius_scale: 0.65
+  # Allow close axial daughters such as the frame-18 cell_10 split; downstream
+  # CellUniverse2 bio/cost gates still reject unsupported close fake pairs.
+  signal_center_split_min_separation_radius_scale: 0.45
+  # Signal-center proposals should follow the carried rod axis. This keeps
+  # later crowded frames from selecting a plausible pair of bright centers on
+  # the wrong split axis before the downstream PCA/cost gates run.
+  signal_center_split_min_axis_alignment: 0.75
+  # Tuned from the latest frame-4 false reject:
+  #   f4 Cell type 1_1 long/mid=1.03, mid/short=1.61
+  #   f4 Cell type 1_2 long/mid=1.09, mid/short=1.33
+  # Frame 18/19 true split-like rods include mid/short around 2.01-2.14
+  # (f19 cell_000/cell_001, f18 cell_00). Allow those through the rod
+  # proposal gate while downstream bio/cost/overlap gates still reject bad
+  # proposals.
+  pca_bridge_min_long_mid_ratio: 1.02
+  pca_bridge_max_mid_short_ratio: 2.45
+  pca_bridge_min_side_voxels: 8
+  # CellUniverse2 treats the rod-like parent shape itself as split evidence;
+  # do not require a dark valley between the middle-cut daughter seeds.
+  pca_bridge_require_valley: false
+  # Permit only this much rod-cut daughter overlap. Higher overlap is rejected;
+  # accepted daughters are not resized or repaired. A separate future-window
+  # gate below can rescue higher-overlap candidates when the next frames show
+  # two distinct daughter centers in the parent bbox.
+  pca_bridge_soft_daughter_overlap_max: 0.12
+  pca_bridge_future_window_enabled: true
+  pca_bridge_future_window_size: 3
+  pca_bridge_future_window_match_distance: 28.0
+  pca_bridge_future_window_match_distance_per_frame: 4.0
+  pca_bridge_future_window_rescue_overlap_max: 0.25
+  pca_bridge_future_window_min_separation_parent_fraction: 0.50
+  pca_bridge_future_window_min_both_daughter_support: 2
+  pca_bridge_future_window_max_missing_daughters: 0
+  pca_bridge_future_window_max_parent_persists: 0
+  # If both daughters are already visible in the immediate future window,
+  # allow an asymmetric current-frame seed instead of rejecting on parent
+  # distance balance alone.
+  pca_bridge_future_window_parent_balance_rescue_min: 0.19
+  # Rod-tip fallback can be very asymmetric after post-split movement. Only
+  # waive the parent-distance balance floor when both future frames show two
+  # bright supported daughters.
+  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.08
+  pca_bridge_future_window_rod_tip_midpoint_parent_fraction: 1.00
+  # When daughter centers came from the immediate future frame, only let clean
+  # future support override current-frame dim/cost gates for very rod-like
+  # parents. This catches early rod failures such as cell_110 at frame 34 while
+  # avoiding broad future-only split acceptance.
+  pca_bridge_future_window_min_parent_shape_for_cost_rescue: 2.05
+  # Future-centered daughters may be dim in the current frame; keep their
+  # refit positions on their own sides so PCA cannot pull the split pair back
+  # into one short rod before validation.
+  pca_bridge_future_window_refit_halfspace_min_fraction: 0.70
+  # Clean future-supported newborn splits may overlap a neighbor slightly
+  # before the next PCA pass separates them. This remains a small tolerance,
+  # not a general overlap allowance.
+  split_future_supported_hard_overlap_tolerance: 0.08
+  # Bring back the original bio separation gate: reject splits where the two
+  # newborn daughters are still too close relative to the snapshot parent.
+  # This targets false early rod cuts like the frame-23/24 cell_011 split.
+  bio_min_daughter_separation_parent_fraction: 1.10
+  # Original midpoint-size sanity gate: newborn daughters should still be
+  # centered around the previous-frame parent, not shifted onto a neighboring
+  # cell or trash target.
+  bio_max_midpoint_parent_fraction: 0.95
+  # Brightness as density: each newborn daughter must contain real signal.
+  # This rejects false daughters sitting in background/dim volume.
+  bio_min_daughter_mean_brightness_absolute: 0.05
+  bio_min_daughter_mean_brightness_parent_fraction: 0.50
+  bio_min_daughter_mean_brightness_background_margin: 0.015
+  # Small tolerance for real but slightly dim daughters: only candidates with
+  # clean future-window support may use this soft band. Below the hard floor
+  # they are still rejected as background-like false daughters.
+  bio_daughter_density_soft_gate_enabled: true
+  bio_daughter_density_soft_min_fraction: 0.75
+  bio_daughter_density_soft_penalty_fraction: 0.25
+  bio_daughter_density_soft_require_future_support: true
+  # Near-miss daughter separation can survive as a scored candidate when the
+  # immediate future window already confirms two daughters. This keeps the
+  # original bio separation as a preference while avoiding one-frame delays
+  # from small threshold misses such as frame-18 cell_00.
+  bio_separation_soft_gate_enabled: true
+  bio_separation_soft_min_fraction: 0.50
+  bio_separation_soft_penalty_fraction: 0.35
+  bio_separation_soft_require_future_support: true
+  # Clean future-supported rod-tip splits may have oversized fitted daughters
+  # in the current frame while the two bodies are still partially visible.
+  # This is a scoped rescue, not a global relaxation of the bio volume gate.
+  pca_bridge_future_window_rod_tip_combined_volume_max_fraction: 1.70
+  pca_bridge_future_window_rod_tip_single_daughter_volume_max_fraction: 0.90
+  pca_bridge_future_window_pca_snap_max_radius_scale: 1.00
+  pca_bridge_future_window_geometry_rescue_min_parent_shape: 1.60
+  pca_bridge_future_window_geometry_rescue_min_brightness: 0.15
+  pca_bridge_future_window_rod_tip_snap_max_separation_radius_scale: 2.20
+  pca_bridge_future_window_rod_tip_snap_max_midpoint_radius_scale: 1.45
+  # Future-supported rod-tip proposals should not be displaced by an
+  # axis-place alternate once the parent is already clearly rod-like. Frame 18
+  # cell_10 has clean two-frame future support but the axis-place alternate
+  # collapses the daughters too close before the bio separation gate.
+  pca_bridge_future_window_rod_tip_axis_place_max_parent_shape: 1.75
+  # Small tolerance for clean two-frame future-supported PCA bridge proposals
+  # that land just under the final daughter-separation cliff after PCA refit.
+  pca_bridge_future_window_near_separation_fraction: 0.965
+  # Frame-59 tuning copy: keep future/current aligned PCA bridge rescue explicit
+  # and auditable. A clean future-pair snap needs either enough parent-distance
+  # balance or enough future brightness. Current-frame aligned snaps are not
+  # allowed to pass on snap distance alone when both signals are weak.
+  pca_bridge_future_pair_clean_min_parent_balance: 0.45
+  pca_bridge_future_pair_clean_min_brightness: 0.25
+  pca_bridge_current_aligned_weak_gate_enabled: true
+  pca_bridge_current_aligned_pair_min_parent_balance: 0.45
+  pca_bridge_current_aligned_pair_min_future_brightness: 0.25
+  # Signal-center proposals with strong axis/separation evidence may tolerate a
+  # tiny midpoint near-miss instead of being delayed one frame.
+  signal_center_midpoint_near_miss_enabled: true
+  signal_center_midpoint_near_miss_min_score: 1.0
+  signal_center_midpoint_near_miss_min_separation_ratio: 1.45
+  signal_center_midpoint_near_miss_min_axis_alignment: 0.90
+  signal_center_midpoint_near_miss_min_future_both: 1
+  signal_center_midpoint_near_miss_min_future_brightness: 0.12
+  signal_center_midpoint_near_miss_limit_scale: 1.04
+  pca_bridge_clean_current_aligned_max_snap_radius_scale: 1.70
+  pca_bridge_unclean_pair_min_parent_balance: 0.65
+  pca_bridge_far_future_flat_min_parent_shape: 1.75
+  pca_bridge_far_future_flat_min_mid_short_ratio: 1.75
+  pca_bridge_scale_trusted_min_parent_balance: 0.50
+  pca_bridge_scale_trusted_min_future_brightness: 0.30
+  pca_bridge_scale_trusted_max_snap_radius_scale: 1.35
+  signal_center_crowded_cell_count_min: 50
+  signal_center_crowded_moderate_max_shape: 2.15
+  signal_center_crowded_two_frame_min_shape: 1.85
+  signal_center_crowded_two_frame_min_parent_balance: 0.35
+  signal_center_crowded_two_frame_min_future_brightness: 0.27
+  signal_center_crowded_one_frame_min_shape: 2.10
+  signal_center_crowded_one_frame_min_parent_balance: 0.60
+  signal_center_crowded_bright_one_frame_min_shape: 1.80
+  signal_center_crowded_bright_one_frame_min_sep_scale: 1.05
+  signal_center_crowded_bright_one_frame_min_parent_balance: 0.40
+  signal_center_crowded_bright_one_frame_min_future_brightness: 0.35
+  signal_center_crowded_supported_sep_scale: 1.05
+  signal_center_crowded_default_sep_scale: 1.25
+  signal_center_sparse_cell_count_max: 50
+  signal_center_sparse_moderate_max_shape: 2.20
+  signal_center_sparse_low_sep_max_scale: 1.20
+  signal_center_sparse_low_future_brightness_max: 0.25
+  signal_center_sparse_two_frame_min_shape: 2.10
+  signal_center_sparse_two_frame_min_sep_scale: 1.10
+  signal_center_sparse_two_frame_min_parent_balance: 0.55
+  signal_center_sparse_immediate_min_brightness: 0.06
+  signal_center_sparse_strong_shape_min: 2.30
+  signal_center_mid_density_cell_count_min: 25
+  signal_center_mid_density_cell_count_max: 50
+  signal_center_mid_density_weak_max_shape: 2.15
+  signal_center_mid_density_weak_max_score: 0.90
+  signal_center_mid_density_weak_max_sep_ratio: 1.50
+  signal_center_mid_density_weak_max_parent_balance: 0.85
+  pca_bridge_strong_current_min_parent_balance: 0.70
+  pca_bridge_strong_current_min_future_brightness: 0.20
+  pca_bridge_moderate_raw_one_frame_min_sep_scale: 1.30
+  pca_bridge_moderate_raw_one_frame_min_parent_balance: 0.55
+  pca_bridge_moderate_raw_one_frame_min_shape: 1.75
+  pca_bridge_moderate_raw_one_frame_min_future_brightness: 0.30
+  signal_center_strong_asymmetric_min_sep_scale: 1.80
+  signal_center_strong_asymmetric_min_parent_balance: 0.08
+  signal_center_strong_asymmetric_min_future_brightness: 0.30
+  pca_bridge_strong_raw_min_parent_balance: 0.70
+  pca_bridge_strong_raw_min_shape: 1.70
+  pca_bridge_strong_raw_min_future_brightness: 0.30
+  pca_bridge_high_shape_raw_bio_near_miss_min_shape: 2.20
+  pca_bridge_high_shape_raw_bio_near_miss_min_sep_scale: 0.75
+  pca_bridge_high_shape_raw_bio_near_miss_min_parent_balance: 0.75
+  rod_tip_axis_place_min_shape: 1.65
+  rod_tip_axis_place_max_shape: 2.05
+  rod_tip_axis_place_min_future_brightness: 0.20
+  rod_tip_immediate_future_min_brightness: 0.20
+  rod_tip_immediate_future_min_parent_balance: 0.45
+  rod_tip_immediate_future_high_shape_min_parent_balance: 0.35
+  pca_bridge_low_balance_future_min_brightness: 0.29
+  pca_bridge_low_balance_support_min_parent_balance: 0.08
+  pca_bridge_current_fallback_low_balance_min_parent_balance: 0.15
+  pca_bridge_current_fallback_min_future_brightness: 0.30
+  pca_bridge_current_fallback_max_snap_radius_scale: 1.80
+  pca_bridge_future_axis_projection_min_brightness: 0.20
+  pca_bridge_future_axis_projection_min_parent_balance: 0.55
+  pca_bridge_future_axis_projection_max_snap_distance: 42.0
+  pca_bridge_future_axis_projection_max_snap_parent_scale: 1.25
+  pca_bridge_long_moved_raw_min_shape: 2.15
+  pca_bridge_long_moved_raw_min_sep_scale: 1.50
+  pca_bridge_long_moved_raw_min_current_parent_balance: 0.55
+  pca_bridge_long_moved_raw_min_future_brightness: 0.18
+  pca_bridge_asymmetric_raw_min_shape: 2.0
+  pca_bridge_asymmetric_raw_min_sep_scale: 1.45
+  pca_bridge_asymmetric_raw_min_current_parent_balance: 0.55
+  pca_bridge_one_frame_shape_rescue_min_shape: 2.15
+  pca_bridge_one_frame_shape_rescue_max_shape_floor: 2.20
+  pca_bridge_one_frame_shape_rescue_min_parent_balance: 0.45
+  pca_bridge_one_frame_shape_rescue_max_snap_radius_scale: 1.45
+  pca_bridge_one_frame_immediate_min_parent_balance: 0.80
+  pca_bridge_one_frame_immediate_min_brightness: 0.25
+  pca_bridge_moderate_future_pair_min_shape: 1.65
+  pca_bridge_moderate_future_pair_max_shape: 2.0
+  pca_bridge_moderate_future_pair_min_parent_balance: 0.45
+  pca_bridge_moderate_future_pair_max_snap_radius_scale: 1.45
+  pca_bridge_weak_balance_future_pair_min_shape: 1.95
+  pca_bridge_weak_balance_future_pair_max_shape: 2.15
+  pca_bridge_weak_balance_future_pair_min_parent_balance: 0.14
+  pca_bridge_weak_balance_future_pair_max_snap_radius_scale: 1.80
+  pca_bridge_bright_stable_future_pair_min_shape: 1.35
+  pca_bridge_bright_stable_future_pair_min_parent_balance: 0.10
+  pca_bridge_bright_stable_future_pair_min_sep_scale: 1.20
+  pca_bridge_bright_stable_future_pair_min_brightness: 0.34
+  pca_bridge_bright_stable_future_pair_max_snap_radius_scale: 1.60
+  pca_bridge_far_aligned_future_pair_min_shape: 1.35
+  pca_bridge_far_aligned_future_pair_min_parent_balance: 0.10
+  pca_bridge_far_aligned_future_pair_min_brightness: 0.28
+  pca_bridge_far_aligned_future_pair_max_score: 1.50
+  pca_bridge_far_aligned_future_pair_max_snap_radius_scale: 2.80
+  pca_bridge_two_frame_future_min_parent_balance: 0.45
+  pca_bridge_two_frame_future_min_brightness: 0.18
+  pca_bridge_two_frame_future_max_snap_radius_scale: 1.70
+  celluniverse2_elongated_split_min_long_mid_ratio: 1.05
+  pca_bridge_clean_snap_radius_fraction: 0.75
+  pca_bridge_low_shape_future_pair_max_shape: 2.0
+  pca_bridge_low_shape_future_pair_min_brightness_floor: 0.10
+  signal_center_strong_current_min_parent_balance: 0.70
+  pca_bridge_one_frame_bright_near_bio_min_brightness: 0.30
+  pca_bridge_one_frame_bright_near_bio_min_parent_balance: 0.55
+  pca_bridge_one_frame_bright_near_bio_min_shape: 2.0
+  pca_bridge_one_frame_bright_near_bio_min_sep_scale: 0.94
+  pca_bridge_one_frame_future_soft_min_brightness: 0.30
+  pca_bridge_one_frame_future_soft_min_parent_balance: 0.55
+  pca_bridge_one_frame_future_soft_min_shape: 1.35
+  pca_bridge_weak_current_bio_near_miss_max_brightness: 0.10
+  pca_bridge_weak_current_bio_near_miss_max_parent_balance: 0.55
+  pca_bridge_weak_current_bio_near_miss_max_shape: 1.80
+  pca_bridge_clean_current_soft_min_parent_balance: 0.70
+  signal_center_one_frame_window_min_parent_balance: 0.60
+  signal_center_one_frame_window_min_shape: 2.10
+  split_pca_bridge_edge_brightness_scale: 0.50
+  split_dense_flat_future_min_parent_balance: 0.45
+  split_dense_flat_future_min_brightness: 0.13
+  split_dense_flat_future_max_gap_density: 1.0
+  split_dense_flat_rod_tip_min_brightness: 0.20
+  split_dense_flat_rod_tip_min_parent_balance: 0.45
+  split_dense_flat_rod_tip_max_valley_from_bright: 1.05
+  split_dense_flat_bridge_min_gap_density: 0.20
+  split_dense_drifting_bridge_min_gap_density: 0.20
+  split_dense_drifting_bridge_min_valley_from_bright: 0.45
+  split_dense_drifting_bridge_seed_drift_fraction: 0.45
+  split_dense_drifting_bridge_future_brightness_floor: 0.10
+  split_future_midpoint_near_miss_min_brightness: 0.30
+  split_future_midpoint_near_miss_limit_scale: 1.08
+  split_future_pca_bridge_near_sep_min_brightness: 0.25
+  split_future_pca_bridge_near_sep_min_parent_balance: 0.85
+  split_clean_future_bridge_min_brightness: 0.15
+  split_clean_future_bridge_min_parent_balance: 0.45
+  split_clean_future_bridge_cost_limit_abs: 15000.0
+  split_clean_future_bridge_cost_limit_fraction: 0.010
+  split_clean_future_bridge_image_gain_abs: 15000.0
+  split_clean_future_bridge_image_gain_fraction: 0.0085
+  split_clean_future_bridge_overlap_limit_abs: 60000.0
+  split_clean_future_bridge_overlap_limit_fraction: 0.030
+  split_clean_future_bridge_max_gap_density: 0.22
+  split_clean_future_bridge_max_valley_from_bright: 0.70
+  split_clean_future_bridge_min_axis_length_scale: 0.75
+  split_aligned_future_bridge_min_brightness: 0.35
+  split_aligned_future_bridge_min_parent_shape: 2.0
+  split_aligned_future_bridge_min_parent_balance: 0.55
+  split_aligned_future_bridge_snap_scale: 1.0
+  split_aligned_future_bridge_image_gain_abs: 15000.0
+  split_aligned_future_bridge_image_gain_fraction: 0.010
+  split_aligned_future_bridge_overlap_limit_abs: 30000.0
+  split_aligned_future_bridge_overlap_limit_fraction: 0.015
+  split_aligned_future_bridge_max_gap_density: 0.16
+  split_aligned_future_bridge_max_valley_from_bright: 0.50
+  split_aligned_future_bridge_min_axis_length_scale: 1.0
+  split_current_locked_bridge_min_brightness: 0.30
+  split_current_locked_bridge_min_parent_shape: 2.15
+  split_current_locked_bridge_min_parent_balance: 0.08
+  split_current_locked_bridge_max_parent_balance: 0.60
+  split_current_locked_bridge_snap_scale: 1.10
+  split_current_locked_bridge_max_drift_abs: 2.0
+  split_current_locked_bridge_max_drift_scale: 0.08
+  split_current_locked_bridge_image_gain_abs: 500.0
+  split_current_locked_bridge_image_gain_fraction: 0.006
+  split_current_locked_bridge_overlap_limit_abs: 25000.0
+  split_current_locked_bridge_overlap_limit_fraction: 0.025
+  split_current_locked_bridge_cost_limit_fraction: -0.75
+  split_current_locked_bridge_geometry_limit_abs: 25000.0
+  split_current_locked_bridge_geometry_limit_fraction: 0.025
+  split_current_locked_bridge_max_gap_density: 0.20
+  split_current_locked_bridge_max_valley_from_bright: 0.45
+  split_current_locked_bridge_min_axis_length_scale: 1.0
+  split_soft_overlap_future_bridge_min_brightness: 0.15
+  split_soft_overlap_future_bridge_min_parent_balance: 0.80
+  split_soft_overlap_future_bridge_snap_scale: 1.45
+  split_soft_overlap_future_bridge_cost_limit_abs: 25000.0
+  split_soft_overlap_future_bridge_cost_limit_fraction: 0.020
+  split_soft_overlap_future_bridge_image_limit_abs: 2000.0
+  split_soft_overlap_future_bridge_image_limit_fraction: 0.006
+  split_soft_overlap_future_bridge_overlap_limit_abs: 60000.0
+  split_soft_overlap_future_bridge_overlap_limit_fraction: 0.035
+  split_soft_overlap_future_bridge_max_gap_density: 0.12
+  split_soft_overlap_future_bridge_max_valley_from_bright: 0.70
+  split_soft_overlap_future_bridge_min_axis_length_scale: 0.85
+  split_stable_future_bridge_min_brightness: 0.15
+  split_stable_future_bridge_min_parent_shape: 1.85
+  split_stable_future_bridge_min_parent_balance: 0.55
+  split_stable_future_bridge_max_drift_abs: 8.0
+  split_stable_future_bridge_max_drift_scale: 0.20
+  split_stable_future_bridge_image_gain_abs: 500.0
+  split_stable_future_bridge_image_gain_fraction: 0.004
+  split_stable_future_bridge_overlap_limit_abs: 5000.0
+  split_stable_future_bridge_overlap_limit_fraction: 0.004
+  split_stable_future_bridge_max_gap_density: 0.20
+  split_stable_future_bridge_max_valley_from_bright: 0.70
+  split_stable_future_bridge_min_axis_length_scale: 0.85
+  split_future_rod_tip_primary_min_brightness: 0.18
+  split_future_rod_tip_primary_min_parent_balance: 0.45
+  split_future_rod_tip_primary_max_gap_density: 0.30
+  split_future_rod_tip_primary_max_valley_from_bright: 1.10
+  split_future_rod_tip_primary_min_axis_length_scale: 1.10
+  split_future_rod_tip_primary_max_drift_abs: 55.0
+  split_future_rod_tip_primary_max_drift_scale: 2.30
+  split_one_frame_future_bridge_cost_limit_abs: 50000.0
+  split_one_frame_future_bridge_cost_limit_fraction: 0.040
+  split_one_frame_future_bridge_min_parent_shape: 2.15
+  split_one_frame_future_bridge_max_parent_shape: 2.20
+  split_one_frame_future_bridge_min_parent_balance: 0.45
+  split_one_frame_future_bridge_min_axis_length_scale: 1.0
+  split_one_frame_future_bridge_snap_scale: 1.45
+  split_low_shape_delayed_aligned_pca_bridge_min_parent_shape: 1.75
+  split_low_shape_delayed_aligned_pca_bridge_min_future_both: 2
+  split_low_shape_delayed_aligned_pca_bridge_max_missing: 0
+  split_one_frame_pca_bridge_min_parent_balance: 0.60
+  split_one_frame_pca_bridge_image_gain_abs: 500.0
+  split_one_frame_pca_bridge_image_gain_fraction: 0.001
+  split_one_frame_pca_bridge_overlap_limit_fraction: 0.012
+  split_one_frame_pca_bridge_cost_limit_abs: 5000.0
+  split_one_frame_pca_bridge_cost_limit_fraction: 0.012
+  split_one_frame_pca_bridge_max_valley_from_bright: 0.50
+  split_one_frame_pca_bridge_max_gap_density: 0.18
+  split_one_frame_pca_bridge_min_axis_length_scale: 1.10
+  split_one_frame_pca_bridge_max_future_missing: 2
+  split_clean_rod_tip_continuation_min_brightness: 0.18
+  split_clean_rod_tip_continuation_min_parent_balance: 0.15
+  split_clean_rod_tip_continuation_image_gain_abs: 500.0
+  split_clean_rod_tip_continuation_image_gain_fraction: 0.004
+  split_clean_rod_tip_continuation_overlap_limit_abs: 120000.0
+  split_clean_rod_tip_continuation_overlap_limit_fraction: 0.100
+  split_clean_rod_tip_continuation_cost_limit_abs: 120000.0
+  split_clean_rod_tip_continuation_cost_limit_fraction: 0.110
+  split_clean_rod_tip_continuation_max_gap_density: 0.24
+  split_clean_rod_tip_continuation_max_valley_from_bright: 0.75
+  split_clean_rod_tip_continuation_min_axis_length_scale: 0.70
+  split_clean_rod_tip_continuation_max_drift_abs: 12.0
+  split_clean_rod_tip_continuation_max_drift_scale: 0.30
+  split_dim_exact_future_signal_min_brightness: 0.10
+  split_dim_exact_future_signal_min_parent_shape: 1.35
+  split_dim_exact_future_signal_min_parent_balance: 0.80
+  split_dim_exact_future_signal_snap_epsilon: 0.001
+  split_dim_exact_future_signal_max_drift_abs: 2.0
+  split_dim_exact_future_signal_max_drift_scale: 0.08
+  split_dim_exact_future_signal_image_gain_abs: 50000.0
+  split_dim_exact_future_signal_image_gain_fraction: 0.012
+  split_dim_exact_future_signal_overlap_limit_abs: 140000.0
+  split_dim_exact_future_signal_overlap_limit_fraction: 0.035
+  split_dim_exact_future_signal_cost_limit_abs: 60000.0
+  split_dim_exact_future_signal_cost_limit_fraction: 0.015
+  split_dim_exact_future_signal_max_gap_density: 0.30
+  split_dim_exact_future_signal_max_valley_from_bright: 0.70
+  split_dim_exact_future_signal_min_axis_length_scale: 0.80
+  split_bridge_axis_place_future_min_brightness: 0.20
+  split_bridge_axis_place_future_min_parent_balance: 0.35
+  split_bridge_axis_place_future_image_gain_abs: 20000.0
+  split_bridge_axis_place_future_image_gain_fraction: 0.012
+  split_bridge_axis_place_future_overlap_limit_abs: 45000.0
+  split_bridge_axis_place_future_overlap_limit_fraction: 0.020
+  split_bridge_axis_place_future_cost_limit_abs: 12000.0
+  split_bridge_axis_place_future_cost_limit_fraction: 0.006
+  split_bridge_axis_place_future_max_valley_from_bright: 0.70
+  split_bridge_axis_place_future_max_gap_density: 0.30
+  split_bridge_axis_place_future_min_axis_length_scale: 0.85
+  split_bridge_axis_place_future_max_drift_abs: 18.0
+  split_bridge_axis_place_future_max_drift_scale: 0.80
+  split_bridge_axis_place_near_image_gain_abs: 500.0
+  split_bridge_axis_place_near_image_gain_adaptive_fraction: 0.75
+  split_bridge_axis_place_near_max_drift: 1.0
+  split_bridge_axis_place_near_min_axis_length_scale: 0.75
+  split_bridge_axis_place_near_overlap_limit_abs: 500.0
+  split_bridge_axis_place_near_overlap_limit_fraction: 0.002
+  split_bridge_axis_place_near_max_valley_from_bright: 0.65
+  split_bridge_axis_place_near_max_gap_density: 0.06
+  split_long_raw_pca_bridge_min_parent_shape: 2.15
+  split_long_raw_pca_bridge_min_parent_balance: 0.70
+  split_long_raw_pca_bridge_min_axis_length_scale: 1.10
+  split_long_raw_pca_bridge_image_gain_abs: 500.0
+  split_long_raw_pca_bridge_image_gain_fraction: 0.004
+  split_long_raw_pca_bridge_cost_adaptive_fraction: 0.70
+  split_long_raw_pca_bridge_max_valley_from_bright: 0.45
+  split_long_raw_pca_bridge_max_gap_density: 0.20
+  split_long_raw_pca_bridge_max_drift_abs: 12.0
+  split_long_raw_pca_bridge_max_drift_scale: 0.40
+  split_asymmetric_raw_pca_bridge_min_future_both: 1.0
+  split_asymmetric_raw_pca_bridge_max_missing_daughters: 2.0
+  split_asymmetric_raw_pca_bridge_min_parent_shape: 2.0
+  split_asymmetric_raw_pca_bridge_min_parent_balance: 0.55
+  split_asymmetric_raw_pca_bridge_min_axis_length_scale: 1.10
+  split_asymmetric_raw_pca_bridge_image_gain_abs: 500.0
+  split_asymmetric_raw_pca_bridge_image_gain_fraction: 0.001
+  split_asymmetric_raw_pca_bridge_overlap_limit_fraction: 0.002
+  split_asymmetric_raw_pca_bridge_cost_limit_abs: 500.0
+  split_asymmetric_raw_pca_bridge_cost_limit_fraction: 0.002
+  split_asymmetric_raw_pca_bridge_max_valley_from_bright: 0.50
+  split_asymmetric_raw_pca_bridge_max_gap_density: 0.18
+  split_asymmetric_raw_pca_bridge_max_drift_abs: 18.0
+  split_asymmetric_raw_pca_bridge_max_drift_scale: 0.45
+  # Restore the older good frame-86 behavior for clean asymmetric raw
+  # PCA-bridge births: bounded overlap may continue to the normal cost gate
+  # instead of being rejected before image/cost evidence is considered.
+  split_asymmetric_raw_pca_bridge_soft_overlap_enabled: true
+  split_asymmetric_raw_pca_bridge_soft_overlap_a_in_b_max: 0.12
+  split_asymmetric_raw_pca_bridge_soft_overlap_b_in_a_max: 0.25
+  split_delayed_future_pca_bridge_min_future_both: 1.0
+  split_delayed_future_pca_bridge_max_missing_daughters: 2.0
+  split_delayed_future_pca_bridge_min_brightness: 0.30
+  split_delayed_future_pca_bridge_min_parent_shape: 2.15
+  split_delayed_future_pca_bridge_min_parent_balance: 0.55
+  split_delayed_future_pca_bridge_soft_penalty_fraction: 0.030
+  split_delayed_future_pca_bridge_image_gain_abs: 500.0
+  split_delayed_future_pca_bridge_image_gain_fraction: 0.004
+  split_delayed_future_pca_bridge_overlap_limit_abs: 20000.0
+  split_delayed_future_pca_bridge_overlap_limit_fraction: 0.018
+  split_delayed_future_pca_bridge_cost_limit_abs: 15000.0
+  split_delayed_future_pca_bridge_cost_limit_fraction: 0.014
+  split_delayed_future_pca_bridge_geometry_limit_abs: 45000.0
+  split_delayed_future_pca_bridge_geometry_limit_fraction: 0.045
+  split_delayed_future_pca_bridge_max_valley_from_bright: 0.50
+  split_delayed_future_pca_bridge_max_gap_density: 0.20
+  split_delayed_future_pca_bridge_min_axis_length_scale: 1.0
+  split_delayed_future_pca_bridge_max_drift_abs: 18.0
+  split_delayed_future_pca_bridge_max_drift_scale: 0.45
+  split_high_shape_raw_pca_bridge_max_missing_daughters: 4.0
+  split_high_shape_raw_pca_bridge_min_parent_shape: 2.20
+  split_high_shape_raw_pca_bridge_min_parent_balance: 0.75
+  split_high_shape_raw_pca_bridge_soft_penalty_fraction: 0.120
+  split_high_shape_raw_pca_bridge_image_limit_abs: 9000.0
+  split_high_shape_raw_pca_bridge_image_limit_fraction: 0.0085
+  split_high_shape_raw_pca_bridge_overlap_limit_abs: 18000.0
+  split_high_shape_raw_pca_bridge_overlap_limit_fraction: 0.017
+  split_high_shape_raw_pca_bridge_geometry_limit_abs: 150000.0
+  split_high_shape_raw_pca_bridge_geometry_limit_fraction: 0.140
+  split_high_shape_raw_pca_bridge_cost_limit_abs: 150000.0
+  split_high_shape_raw_pca_bridge_cost_limit_fraction: 0.140
+  split_high_shape_raw_pca_bridge_max_valley_from_bright: 0.65
+  split_high_shape_raw_pca_bridge_max_gap_density: 0.20
+  split_high_shape_raw_pca_bridge_min_axis_length_scale: 0.95
+  split_high_shape_raw_pca_bridge_max_drift_abs: 24.0
+  split_high_shape_raw_pca_bridge_max_drift_scale: 0.60
+  split_high_shape_rod_signal_gap_start_max: -5.0
+  split_high_shape_rod_signal_min_future_both: 1.0
+  split_high_shape_rod_signal_max_missing_daughters: 2.0
+  split_high_shape_rod_signal_min_parent_shape: 2.55
+  split_high_shape_rod_signal_min_parent_balance: 0.75
+  split_high_shape_rod_signal_image_gain_abs: 500.0
+  split_high_shape_rod_signal_image_gain_fraction: 0.006
+  split_high_shape_rod_signal_overlap_limit_abs: 42000.0
+  split_high_shape_rod_signal_overlap_limit_fraction: 0.012
+  split_high_shape_rod_signal_cost_limit_abs: 12000.0
+  split_high_shape_rod_signal_cost_limit_fraction: 0.004
+  split_high_shape_rod_signal_geometry_limit_abs: 12000.0
+  split_high_shape_rod_signal_geometry_limit_fraction: 0.004
+  split_high_shape_rod_signal_max_gap_density: 0.22
+  split_high_shape_rod_signal_max_valley_from_bright: 0.40
+  split_high_shape_rod_signal_min_axis_length_scale: 0.75
+  split_high_shape_rod_signal_max_drift_abs: 8.0
+  split_high_shape_rod_signal_max_drift_scale: 0.12
+  split_bridge_axis_buried_min_parent_balance: 0.35
+  split_bridge_axis_buried_min_brightness: 0.20
+  split_clean_pca_continuation_base_snap_scale: 0.75
+  split_clean_pca_continuation_min_snap_scale: 1.30
+  split_immediate_pca_continuation_min_brightness: 0.29
+  split_immediate_pca_continuation_min_parent_shape: 1.35
+  split_immediate_pca_continuation_min_parent_balance: 0.08
+  split_one_frame_aligned_pca_continuation_min_brightness: 0.15
+  split_one_frame_aligned_pca_continuation_min_parent_shape: 1.65
+  split_one_frame_aligned_pca_continuation_min_parent_balance: 0.08
+  split_one_frame_aligned_pca_continuation_max_parent_balance: 0.25
+  split_one_frame_aligned_pca_continuation_snap_scale: 1.65
+  split_current_pca_continuation_min_brightness: 0.23
+  split_current_pca_continuation_min_parent_shape: 1.80
+  split_current_pca_continuation_min_parent_balance: 0.40
+  split_ignore_suspicious_rod_min_brightness: 0.18
+  split_ignore_suspicious_rod_min_parent_shape: 1.35
+  split_density_one_frame_min_parent_shape: 2.15
+  split_density_one_frame_max_parent_shape: 2.20
+  split_density_one_frame_soft_min_fraction: 0.20
+  split_density_future_soft_min_fraction: 0.50
+  split_density_locked_floor_abs: 0.04
+  split_density_locked_floor_parent_fraction: 0.30
+  split_overlap_one_frame_raw_min_brightness: 0.30
+  split_overlap_one_frame_raw_min_parent_shape: 2.15
+  split_overlap_one_frame_raw_min_parent_balance_secondary: 0.55
+  split_overlap_one_frame_raw_min_parent_balance: 0.70
+  split_overlap_two_frame_signal_min_brightness: 0.18
+  split_overlap_two_frame_signal_min_parent_balance: 0.35
+  split_overlap_one_frame_signal_min_brightness: 0.25
+  split_overlap_one_frame_signal_min_parent_balance: 0.30
+  split_overlap_one_frame_signal_max_drift_abs: 2.0
+  split_overlap_one_frame_signal_max_drift_scale: 0.10
+  split_overlap_signal_tolerance_multiplier: 5.0
+  split_overlap_signal_tolerance_min: 0.35
+  split_overlap_signal_tolerance_clamp_min: 0.02
+  split_overlap_signal_tolerance_clamp_max: 0.35
+  split_overlap_default_tolerance_min: 0.02
+  split_overlap_default_tolerance_max: 0.08
+  split_overlap_bridge_axis_tolerance: 0.12
+  split_overlap_pca_bridge_tolerance: 0.65
+  split_overlap_other_strong_tolerance: 0.04
+  split_overlap_clean_current_bridge_tolerance: 0.08
+  split_overlap_current_fallback_bridge_tolerance: 0.20
+  split_overlap_aligned_future_bridge_tolerance: 0.85
+  split_overlap_hard_default_tolerance: 0.03
+  split_overlap_suspicious_rod_shape_ratio: 1.35
+  split_overlap_clean_continuation_a_in_b_max: 0.38
+  split_overlap_clean_continuation_b_in_a_max: 0.45
+  split_overlap_exact_signal_snap_abs: 0.001
+  split_overlap_exact_signal_snap_scale: 0.05
+  split_overlap_exact_signal_min_parent_balance: 0.70
+  split_overlap_exact_signal_min_brightness: 0.29
+  split_overlap_exact_signal_a_in_b_max: 0.36
+  split_overlap_exact_signal_b_in_a_max: 0.78
+  split_overlap_high_shape_rod_a_in_b_max: 0.10
+  split_overlap_high_shape_rod_b_in_a_max: 0.20
+  split_clean_pca_bridge_snap_base_scale: 0.75
+  split_clean_pca_bridge_future_geometry_min_parent_balance: 0.85
+  split_clean_pca_bridge_soft_min_parent_shape: 1.75
+  split_clean_pca_bridge_soft_strong_parent_shape: 2.0
+  split_clean_pca_bridge_soft_min_brightness: 0.10
+  split_clean_pca_bridge_soft_max_valley_from_bright: 0.98
+  split_clean_pca_bridge_soft_image_gain_abs: 500.0
+  split_clean_pca_bridge_soft_image_gain_fraction: 0.020
+  split_clean_pca_bridge_soft_cost_limit_abs: 5000.0
+  split_clean_pca_bridge_soft_cost_limit_fraction: 0.020
+  split_weak_bridge_started_max_valley_from_bright: 0.65
+  split_weak_bridge_started_min_gap_density: 0.12
+  split_signal_like_bridge_image_gain_abs: 500.0
+  split_signal_like_bridge_image_gain_fraction: 0.020
+  split_future_strong_bridge_min_parent_balance: 0.85
+  split_future_strong_bridge_snap_scale: 1.25
+  split_future_strong_bridge_image_gain_abs: 500.0
+  split_future_strong_bridge_image_gain_fraction: 0.002
+  split_future_strong_bridge_overlap_limit_abs: 45000.0
+  split_future_strong_bridge_overlap_limit_fraction: 0.050
+  split_future_strong_bridge_max_valley_from_bright: 0.75
+  split_future_strong_bridge_max_gap_density: 0.20
+  split_future_geometry_bridge_image_gain_abs: 500.0
+  split_future_geometry_bridge_image_gain_fraction: 0.010
+  split_future_geometry_bridge_overlap_limit_fraction: 0.020
+  split_future_geometry_bridge_max_valley_from_bright: 0.55
+  split_future_geometry_bridge_max_gap_density: 0.18
+  split_future_geometry_bridge_cost_limit_abs: 5000.0
+  split_future_geometry_bridge_cost_limit_fraction: 0.012
+  split_two_frame_future_bridge_min_brightness: 0.30
+  split_two_frame_future_bridge_min_parent_balance: 0.50
+  split_two_frame_future_bridge_snap_scale: 1.45
+  split_two_frame_future_bridge_image_gain_abs: 500.0
+  split_two_frame_future_bridge_overlap_limit_abs: 45000.0
+  split_two_frame_future_bridge_overlap_limit_fraction: 0.025
+  split_two_frame_future_bridge_cost_limit_abs: 30000.0
+  split_two_frame_future_bridge_cost_limit_fraction: 0.020
+  split_two_frame_future_bridge_geometry_limit_abs: 90000.0
+  split_two_frame_future_bridge_geometry_limit_fraction: 0.060
+  split_two_frame_future_bridge_max_valley_from_bright: 0.40
+  split_two_frame_future_bridge_max_gap_density: 0.14
+  split_two_frame_future_bridge_min_axis_length_scale: 0.75
+  split_future_soft_penalty_raw_gain_fraction: 0.040
+  split_future_soft_penalty_raw_gain_allow_aligned_pair_fallback: true
+  # Migrated code literals: keep these explicit so later tuning can adjust the
+  # split/bridge analysis gates without another C++ edit.
+  split_future_soft_penalty_raw_gain_min_parent_balance: 0.80
+  split_future_soft_penalty_raw_gain_max_gap_density: 0.18
+  split_future_soft_penalty_raw_gain_max_valley_from_bright: 0.50
+  split_future_rod_tip_primary_min_future_both: 1.0
+  split_future_rod_tip_primary_max_missing_daughters: 2.0
+  split_future_rod_tip_primary_selection_bonus_abs: 8000.0
+  split_future_rod_tip_primary_selection_bonus_fraction: 0.020
+  split_future_rod_tip_primary_cost_limit_abs: 130000.0
+  split_future_rod_tip_primary_cost_limit_fraction: 0.160
+  split_future_rod_tip_primary_image_limit_abs: 130000.0
+  split_future_rod_tip_primary_image_limit_fraction: 0.120
+  split_future_rod_tip_primary_overlap_limit_abs: 45000.0
+  split_future_rod_tip_primary_overlap_limit_fraction: 0.080
+  split_future_rod_tip_primary_image_gain_abs: 500.0
+  split_future_rod_tip_primary_image_gain_fraction: 0.004
+  split_future_near_dim_bypass_min_edge_fraction: 0.98
+  split_future_near_dim_bypass_min_future_both: 1.0
+  split_future_near_dim_bypass_max_missing_daughters: 2.0
+  split_future_near_dim_bypass_min_brightness: 0.30
+  split_future_near_dim_bypass_min_parent_balance: 0.55
+  split_future_halfspace_snap_distance_scale: 1.25
+  split_clean_future_halfspace_min_parent_balance: 0.75
+  split_clean_future_position_lock_min_snap_scale: 1.30
+  split_immediate_pca_continuation_max_parent_balance: 0.25
+  split_exact_future_center_bridge_min_brightness: 0.29
+  split_exact_future_center_bridge_min_parent_shape: 1.35
+  split_exact_future_center_bridge_min_parent_balance: 0.45
+  split_exact_future_center_bridge_snap_abs: 0.001
+  split_exact_future_center_bridge_snap_scale: 0.05
+  split_clean_signal_center_gap_bin_max: -4.0
+  split_clean_signal_center_min_brightness: 0.20
+  split_midpoint_near_miss_abs_tolerance: 2.0
+  split_midpoint_near_miss_radius_fraction: 0.30
+  split_one_frame_bright_pca_bridge_soft_min_brightness: 0.30
+  split_one_frame_bright_pca_bridge_soft_min_parent_shape: 2.0
+  split_one_frame_bright_pca_bridge_soft_min_parent_balance: 0.55
+  split_one_frame_bright_pca_bridge_soft_penalty_fraction: 0.020
+  split_one_frame_bright_pca_bridge_soft_overlap_limit_fraction: 0.012
+  split_one_frame_bright_pca_bridge_soft_geometry_limit_abs: 25000.0
+  split_one_frame_bright_pca_bridge_soft_geometry_limit_fraction: 0.020
+  split_one_frame_bright_pca_bridge_soft_max_gap_density: 0.22
+  split_one_frame_bright_pca_bridge_soft_max_valley_from_bright: 0.50
+  split_one_frame_bright_pca_bridge_soft_min_axis_length_scale: 0.85
+  split_locked_clean_future_pca_bridge_snap_scale: 1.30
+  split_locked_clean_future_pca_bridge_max_drift_abs: 2.0
+  split_locked_clean_future_pca_bridge_max_drift_scale: 0.08
+  split_locked_clean_future_pca_bridge_cost_limit_abs: 65000.0
+  split_locked_clean_future_pca_bridge_cost_limit_fraction: 0.040
+  split_locked_clean_future_pca_bridge_geometry_limit_abs: 65000.0
+  split_locked_clean_future_pca_bridge_geometry_limit_fraction: 0.040
+  split_locked_clean_future_pca_bridge_overlap_limit_abs: 35000.0
+  split_locked_clean_future_pca_bridge_overlap_limit_fraction: 0.025
+  split_locked_clean_future_pca_bridge_max_gap_density: 0.36
+  split_locked_clean_future_pca_bridge_max_valley_from_bright: 0.55
+  split_locked_clean_future_pca_bridge_min_axis_length_scale: 0.95
+  split_one_frame_aligned_locked_pca_bridge_cost_limit_abs: 425000.0
+  split_one_frame_aligned_locked_pca_bridge_cost_limit_fraction: 0.255
+  split_one_frame_aligned_locked_pca_bridge_overlap_limit_abs: 500000.0
+  split_one_frame_aligned_locked_pca_bridge_overlap_limit_fraction: 0.300
+  split_one_frame_aligned_locked_pca_bridge_image_gain_abs: 50000.0
+  split_one_frame_aligned_locked_pca_bridge_image_gain_fraction: 0.030
+  split_one_frame_aligned_locked_pca_bridge_max_drift_abs: 2.0
+  split_one_frame_aligned_locked_pca_bridge_max_drift_scale: 0.08
+  split_one_frame_aligned_locked_pca_bridge_max_gap_density: 0.45
+  split_one_frame_aligned_locked_pca_bridge_max_valley_from_bright: 0.80
+  split_one_frame_aligned_locked_pca_bridge_min_axis_length_scale: 1.10
+  split_two_frame_aligned_locked_pca_bridge_cost_limit_abs: 140000.0
+  split_two_frame_aligned_locked_pca_bridge_cost_limit_fraction: 0.115
+  split_two_frame_aligned_locked_pca_bridge_overlap_limit_abs: 150000.0
+  split_two_frame_aligned_locked_pca_bridge_overlap_limit_fraction: 0.125
+  split_two_frame_aligned_locked_pca_bridge_image_gain_abs: 15000.0
+  split_two_frame_aligned_locked_pca_bridge_image_gain_fraction: 0.004
+  split_two_frame_aligned_locked_pca_bridge_min_brightness: 0.30
+  split_two_frame_aligned_locked_pca_bridge_min_parent_shape: 1.70
+  split_two_frame_aligned_locked_pca_bridge_min_parent_balance: 0.08
+  split_two_frame_aligned_locked_pca_bridge_max_parent_balance: 0.80
+  split_two_frame_aligned_locked_pca_bridge_max_drift_abs: 2.0
+  split_two_frame_aligned_locked_pca_bridge_max_drift_scale: 0.08
+  split_two_frame_aligned_locked_pca_bridge_max_gap_density: 0.25
+  split_two_frame_aligned_locked_pca_bridge_max_valley_from_bright: 0.82
+  split_two_frame_aligned_locked_pca_bridge_min_axis_length_scale: 0.75
+  split_locked_exact_future_bridge_min_parent_balance: 0.75
+  split_locked_exact_future_bridge_max_drift_abs: 2.0
+  split_locked_exact_future_bridge_max_drift_scale: 0.08
+  split_locked_exact_future_bridge_cost_limit_abs: 140000.0
+  split_locked_exact_future_bridge_cost_limit_fraction: 0.085
+  split_locked_exact_future_bridge_geometry_limit_abs: 140000.0
+  split_locked_exact_future_bridge_geometry_limit_fraction: 0.085
+  split_locked_exact_future_bridge_overlap_limit_abs: 190000.0
+  split_locked_exact_future_bridge_overlap_limit_fraction: 0.115
+  split_locked_exact_future_bridge_max_gap_density: 0.50
+  split_locked_exact_future_bridge_max_valley_from_bright: 0.60
+  split_locked_exact_future_bridge_min_axis_length_scale: 1.20
+  split_one_frame_future_pca_soft_min_brightness: 0.30
+  split_one_frame_future_pca_soft_min_parent_shape: 1.35
+  split_one_frame_future_pca_soft_min_parent_balance: 0.55
+  split_one_frame_future_pca_soft_overlap_limit_abs: 8000.0
+  split_one_frame_future_pca_soft_overlap_limit_fraction: 0.012
+  split_one_frame_future_pca_soft_geometry_limit_abs: 150000.0
+  split_one_frame_future_pca_soft_geometry_limit_fraction: 0.120
+  split_one_frame_future_pca_soft_max_gap_density: 0.08
+  split_one_frame_future_pca_soft_max_valley_from_bright: 0.45
+  split_one_frame_future_pca_soft_min_axis_length_scale: 1.20
+  split_one_frame_future_pca_soft_max_drift_abs: 24.0
+  split_one_frame_future_pca_soft_max_drift_scale: 0.75
+  split_future_signal_soft_penalty_fraction: 0.065
+  split_future_signal_soft_min_parent_balance: 0.40
+  split_future_signal_soft_image_gain_abs: 500.0
+  split_future_signal_soft_image_gain_fraction: 0.040
+  split_future_signal_soft_overlap_limit_fraction: 0.030
+  split_future_signal_soft_max_gap_density: 0.15
+  split_future_signal_soft_max_valley_from_bright: 0.45
+  split_future_signal_soft_min_axis_length_scale: 0.75
+  split_future_signal_soft_max_drift_abs: 12.0
+  split_future_signal_soft_max_drift_scale: 0.45
+  split_future_signal_clean_center_min_parent_balance: 0.55
+  split_future_signal_clean_center_min_brightness: 0.20
+  split_future_signal_clean_center_soft_penalty_fraction: 0.035
+  split_future_signal_clean_center_overlap_limit_fraction: 0.020
+  split_future_signal_clean_center_max_gap_density: 0.18
+  split_future_signal_clean_center_max_valley_from_bright: 0.50
+  split_future_signal_clean_center_min_axis_length_scale: 0.75
+  split_future_signal_clean_center_max_drift_abs: 30.0
+  split_future_signal_clean_center_max_drift_scale: 1.05
+  split_future_signal_near_threshold_min_parent_balance: 0.35
+  split_future_signal_near_threshold_cost_fraction: -0.75
+  split_future_signal_near_threshold_overlap_limit_fraction: 0.020
+  split_future_signal_near_threshold_soft_penalty_fraction: 0.010
+  split_future_signal_near_threshold_max_valley_from_bright: 0.50
+  split_future_signal_near_threshold_min_axis_length_scale: 1.20
+  split_future_signal_near_threshold_max_drift_abs: 18.0
+  split_future_signal_near_threshold_max_drift_scale: 1.00
+  split_future_signal_clean_valley_min_parent_balance: 0.70
+  split_future_signal_clean_valley_min_brightness: 0.30
+  split_future_signal_clean_valley_cost_limit_abs: 5000.0
+  split_future_signal_clean_valley_cost_limit_fraction: 0.005
+  split_future_signal_clean_valley_image_gain_abs: 500.0
+  split_future_signal_clean_valley_image_gain_fraction: 0.008
+  split_future_signal_clean_valley_overlap_limit_abs: 25000.0
+  split_future_signal_clean_valley_overlap_limit_fraction: 0.020
+  split_future_signal_clean_valley_soft_penalty_fraction: 0.010
+  split_future_signal_clean_valley_max_gap_density: 0.15
+  split_future_signal_clean_valley_max_valley_from_bright: 0.38
+  split_future_signal_clean_valley_min_axis_length_scale: 1.10
+  split_future_signal_clean_valley_max_drift_abs: 28.0
+  split_future_signal_clean_valley_max_drift_scale: 1.00
+  split_future_signal_locked_overlap_min_brightness: 0.35
+  split_future_signal_locked_overlap_min_parent_shape: 2.0
+  split_future_signal_locked_overlap_min_parent_balance: 0.30
+  split_future_signal_locked_overlap_max_drift_abs: 2.0
+  split_future_signal_locked_overlap_max_drift_scale: 0.08
+  split_future_signal_locked_overlap_soft_penalty_fraction: 0.100
+  split_future_signal_locked_overlap_image_limit_abs: 60000.0
+  split_future_signal_locked_overlap_image_limit_fraction: 0.0125
+  split_future_signal_locked_overlap_overlap_limit_abs: 125000.0
+  split_future_signal_locked_overlap_overlap_limit_fraction: 0.030
+  split_future_signal_locked_overlap_cost_limit_abs: 180000.0
+  split_future_signal_locked_overlap_cost_limit_fraction: 0.040
+  split_future_signal_locked_overlap_geometry_limit_abs: 650000.0
+  split_future_signal_locked_overlap_geometry_limit_fraction: 0.140
+  split_future_signal_locked_overlap_max_gap_density: 0.25
+  split_future_signal_locked_overlap_max_valley_from_bright: 1.05
+  split_future_signal_locked_overlap_min_axis_length_scale: 1.20
+  split_future_signal_borderline_moved_parent_shape_slack: 0.08
+  split_future_signal_borderline_moved_min_parent_balance: 0.18
+  split_future_signal_borderline_moved_min_brightness: 0.30
+  split_future_signal_borderline_moved_cost_limit_abs: 25000.0
+  split_future_signal_borderline_moved_cost_limit_fraction: 0.015
+  split_future_signal_borderline_moved_image_limit_abs: 10000.0
+  split_future_signal_borderline_moved_image_limit_fraction: 0.008
+  split_future_signal_borderline_moved_overlap_limit_fraction: 0.012
+  split_future_signal_borderline_moved_soft_penalty_fraction: 0.010
+  split_future_signal_borderline_moved_max_gap_density: 0.20
+  split_future_signal_borderline_moved_max_valley_from_bright: 0.70
+  split_future_signal_borderline_moved_min_axis_length_scale: 1.20
+  split_future_rod_tip_clean_gap_overlap_limit_fraction: 0.020
+  split_future_rod_tip_clean_gap_image_limit_abs: 8000.0
+  split_future_rod_tip_clean_gap_image_limit_fraction: 0.025
+  split_future_rod_tip_clean_gap_geometry_limit_abs: 150000.0
+  split_future_rod_tip_clean_gap_geometry_limit_fraction: 0.450
+  split_future_rod_tip_clean_gap_max_gap_density: 0.02
+  split_future_rod_tip_clean_gap_max_valley_from_bright: 0.55
+  split_future_rod_tip_clean_gap_min_axis_length_scale: 1.60
+  split_future_rod_tip_clean_gap_max_drift_abs: 55.0
+  split_future_rod_tip_clean_gap_max_drift_scale: 2.30
+  # Soft geometry penalties make the looser frame-18 style proposals pay for
+  # suspicious final geometry instead of being rejected/accepted by a cliff.
+  # Large PCA drift and too-wide daughter separation add proportional cost;
+  # close daughters whose center line follows both short axes should also keep
+  # those short axes nearly shared. Daughter shortest-axis lines should
+  # intersect/nearly intersect; parallel axes are accepted only when collinear.
+  split_soft_geometry_gate_enabled: true
+  split_soft_geometry_penalty_fraction: 0.30
+  split_soft_max_daughter_seed_drift_fraction: 0.95
+  split_soft_max_final_separation_parent_fraction: 2.20
+  split_close_axis_soft_gate_enabled: true
+  split_close_axis_distance_scale: 2.40
+  split_close_axis_center_axis_alignment: 0.80
+  split_close_axis_max_angle_degrees: 20.0
+  split_close_axis_penalty_fraction: 0.20
+  split_daughter_axis_interaction_soft_gate_enabled: true
+  split_daughter_axis_interaction_distance_fraction: 0.35
+  split_daughter_axis_interaction_along_fraction: 1.60
+  split_daughter_axis_parallel_angle_degrees: 12.0
+  split_daughter_axis_interaction_penalty_fraction: 0.35
+  split_bio_ignore_trash_neighbors_enabled: true
+  # After split proposal PCA/refit, keep each newborn daughter on its own
+  # side of the original split axis instead of letting both drift inward.
+  split_daughter_refit_keep_seed_halfspace_enabled: true
+  split_daughter_refit_halfspace_min_fraction: 0.15
+  # Frame-86 check: selected two-frame future-supported PCA bridge daughters
+  # were shape-refit but frozen at the seed (posShift=0), so they could not
+  # settle onto the bright body. Allow position-updating PCA for that narrow
+  # future-backed bridge class, then keep the existing half-space clamp active.
+  split_daughter_refit_allow_future_bridge_position_update: false
+  split_daughter_refit_allow_future_rod_tip_position_update: true
+  split_daughter_refit_iterations: 15
+  # Severe rod cleanup: if a rod-like cell survives all normal split/PCA logic
+  # at the end of a frame, force a local split along its longest axis before
+  # snapshot/save. This prevents newborn wrong rods such as frame-86
+  # cell_011111 from persisting into and overlapping neighboring cells.
+  post_pca_force_rod_split_enabled: true
+  post_pca_force_rod_split_min_shape: 1.80
+  post_pca_force_rod_split_separation_scale: 1.0
+  post_pca_force_rod_split_daughter_radius_scale: 1.0
+  post_pca_force_rod_split_max_per_frame: 0
+  post_pca_force_rod_split_include_attempted: true
+  post_pca_force_rod_split_require_prior_attempt: true
+  post_pca_force_rod_split_require_nonsibling_neighbor: true
+  post_pca_force_rod_split_neighbor_norm_limit: 0.95
+  post_pca_force_rod_split_neighbor_exempt_min_shape: 2.00
+  post_pca_force_rod_split_min_seed_brightness: 0.05
+  post_pca_force_rod_split_require_cost_improvement: true
+  post_pca_force_rod_split_max_positive_cost: 0.0
+  post_pca_force_rod_split_min_cost_improvement_fraction: 0.03
+  # Keep the global force-rod cost gate conservative, but allow a narrow
+  # rescue for very bright near misses such as frame-106 cell_2111
+  # (2.79% improvement versus a 3.00% floor). This avoids reopening dim
+  # false rods such as frame-101 cell_3100.
+  post_pca_force_rod_split_bright_near_miss_rescue_enabled: false
+  post_pca_force_rod_split_bright_near_miss_min_fraction: 0.0275
+  post_pca_force_rod_split_bright_near_miss_min_seed_brightness: 0.60
+  split_daughter_refit_align_short_axis_to_split_enabled: true
+  # For flattened split daughters, initialize rotation from the local bright
+  # voxel plane before PCA refit. The two largest local PCA axes describe the
+  # cell plane; when the in-plane axes are ambiguous, only the plane normal is
+  # trusted and the existing in-plane orientation is preserved.
+  split_daughter_flattened_plane_rotation_enabled: true
+  split_daughter_flattened_plane_min_shape: 1.45
+  split_daughter_flattened_plane_radius_scale: 1.45
+  split_daughter_flattened_plane_min_pixels: 120
+  split_daughter_flattened_plane_min_ratio: 1.35
+  split_daughter_flattened_plane_long_axis_ratio: 1.15
+  split_daughter_flattened_plane_neighbor_guard_enabled: true
+  split_daughter_flattened_plane_neighbor_distance_scale: 2.20
+  split_daughter_flattened_plane_neighbor_axis_alignment: 0.70
+  split_daughter_flattened_plane_neighbor_lateral_scale: 0.75
+  split_daughter_flattened_plane_neighbor_normal_alignment: 0.65
+
+
+  # Migrated CellUniverse2 analysis gates (previously hardcoded).
+  celluniverse2_rescue_probe_max_iters: 4
+  celluniverse2_rescue_probe_candidates_halfspace: 64
+  celluniverse2_rescue_probe_candidates_background: 12
+  celluniverse2_rescue_halfspace_probe_distance_weight_min: 0.40
+  celluniverse2_rescue_background_probe_distance_weight: 0.03
+  celluniverse2_rescue_occupancy_min_distance: 4.0
+  celluniverse2_rescue_occupancy_radius_scale: 0.65
+  celluniverse2_rescue_occupancy_inside_scale: 0.85
+  celluniverse2_rescue_probe_score_stddev_weight: 0.20
+  celluniverse2_rescue_probe_score_move_weight: 0.04
+  celluniverse2_rescue_probe_score_halfspace_move_units_weight: 0.08
+  celluniverse2_rescue_dim_body_background_margin: 0.06
+  celluniverse2_rescue_dim_body_probe_fraction: 0.35
+  celluniverse2_rescue_recent_daughter_dim_max_move_units: 1.35
+  celluniverse2_rescue_recent_daughter_bright_max_move_units: 0.65
+  celluniverse2_rescue_recent_daughter_dim_max_probe_score: 1.10
+  celluniverse2_rescue_recent_daughter_bright_max_probe_score: 0.85
+  celluniverse2_rescue_background_mean_margin: 0.06
+  celluniverse2_rescue_background_delta_scale: 2.0
+  celluniverse2_rescue_background_max_probe_score: 0.95
+  signal_center_low_shape_rescue_parent_shape_fraction: 0.80
+  signal_center_neighbor_parent_core_escape_abs: 12.0
+  signal_center_neighbor_parent_core_escape_scale: 0.80
+  signal_center_neighbor_closer_margin_abs: 8.0
+  signal_center_neighbor_closer_margin_scale: 0.20
+  signal_center_neighbor_claim_radius_abs: 10.0
+  signal_center_neighbor_claim_radius_scale: 0.75
+  signal_center_centered_rescue_max_sep_scale: 2.75
+  signal_center_centered_rescue_midpoint_abs: 8.0
+  signal_center_centered_rescue_midpoint_scale: 0.55
+  signal_center_centered_compact_min_sep_ratio: 1.20
+  signal_center_centered_compact_min_boxes: 48
+  signal_center_centered_compact_min_brightness: 0.25
+  signal_center_centered_wide_min_boxes: 96
+  signal_center_centered_wide_min_brightness: 0.12
+  signal_center_low_shape_rescue_min_sep_ratio: 1.20
+  signal_center_low_shape_rescue_min_boxes: 512
+  signal_center_low_shape_rescue_min_brightness: 0.12
+  signal_center_relaxed_axis_alignment_fraction: 0.80
+  signal_center_score_soft_axis_penalty_weight: 2.0
+  signal_center_score_centered_rescue_penalty: 0.35
+  signal_center_score_separation_ratio_weight: 0.50
+  signal_center_score_axis_weight: 0.75
+  signal_center_score_brightness_weight: 0.04
+  signal_center_raw_rod_primary_min_parent_shape: 2.55
+  signal_center_raw_rod_primary_min_sep_fraction: 0.60
+  signal_center_raw_rod_primary_max_sep_fraction: 1.25
+  signal_center_raw_rod_primary_midpoint_abs: 8.0
+  signal_center_raw_rod_primary_midpoint_scale: 0.45
+  signal_center_claim_blocker_clean_min_brightness: 0.20
+  signal_center_claim_score_better_margin: 0.20
+  signal_center_claim_balanced_clean_slack: 0.20
+  signal_center_claim_balanced_unclean_slack: 0.80
+  signal_center_claim_balanced_min_brightness: 0.30
+  signal_center_claim_balanced_min_parent_balance: 0.55
+  signal_center_claim_balanced_min_sep_scale: 1.55
+  signal_center_claim_asymmetric_min_brightness: 0.30
+  signal_center_claim_asymmetric_min_parent_balance: 0.08
+  signal_center_claim_asymmetric_min_sep_scale: 1.80
+  signal_center_refit_position_lock_enabled: true
+  signal_center_refit_position_lock_max_snap_distance: 2.0
+  pca_bridge_current_center_fallback_max_seed_scale: 1.35
+  pca_bridge_aligned_future_max_seed_abs: 42.0
+  pca_bridge_aligned_future_max_seed_scale: 1.35
+  pca_bridge_aligned_future_min_parent_balance: 0.25
+  pca_bridge_continuation_max_seed_abs: 42.0
+  pca_bridge_continuation_max_seed_scale: 1.35
+  pca_bridge_continuation_support_abs: 22.0
+  pca_bridge_continuation_support_scale: 0.90
+  pca_bridge_pair_score_supported_axis_weight: 0.25
+  pca_bridge_pair_score_default_axis_weight: 0.75
+  pca_bridge_pair_score_continuation_bonus_weight: 0.40
+  pca_bridge_pair_score_sep_ratio_weight: 0.50
+  pca_bridge_pair_score_brightness_weight: 0.05
+  pca_bridge_pair_score_max_seed_distance_weight: 0.25
+  pca_bridge_pair_score_mean_seed_distance_weight: 0.10
+  pca_bridge_balanced_current_max_seed_abs: 72.0
+  pca_bridge_balanced_current_max_seed_scale: 1.80
+  pca_bridge_allow_current_fallback_raw_sep_fraction: 0.75
+  pca_bridge_snap_trust_abs: 28.0
+  pca_bridge_snap_trust_scale: 0.90
+  pca_bridge_far_future_snap_keep_min_shape: 1.35
+  pca_bridge_far_future_snap_keep_max_score: 1.50
+  pca_bridge_far_future_snap_keep_max_seed_scale: 2.80
+  pca_bridge_far_future_snap_keep_raw_alternate: true
+  pca_bridge_far_future_snap_prefer_raw_delayed_near_miss: true
+  # Scoped frame-87 tuning: keep far future snap as primary, but also test the
+  # projected raw PCA bridge alternate when the far-snap score is suspicious.
+  pca_bridge_far_future_snap_project_raw_alternate: true
+  pca_bridge_far_future_snap_project_raw_alternate_require_no_dark: true
+  pca_bridge_far_future_snap_project_raw_alternate_min_score: 0.60
+  pca_bridge_future_axis_project_raw_sep_fraction: 0.75
+  pca_bridge_future_axis_project_min_shape: 1.90
+  pca_bridge_future_axis_project_sep_scale: 1.05
+  celluniverse2_current_claim_source_pca_bridge_penalty: 0.18
+  celluniverse2_current_claim_source_other_penalty: 0.35
+  celluniverse2_current_claim_future_supported_bonus_weight: -0.35
+  celluniverse2_current_claim_future_missing_penalty_weight: 0.45
+  celluniverse2_current_claim_parent_persists_penalty_weight: 0.70
+  celluniverse2_current_claim_future_brightness_bonus_weight: -0.15
+  celluniverse2_current_claim_balance_penalty_weight: 0.70
+  celluniverse2_current_claim_snap_distance_penalty_weight: 0.025
+  celluniverse2_current_claim_aligned_pair_penalty: 0.35
+  celluniverse2_current_claim_parent_shape_bonus_weight: -0.05
+  celluniverse2_clean_far_pca_preserve_min_brightness: 0.30
+  celluniverse2_clean_far_pca_preserve_min_parent_balance: 0.45
+  celluniverse2_clean_near_pca_preserve_min_brightness: 0.30
+  celluniverse2_clean_near_pca_preserve_min_parent_balance: 0.45
+  celluniverse2_clean_near_pca_preserve_snap_abs: 28.0
+  celluniverse2_clean_near_pca_preserve_snap_scale: 0.85
+  celluniverse2_clean_signal_preserve_min_brightness: 0.30
+  celluniverse2_clean_signal_preserve_low_brightness: 0.10
+  celluniverse2_clean_signal_preserve_low_brightness_min_balance: 0.80
+  celluniverse2_clean_signal_preserve_min_parent_balance: 0.45
+  celluniverse2_split_continuation_merge_distance_min: 36.0
+  celluniverse2_split_continuation_merge_distance_max: 46.0
+  celluniverse2_split_continuation_merge_distance_sep_scale: 0.72
+  celluniverse2_split_continuation_merge_norm_limit: 0.55
+  celluniverse2_split_continuation_merge_parent_margin: 8.0
+  split_signal_reject_bridge_retry_block_sep_scale: 1.05
+  celluniverse2_post_split_parent_anchor_merge_min_shape: 1.75
+  celluniverse2_post_split_weak_handoff_max_parent_balance: 0.68
+  celluniverse2_post_split_parent_anchor_merge_norm_limit: 0.72
+  celluniverse2_post_split_weak_handoff_norm_limit: 0.68
+  celluniverse2_post_split_parent_anchor_merge_distance_limit: 30.0
+  celluniverse2_post_split_weak_handoff_distance_limit: 32.0
+  celluniverse2_recent_daughter_lock_shape: 2.0
+  post_pca_bridge_severe_new_rod_min_shape: 2.20
+  post_pca_bridge_severe_new_rod_min_elongation_jump: 1.30
+
+
+  # Additional migrated CellUniverse2 fallback/claim thresholds.
+  pca_bridge_low_long_mid_flat_rescue_min_mid_short_ratio: 1.75
+  pca_bridge_low_long_mid_flat_rescue_min_elongation: 1.80
+  pca_bridge_collapsed_post_pca_min_elongation_jump: 1.35
+  pca_bridge_collapsed_post_pca_max_raw_seed_scale: 0.70
+  pca_bridge_flat_current_pair_max_raw_seed_scale: 1.60
+  pca_bridge_short_raw_seed_scale: 0.75
+  pca_bridge_loose_axis_min_alignment: 0.20
+  pca_bridge_loose_axis_score_margin: 0.10
+  pca_bridge_loose_axis_low_balance_threshold: 0.35
+  pca_bridge_loose_axis_balance_improvement: 0.10
+  pca_bridge_balanced_pair_low_balance_threshold: 0.35
+  pca_bridge_balanced_pair_min_balance: 0.19
+  pca_bridge_balanced_pair_balance_improvement: 0.04
+  pca_bridge_diagnostic_min_axis_alignment: 0.20
+  rod_tip_neighbor_claim_min_shape_base: 1.70
+  rod_tip_neighbor_claim_min_shape_offset: 0.25
+  rod_tip_neighbor_claim_probe_radius_scale: 1.55
+  rod_tip_suspicious_blocker_min_shape: 1.35
+  signal_center_borderline_future_shape_slack: 0.08
+  signal_center_borderline_future_min_brightness: 0.30
+  signal_center_borderline_future_min_parent_balance: 0.18
+  signal_center_future_claim_min_brightness: 0.20
+  signal_center_future_claim_min_parent_balance: 0.35
+  third_cell_claim_core_radius_scale: 0.75
+  third_cell_claim_body_radius_scale: 1.35
+  rod_tip_borrowed_third_cell_max_parent_balance: 0.35
+  raw_rod_primary_signal_claim_min_brightness: 0.18
+  raw_rod_primary_signal_claim_min_parent_shape: 2.55
+  raw_rod_primary_signal_claim_min_parent_balance: 0.75
+  pca_locked_lumen_evidence_distance_abs: 8.0
+  pca_locked_lumen_evidence_distance_scale: 0.45
+  pca_locked_lumen_evidence_min_signal: 100.0
+  celluniverse2_recent_daughter_overlap_tolerance: 0.01
+  celluniverse2_post_pca_mild_overlap_tolerance: 0.10
+  celluniverse2_signal_anchor_pca_drift_abs: 14.0
+  celluniverse2_signal_anchor_pca_drift_scale: 0.85
+  celluniverse2_signal_anchor_runaway_extra_abs: 10.0
+  celluniverse2_signal_anchor_runaway_move_abs: 10.0
+  celluniverse2_signal_anchor_runaway_move_scale: 0.50
+  celluniverse2_signal_anchor_runaway_min_shape: 1.80
+  celluniverse2_signal_anchor_runaway_shape_jump: 0.35
+  celluniverse2_signal_anchor_restore_shape_min: 2.20
+  celluniverse2_signal_anchor_restore_shape_jump: 0.60
+  pca_bridge_low_balance_future_strong_min_shape: 2.0
+  pca_bridge_low_balance_future_immediate_min_shape: 1.35
+  pca_bridge_low_balance_current_snap_min_shape: 2.15
+  split_dim_exact_future_signal_min_bio_separation: 0.001
+
+  # Migrated balanced-current pair score weights.
+  pca_bridge_balanced_current_score_sep_ratio_weight: 0.45
+  pca_bridge_balanced_current_score_balance_weight: 0.45
+  pca_bridge_balanced_current_score_axis_weight: 0.20
+  pca_bridge_balanced_current_score_mean_seed_weight: 0.20
+  pca_bridge_balanced_current_score_brightness_weight: 0.05
+
+  # Migrated rod-tip fallback analysis gates.
+  rod_tip_future_aligned_flat_min_shape: 1.75
+  rod_tip_future_aligned_flat_min_mid_short_ratio: 1.55
+  rod_tip_neighbor_owned_dim_max_brightness: 0.10
+  rod_tip_neighbor_owned_dim_max_parent_balance: 0.50
+
+  # Migrated CellLumen split positive/duplicate-gate analysis constants.
+  lumen_partial_parent_window_min_both_supported: 2.0
+  lumen_partial_parent_window_max_missing_daughters: 0.0
+  lumen_partial_parent_window_max_parent_persists: 0.0
+  lumen_partial_parent_window_min_parent_shape: 1.75
+  lumen_partial_parent_window_max_prior_score: 45.0
+  lumen_partial_parent_window_max_claim_penalty: 0.00001
+  lumen_partial_parent_window_max_continuation_penalty: 0.00001
+  lumen_partial_parent_window_max_valley_from_bright: 0.95
+  lumen_partial_parent_window_max_overlap_cost_fraction: 1.05
+  lumen_partial_parent_window_max_snapshot_drift_abs: 9.0
+  lumen_partial_parent_window_max_snapshot_drift_axis_fraction: 0.55
+  lumen_strong_bridge_image_gain_abs: 90.0
+  lumen_strong_bridge_image_gain_multiplier: 3.0
+  lumen_strong_bridge_max_valley_from_bright: 0.45
+  lumen_strong_bridge_max_gap_density: 0.45
+  lumen_strong_bridge_min_gap_width: 8.0
+  lumen_strong_bridge_min_axis_length: 35.0
+  lumen_positive_gate_min_shape_floor: 1.50
+  lumen_parent_persistence_epsilon: 0.001
+  lumen_clean_window_min_both_supported: 1.0
+  lumen_clean_window_max_missing_daughters: 0.0
+  lumen_clean_window_max_parent_persists: 0.0
+  lumen_weak_image_min_parent_balance: 0.70
+  lumen_risky_claim_parent_balance: 0.75
+  lumen_risky_claim_neighbor_penalty: 10.0
+  lumen_risky_claim_continuation_penalty: 4.0
+  lumen_future_support_min_soft_penalty_fraction: 0.02
+  lumen_clean_one_sided_max_neighbor_penalty: 4.0
+  lumen_clean_one_sided_max_continuation_penalty: 4.0
+  lumen_clean_one_sided_max_parent_persistence: 8.0
+  lumen_clean_one_sided_max_prior_score: 12.0
+  lumen_clean_one_sided_min_soft_penalty_fraction: 0.05
+  lumen_prepass_max_claim_penalty: 0.00001
+  lumen_prepass_min_parent_balance: 0.90
+  lumen_prepass_min_image_gain: 20.0
+  lumen_prepass_max_valley_from_bright: 0.65
+  lumen_prepass_max_gap_density: 0.20
+  lumen_prepass_max_prior_score: 3.0
+  lumen_prepass_max_soft_penalty_fraction: 0.055
+  lumen_future_conflict_min_continuation_penalty: 15.0
+  lumen_future_conflict_min_parent_balance: 0.45
+  lumen_future_conflict_min_image_gain: 20.0
+  lumen_future_conflict_max_overlap_cost_fraction: 0.70
+  lumen_future_conflict_max_valley_from_bright: 0.70
+  lumen_future_conflict_max_prior_score: 50.0
+  lumen_future_conflict_max_soft_penalty_fraction: 0.02
+  lumen_clean_window_min_gap_width: 4.0
+  lumen_clean_window_max_valley_from_bright: 0.75
+  lumen_clean_window_max_soft_penalty_fraction: 0.04
+  lumen_risky_claim_image_gain_multiplier: 2.0
+  lumen_weak_split_image_gain_abs: 60.0
+  lumen_weak_split_image_gain_multiplier: 2.0
+  lumen_hijack_min_parent_shape: 1.50
+  lumen_hijack_min_parent_balance: 0.60
+  lumen_neighbor_duplicate_min_claim_penalty: 10.0
+  lumen_neighbor_duplicate_min_image_gain: 80.0
+  lumen_neighbor_duplicate_min_parent_balance: 0.82
+  lumen_neighbor_duplicate_min_gap_width: 6.0
+  lumen_neighbor_duplicate_min_valley_from_bright: 0.45
+  lumen_moderate_duplicate_min_claim_penalty: 7.0
+  lumen_moderate_duplicate_min_parent_balance: 0.75
+  lumen_moderate_duplicate_min_overlap_cost_fraction: 0.50
+  lumen_moderate_duplicate_min_image_gain: 80.0

@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/blue-lobster/p2/UCI/CS295p/CellUniverse/C++/build_gcc15_o3_safe_cuda/cmake_install.cmake",
+		"/home/blue-lobster/p2/UCI/CS295p/CellUniverse/C++/build_gcc15_o3_safe_cuda/lib/yaml-cpp/cmake_install.cmake",
+		"/home/blue-lobster/p2/UCI/CS295p/CellUniverse/C++/build_gcc15_o3_safe_cuda/lib/yaml-cpp/util/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

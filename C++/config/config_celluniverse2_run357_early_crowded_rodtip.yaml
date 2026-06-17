@@ -1,0 +1,455 @@
+base_config: config.yaml
+
+# Experimental CellUniverse 2.0 mode.
+#
+# This keeps the normal CellUniverse tracking command and the normal final PCA
+# shape fit, but removes split trials and skips the random/signal-guided
+# perturbation loop. Each frame therefore advances by running the existing PCA
+# fit directly from the copied previous-frame cell state.
+simulation:
+  celluniverse2_enabled: true
+  export_perturb_cell_center_debug_images: true
+  # If a carried-forward cell/trash body is nearly all background, use the
+  # frame's bright signal centers as emergency anchors before the final PCA fit.
+  # The matcher requires the new center to be at least one body unit away and
+  # similar in size/shape, so normal in-place PCA fits are left alone.
+  signal_center_rescue_enabled: true
+  signal_center_rescue_background_delta: 0.03
+  signal_center_rescue_background_stddev_max: 0.04
+  signal_center_rescue_min_distance_body_units: 0.75
+  signal_center_rescue_max_distance_body_units: 6.0
+  signal_center_rescue_max_size_ratio: 3.0
+  signal_center_rescue_max_shape_ratio: 2.5
+  # Rescue assignment is solved across all background-looking cells at once,
+  # so two cells cannot greedily steal the same bright center. The score cap
+  # blocks very long relocations that previously stole unrelated daughter
+  # centers in crowded later frames.
+  signal_center_rescue_global_assignment_enabled: true
+  signal_center_rescue_max_heuristic_score: 3.0
+  # Young split daughters are localized by trying each plausible bright center
+  # in their sibling half-space, running a short PCA probe, and keeping the
+  # best candidate before the full PCA pass. Unlike the background-body rescue,
+  # this allows close centers because daughters often move less than one body
+  # unit between adjacent frames.
+  signal_center_rescue_split_daughter_probe_enabled: true
+  signal_center_rescue_split_daughter_probe_frames: 3
+  signal_center_rescue_split_daughter_max_distance_body_units: 1.5
+  signal_center_rescue_split_daughter_probe_distance_weight: 0.40
+  # If an older split daughter has become background, cannot find any
+  # compatible signal center, and then severely overlaps another live cell,
+  # remove it as a stale blocker instead of protecting/restoring it forever.
+  celluniverse2_stale_daughter_cleanup_enabled: true
+  celluniverse2_stale_daughter_cleanup_min_age: 4
+  celluniverse2_stale_daughter_cleanup_overlap: 0.50
+  # Local bbox background should represent true surrounding background, not the
+  # brightest halo outside the fitted cell body.
+  adaptive_background_local_bbox_percentile: 20.0
+  n2v2_preprocess:
+    device: cuda
+    contrast:
+      gamma_split_decay_enabled: true
+      gamma_split_decay_target: 1.0
+      gamma_split_decay_splits_to_target: 120
+
+# Seed each initial CSV cell with medium rendering brightness before the normal
+# per-frame brightness EMA takes over.
+cell:
+  initialBrightness: 0.5
+
+# Separate split-only kill switch. celluniverse2_enabled already suppresses
+# standard random split scheduling. The PCA-bridge cut remains enabled below
+# as a narrow one-shot split path for obvious rod-like wrong fits.
+prob:
+  disable_split_trials: true
+  # Prevent final PCA shape fitting from gradually walking a carried cell into
+  # a neighboring cell body. This is intentionally narrower than the shared
+  # snap-position guard: it only restores position when the cell was previously
+  # clear of that neighbor and the PCA result lands in the neighbor core.
+  celluniverse2_neighbor_pca_drift_guard_enabled: true
+  celluniverse2_neighbor_pca_drift_guard_min_move_abs: 18.0
+  celluniverse2_neighbor_pca_drift_guard_min_move_scale: 0.70
+  celluniverse2_neighbor_pca_drift_guard_body_scale: 0.75
+  celluniverse2_neighbor_pca_drift_guard_pre_clearance_abs: 28.0
+  celluniverse2_neighbor_pca_drift_guard_pre_clearance_scale: 1.25
+  pca_bridge_split_enabled: true
+  pca_bridge_elongation_ratio: 1.35
+  # CellUniverse 2.0 does not require a dark bridge. Once a rod-like cell is
+  # detected, seed daughters by cutting the rod at its geometric middle and
+  # using brightness-weighted centers of the two halves. The proposal is still
+  # the only split candidate in this mode.
+  pca_bridge_require_dark_bridge: false
+  pca_bridge_middle_cut_centroids: true
+  # Before the final CellUniverse2 PCA fit, flat carried-forward parents can
+  # also seed a split from two distinctive signal centers inside the parent's
+  # snap bbox. Acceptance still goes through the normal split validation gates.
+  signal_center_split_enabled: true
+  signal_center_split_min_parent_elongation: 1.45
+  # Allow close axial daughters such as the frame-18 cell_10 split; downstream
+  # CellUniverse2 bio/cost gates still reject unsupported close fake pairs.
+  signal_center_split_min_separation_radius_scale: 0.45
+  # Signal-center proposals should follow the carried rod axis. This keeps
+  # later crowded frames from selecting a plausible pair of bright centers on
+  # the wrong split axis before the downstream PCA/cost gates run.
+  # The immediate-future rescue path is only a proposal generator; do not make
+  # it enforce the full hard bio separation cliff before the ordinary split
+  # validator has a chance to score a future-supported crowded pair.
+  signal_center_future_rescue_min_separation_parent_fraction: 0.75
+  signal_center_split_min_axis_alignment: 0.75
+  signal_center_neighbor_owned_future_rescue_min_pairs: 8
+  signal_center_neighbor_owned_future_rescue_min_fraction: 0.80
+  signal_center_neighbor_owned_future_rescue_axis_fraction: 0.60
+  signal_center_neighbor_owned_future_rescue_max_axis_rejects: 2
+  signal_center_neighbor_owned_future_rescue_max_separation_rejects: 1
+  # Frame-86 crowded misses showed one high-shape parent family with many
+  # candidate pairs, almost-clean geometry, and overwhelming neighbor-owned
+  # rejections. A broad axis-fraction relaxation regressed the frame, so keep
+  # the ordinary rescue unchanged and open a second narrow path only for this
+  # large-parent, high-pair, near-axis case.
+  signal_center_neighbor_owned_future_rescue_high_shape_min_parent_shape: 2.50
+  signal_center_neighbor_owned_future_rescue_high_shape_min_candidate_pairs: 80
+  signal_center_neighbor_owned_future_rescue_high_shape_min_axis_alignment: 0.42
+  # Tuned from the latest frame-4 false reject:
+  #   f4 Cell type 1_1 long/mid=1.03, mid/short=1.61
+  #   f4 Cell type 1_2 long/mid=1.09, mid/short=1.33
+  # Frame 18/19 true split-like rods include mid/short around 2.01-2.14
+  # (f19 cell_000/cell_001, f18 cell_00). Allow those through the rod
+  # proposal gate while downstream bio/cost/overlap gates still reject bad
+  # proposals.
+  pca_bridge_min_long_mid_ratio: 1.02
+  pca_bridge_max_mid_short_ratio: 2.45
+  pca_bridge_min_side_voxels: 8
+  # CellUniverse2 treats the rod-like parent shape itself as split evidence;
+  # do not require a dark valley between the middle-cut daughter seeds.
+  pca_bridge_require_valley: false
+  # Permit only this much rod-cut daughter overlap. Higher overlap is rejected;
+  # accepted daughters are not resized or repaired. A separate future-window
+  # gate below can rescue higher-overlap candidates when the next frames show
+  # two distinct daughter centers in the parent bbox.
+  pca_bridge_soft_daughter_overlap_max: 0.12
+  pca_bridge_future_window_enabled: true
+  pca_bridge_future_window_size: 3
+  pca_bridge_future_window_match_distance: 28.0
+  pca_bridge_future_window_match_distance_per_frame: 4.0
+  pca_bridge_future_window_rescue_overlap_max: 0.25
+  pca_bridge_future_window_min_separation_parent_fraction: 0.50
+  pca_bridge_future_window_min_both_daughter_support: 2
+  pca_bridge_future_window_max_missing_daughters: 0
+  pca_bridge_future_window_max_parent_persists: 0
+  # If both daughters are already visible in the immediate future window,
+  # allow an asymmetric current-frame seed instead of rejecting on parent
+  # distance balance alone.
+  pca_bridge_future_window_parent_balance_rescue_min: 0.19
+  # Rod-tip fallback can be very asymmetric after post-split movement. Only
+  # waive the parent-distance balance floor when both future frames show two
+  # bright supported daughters.
+  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.10
+  pca_bridge_future_window_rod_tip_midpoint_parent_fraction: 1.00
+  # When daughter centers came from the immediate future frame, only let clean
+  # future support override current-frame dim/cost gates for very rod-like
+  # parents. This catches early rod failures such as cell_110 at frame 34 while
+  # avoiding broad future-only split acceptance.
+  pca_bridge_future_window_min_parent_shape_for_cost_rescue: 2.20
+  # Future-centered daughters may be dim in the current frame; keep their
+  # refit positions on their own sides so PCA cannot pull the split pair back
+  # into one short rod before validation.
+  pca_bridge_future_window_refit_halfspace_min_fraction: 0.70
+  # Current-frame aligned-pair fallbacks must still show enough balance or
+  # future brightness to count as trustworthy evidence.
+  pca_bridge_current_aligned_pair_min_parent_balance: 0.45
+  pca_bridge_current_aligned_pair_min_future_brightness: 0.25
+  # Frontier tuning: crowded frame-85 class misses showed a real split family
+  # sitting just below the old 0.65 floor (parentDistBalance about 0.46). Let
+  # this family compete, then trust later bio/cost gates to reject bad air
+  # placements instead of killing it here.
+  pca_bridge_unclean_pair_min_parent_balance: 0.45
+  # Clean future-supported newborn splits may overlap a neighbor slightly
+  # before the next PCA pass separates them. This remains a small tolerance,
+  # not a general overlap allowance.
+  split_future_supported_hard_overlap_tolerance: 0.05
+  # Bring back the original bio separation gate: reject splits where the two
+  # newborn daughters are still too close relative to the snapshot parent.
+  # This targets false early rod cuts like the frame-23/24 cell_011 split.
+  bio_min_daughter_separation_parent_fraction: 1.10
+  # Original midpoint-size sanity gate: newborn daughters should still be
+  # centered around the previous-frame parent, not shifted onto a neighboring
+  # cell or trash target.
+  bio_max_midpoint_parent_fraction: 0.95
+  # Brightness as density: each newborn daughter must contain real signal.
+  # This rejects false daughters sitting in background/dim volume.
+  bio_min_daughter_mean_brightness_absolute: 0.05
+  bio_min_daughter_mean_brightness_parent_fraction: 0.50
+  bio_min_daughter_mean_brightness_background_margin: 0.015
+  # Small tolerance for real but slightly dim daughters: only candidates with
+  # clean future-window support may use this soft band. Below the hard floor
+  # they are still rejected as background-like false daughters.
+  bio_daughter_density_soft_gate_enabled: true
+  bio_daughter_density_soft_min_fraction: 0.75
+  bio_daughter_density_soft_penalty_fraction: 0.25
+  bio_daughter_density_soft_require_future_support: true
+  # Split-density rescue settings for future-supported PCA bridge proposals.
+  split_density_one_frame_min_parent_shape: 2.15
+  split_density_one_frame_max_parent_shape: 2.20
+  split_density_one_frame_soft_min_fraction: 0.20
+  split_density_future_soft_min_fraction: 0.50
+  split_density_locked_floor_abs: 0.04
+  split_density_locked_floor_parent_fraction: 0.30
+  split_density_cost_backed_clean_future_min_parent_balance: 0.08
+  split_density_cost_backed_clean_future_min_image_gain_abs: 500.0
+  split_density_cost_backed_clean_future_min_total_gain_abs: 500.0
+  split_density_cost_backed_clean_future_min_future_brightness: 0.08
+  split_density_cost_backed_clean_future_cost_fraction: -0.95
+  split_density_cost_backed_clean_future_overlap_limit_fraction: 0.020
+  split_density_cost_backed_clean_future_max_gap_density: 0.12
+  split_density_cost_backed_clean_future_max_valley_from_bright: 0.35
+  split_density_cost_backed_clean_future_max_drift_abs: 2.0
+  split_density_cost_backed_clean_future_max_drift_scale: 0.08
+  split_density_cost_backed_clean_future_min_axis_length_scale: 1.0
+  # Near-miss daughter separation can survive as a scored candidate when the
+  # immediate future window already confirms two daughters. This keeps the
+  # original bio separation as a preference while avoiding one-frame delays
+  # from small threshold misses such as frame-18 cell_00.
+  bio_separation_soft_gate_enabled: true
+  bio_separation_soft_min_fraction: 0.50
+  bio_separation_soft_penalty_fraction: 0.35
+  bio_separation_soft_require_future_support: true
+  # Clean future-supported rod-tip splits may have oversized fitted daughters
+  # in the current frame while the two bodies are still partially visible.
+  # This is a scoped rescue, not a global relaxation of the bio volume gate.
+  pca_bridge_future_window_rod_tip_combined_volume_max_fraction: 1.70
+  pca_bridge_future_window_rod_tip_single_daughter_volume_max_fraction: 0.90
+  pca_bridge_future_window_pca_snap_max_radius_scale: 1.00
+  pca_bridge_future_axis_projection_min_brightness: 0.20
+  pca_bridge_future_axis_projection_min_parent_balance: 0.55
+  pca_bridge_future_axis_projection_max_snap_distance: 42.0
+  pca_bridge_future_axis_projection_max_snap_parent_scale: 1.25
+  pca_bridge_far_future_snap_keep_min_shape: 1.35
+  pca_bridge_far_future_snap_keep_max_score: 1.50
+  pca_bridge_far_future_snap_keep_max_seed_scale: 1.20
+  pca_bridge_far_future_snap_keep_raw_alternate: true
+  pca_bridge_far_future_snap_prefer_raw_delayed_near_miss: true
+  pca_bridge_far_future_snap_project_raw_alternate: true
+  pca_bridge_far_future_snap_project_raw_alternate_require_no_dark: true
+  pca_bridge_far_future_snap_project_raw_alternate_min_score: 0.40
+  pca_bridge_future_axis_project_raw_sep_fraction: 0.75
+  pca_bridge_future_axis_project_sep_scale: 1.05
+  pca_bridge_moderate_future_pair_min_shape: 1.75
+  pca_bridge_moderate_future_pair_max_shape: 2.00
+  pca_bridge_moderate_future_pair_min_parent_balance: 0.50
+  pca_bridge_moderate_future_pair_max_snap_radius_scale: 1.45
+  pca_bridge_weak_balance_future_pair_min_shape: 1.95
+  pca_bridge_weak_balance_future_pair_max_shape: 2.15
+  pca_bridge_weak_balance_future_pair_min_parent_balance: 0.14
+  pca_bridge_weak_balance_future_pair_max_snap_radius_scale: 1.80
+  pca_bridge_bright_stable_future_pair_min_shape: 1.35
+  pca_bridge_bright_stable_future_pair_min_parent_balance: 0.10
+  pca_bridge_bright_stable_future_pair_min_sep_scale: 1.20
+  pca_bridge_bright_stable_future_pair_min_brightness: 0.34
+  pca_bridge_bright_stable_future_pair_max_snap_radius_scale: 1.60
+  pca_bridge_far_aligned_future_pair_min_shape: 1.35
+  pca_bridge_far_aligned_future_pair_min_parent_balance: 0.10
+  pca_bridge_far_aligned_future_pair_min_brightness: 0.30
+  pca_bridge_far_aligned_future_pair_max_score: 1.50
+  pca_bridge_far_aligned_future_pair_max_snap_radius_scale: 2.80
+  pca_bridge_two_frame_future_min_parent_balance: 0.45
+  pca_bridge_two_frame_future_min_brightness: 0.18
+  pca_bridge_two_frame_future_max_snap_radius_scale: 1.70
+  pca_bridge_future_window_geometry_rescue_min_parent_shape: 1.60
+  pca_bridge_future_window_geometry_rescue_min_brightness: 0.15
+  pca_bridge_future_window_rod_tip_snap_max_separation_radius_scale: 2.75
+  pca_bridge_future_window_rod_tip_snap_max_midpoint_radius_scale: 1.45
+  # High-shape rod-tip proposals must win through their actual future-aligned
+  # seed pair. The extra axis-place alternate is useful for early moderate rods
+  # such as frame 18, but caused the frame-85 cell_11010 false split.
+  pca_bridge_future_window_rod_tip_axis_place_max_parent_shape: 2.20
+  # Small tolerance for clean two-frame future-supported PCA bridge proposals
+  # that land just under the final daughter-separation cliff after PCA refit.
+  pca_bridge_future_window_near_separation_fraction: 0.965
+  # Crowded later windows (120+) showed a different family than the early
+  # frontier: immediate-future aligned rod-tip pairs can be real splits even
+  # when the parent is only moderately flat in the current frame. Keep this
+  # relaxation dense-scene only so the earlier sparse windows stay unchanged.
+  rod_tip_future_aligned_crowded_cell_count_min: 55
+  rod_tip_future_aligned_crowded_relaxed_min_shape: 1.45
+  rod_tip_future_aligned_crowded_relaxed_min_mid_short_ratio: 1.26
+  rod_tip_future_aligned_crowded_relaxed_mid_short_floor: 1.02
+  rod_tip_future_aligned_crowded_relaxed_mid_short_shape_span: 0.70
+  rod_tip_future_aligned_crowded_relaxed_max_snap_radius_scale: 2.50
+  # Soft geometry penalties make the looser frame-18 style proposals pay for
+  # suspicious final geometry instead of being rejected/accepted by a cliff.
+  # Large PCA drift and too-wide daughter separation add proportional cost;
+  # close daughters whose center line follows both short axes should also keep
+  # those short axes nearly shared. Daughter shortest-axis lines should
+  # intersect/nearly intersect; parallel axes are accepted only when collinear.
+  split_soft_geometry_gate_enabled: true
+  split_soft_geometry_penalty_fraction: 0.30
+  split_soft_max_daughter_seed_drift_fraction: 0.95
+  split_soft_max_final_separation_parent_fraction: 2.20
+  split_close_axis_soft_gate_enabled: true
+  split_close_axis_distance_scale: 2.40
+  split_close_axis_center_axis_alignment: 0.80
+  split_close_axis_max_angle_degrees: 20.0
+  split_close_axis_penalty_fraction: 0.20
+  split_daughter_axis_interaction_soft_gate_enabled: true
+  split_daughter_axis_interaction_distance_fraction: 0.35
+  split_daughter_axis_interaction_along_fraction: 1.60
+  split_daughter_axis_parallel_angle_degrees: 12.0
+  split_daughter_axis_interaction_penalty_fraction: 0.35
+  split_bio_ignore_trash_neighbors_enabled: true
+  # After split proposal PCA/refit, keep each newborn daughter on its own
+  # side of the original split axis instead of letting both drift inward.
+  split_daughter_refit_keep_seed_halfspace_enabled: true
+  # Slightly stronger inward-drift clamp: frame-85 `cell_11100` fell short of
+  # the final bio-separation gate by about one pixel after PCA pulled one
+  # daughter back toward the sibling. This keeps the post-refit geometry closer
+  # to the accepted seed pair without changing earlier proposal selection.
+  split_daughter_refit_halfspace_min_fraction: 0.18
+  split_daughter_refit_align_short_axis_to_split_enabled: true
+  # For flattened split daughters, initialize rotation from the local bright
+  # voxel plane before PCA refit. The two largest local PCA axes describe the
+  # cell plane; when the in-plane axes are ambiguous, only the plane normal is
+  # trusted and the existing in-plane orientation is preserved.
+  split_daughter_flattened_plane_rotation_enabled: true
+  split_daughter_flattened_plane_min_shape: 1.45
+  split_daughter_flattened_plane_radius_scale: 1.45
+  split_daughter_flattened_plane_min_pixels: 120
+  split_daughter_flattened_plane_min_ratio: 1.35
+  split_daughter_flattened_plane_long_axis_ratio: 1.15
+  split_daughter_flattened_plane_neighbor_guard_enabled: true
+  split_daughter_flattened_plane_neighbor_distance_scale: 2.20
+  split_daughter_flattened_plane_neighbor_axis_alignment: 0.70
+  split_daughter_flattened_plane_neighbor_lateral_scale: 0.75
+  split_daughter_flattened_plane_neighbor_normal_alignment: 0.65
+  # Dense later windows show a repeatable pattern: some parents are only mildly
+  # elongated during the pre-split probe, then become strong rods after the PCA
+  # shape fit in the same frame. Give those already-attempted parents one
+  # conservative post-PCA forced-rod retry instead of globally lowering the
+  # front-door split thresholds.
+  post_pca_force_rod_split_enabled: false
+  post_pca_force_rod_split_min_shape: 1.80
+  post_pca_force_rod_split_separation_scale: 1.0
+  post_pca_force_rod_split_daughter_radius_scale: 1.0
+  post_pca_force_rod_split_max_per_frame: 0
+  post_pca_force_rod_split_include_attempted: true
+  post_pca_force_rod_split_require_prior_attempt: true
+  post_pca_force_rod_split_require_nonsibling_neighbor: true
+  post_pca_force_rod_split_neighbor_norm_limit: 0.95
+  post_pca_force_rod_split_neighbor_exempt_min_shape: 2.00
+  post_pca_force_rod_split_min_seed_brightness: 0.05
+  post_pca_force_rod_split_require_cost_improvement: true
+  post_pca_force_rod_split_max_positive_cost: 0.0
+  post_pca_force_rod_split_min_cost_improvement_fraction: 0.03
+  post_pca_force_rod_split_bright_near_miss_rescue_enabled: false
+  post_pca_force_rod_split_bright_near_miss_min_fraction: 0.0275
+  post_pca_force_rod_split_bright_near_miss_min_seed_brightness: 0.60
+  # Sparse/moderate signal-center splits are the early-frame "wait or accept"
+  # family. These knobs stay source-specific: they should only tune current
+  # signal-center evidence and must not silently relax PCA-bridge or rod-tip
+  # behavior.
+  signal_center_sparse_cell_count_max: 50
+  signal_center_sparse_moderate_max_shape: 2.20
+  signal_center_sparse_low_sep_max_scale: 1.20
+  signal_center_sparse_low_future_brightness_max: 0.25
+  signal_center_sparse_two_frame_min_shape: 2.10
+  signal_center_sparse_two_frame_min_sep_scale: 1.10
+  signal_center_sparse_two_frame_min_parent_balance: 0.55
+  signal_center_sparse_immediate_min_brightness: 0.06
+  signal_center_sparse_strong_shape_min: 2.30
+  # When a signal-center split barely misses the midpoint drift gate but has
+  # stable future support, let it survive as a near-miss rather than creating
+  # a new broad geometry exception.
+  signal_center_midpoint_near_miss_enabled: true
+  signal_center_midpoint_near_miss_min_score: 1.00
+  signal_center_midpoint_near_miss_min_separation_ratio: 1.45
+  signal_center_midpoint_near_miss_min_axis_alignment: 0.90
+  signal_center_midpoint_near_miss_min_future_both: 1
+  signal_center_midpoint_near_miss_min_future_brightness: 0.12
+  signal_center_midpoint_near_miss_limit_scale: 1.04
+  # Local signal-center claim arbitration decides whether a new proposal is
+  # allowed to evict a center already reserved by another clean proposal.
+  signal_center_claim_blocker_clean_min_brightness: 0.20
+  signal_center_claim_score_better_margin: 0.20
+  signal_center_claim_balanced_clean_slack: 0.20
+  signal_center_claim_balanced_unclean_slack: 0.80
+  signal_center_claim_balanced_min_brightness: 0.30
+  signal_center_claim_balanced_min_parent_balance: 0.55
+  signal_center_claim_balanced_min_sep_scale: 1.55
+  signal_center_claim_asymmetric_min_brightness: 0.30
+  signal_center_claim_asymmetric_min_parent_balance: 0.08
+  signal_center_claim_asymmetric_min_sep_scale: 1.80
+  # Position-lock exact/clean signal-center daughters so split-validation PCA
+  # can still refine shape without dragging newborn centers off their chosen
+  # bright anchors.
+  signal_center_refit_position_lock_enabled: false
+  signal_center_refit_position_lock_max_snap_distance: 2.0
+  # Global current-center claim scoring arbitrates between signal-center, PCA
+  # bridge, and rod-tip proposals when they want the same current-frame bright
+  # centers. Lower score wins; these weights are intentionally explicit here so
+  # future tuning can be evidence-based instead of hidden in header defaults.
+  celluniverse2_current_claim_source_pca_bridge_penalty: 0.18
+  celluniverse2_current_claim_source_other_penalty: 0.35
+  celluniverse2_current_claim_future_supported_bonus_weight: -0.35
+  celluniverse2_current_claim_future_missing_penalty_weight: 0.45
+  celluniverse2_current_claim_parent_persists_penalty_weight: 0.70
+  celluniverse2_current_claim_future_brightness_bonus_weight: -0.15
+  celluniverse2_current_claim_balance_penalty_weight: 0.70
+  celluniverse2_current_claim_snap_distance_penalty_weight: 0.025
+  celluniverse2_current_claim_aligned_pair_penalty: 0.35
+  celluniverse2_current_claim_parent_shape_bonus_weight: -0.05
+  # Near-threshold cost rescue for future-backed signal-center proposals that
+  # are slightly moved but still have acceptable image, overlap, and geometry.
+  split_future_signal_borderline_moved_parent_shape_slack: 0.08
+  split_future_signal_borderline_moved_min_parent_balance: 0.18
+  split_future_signal_borderline_moved_min_brightness: 0.30
+  split_future_signal_borderline_moved_cost_limit_abs: 25000.0
+  split_future_signal_borderline_moved_cost_limit_fraction: 0.015
+  split_future_signal_borderline_moved_image_limit_abs: 10000.0
+  split_future_signal_borderline_moved_image_limit_fraction: 0.008
+  split_future_signal_borderline_moved_overlap_limit_fraction: 0.012
+  split_future_signal_borderline_moved_soft_penalty_fraction: 0.010
+  split_future_signal_borderline_moved_max_gap_density: 0.20
+  split_future_signal_borderline_moved_max_valley_from_bright: 0.70
+  split_future_signal_borderline_moved_min_axis_length_scale: 1.20
+  split_clean_future_position_lock_min_snap_scale: 1.30
+  # Keep acceptance/rescue brightness floors separate from refit-lock floors.
+  # The crowded frontier showed that low current-frame brightness can still be
+  # safe for position locking, but not for every continuation/cost rescue path.
+  split_immediate_pca_continuation_min_brightness: 0.29
+  split_immediate_pca_continuation_lock_min_brightness: 0.02
+  split_immediate_pca_continuation_min_parent_shape: 1.35
+  split_immediate_pca_continuation_min_parent_balance: 0.08
+  split_immediate_pca_continuation_max_parent_balance: 0.25
+  split_one_frame_aligned_pca_continuation_min_brightness: 0.15
+  split_one_frame_aligned_pca_continuation_lock_min_brightness: 0.02
+  split_one_frame_aligned_pca_continuation_min_parent_shape: 1.70
+  split_one_frame_aligned_pca_continuation_min_parent_balance: 0.08
+  split_one_frame_aligned_pca_continuation_max_parent_balance: 0.25
+  split_one_frame_aligned_pca_continuation_snap_scale: 1.65
+  split_current_locked_bridge_min_brightness: 0.30
+  split_current_locked_bridge_lock_min_brightness: 0.02
+  split_current_locked_bridge_min_parent_shape: 2.15
+  split_current_locked_bridge_min_parent_balance: 0.08
+  split_current_locked_bridge_max_parent_balance: 0.60
+  split_exact_future_center_bridge_min_brightness: 0.29
+  split_exact_future_center_bridge_lock_min_brightness: 0.02
+  split_exact_future_center_bridge_min_parent_shape: 1.35
+  split_exact_future_center_bridge_min_parent_balance: 0.45
+  split_future_soft_penalty_raw_gain_allow_aligned_pair_fallback: false
+  split_delayed_future_pca_bridge_min_future_both: 1
+  split_delayed_future_pca_bridge_max_missing_daughters: 2
+  split_delayed_future_pca_bridge_min_brightness: 0.30
+  split_delayed_future_pca_bridge_min_parent_shape: 2.15
+  split_delayed_future_pca_bridge_min_parent_balance: 0.55
+  split_delayed_future_pca_bridge_soft_penalty_fraction: 0.030
+  split_delayed_future_pca_bridge_image_gain_abs: 500.0
+  split_delayed_future_pca_bridge_image_gain_fraction: 0.004
+  split_delayed_future_pca_bridge_overlap_limit_abs: 20000.0
+  split_delayed_future_pca_bridge_overlap_limit_fraction: 0.018
+  split_delayed_future_pca_bridge_cost_limit_abs: 15000.0
+  split_delayed_future_pca_bridge_cost_limit_fraction: 0.014
+  split_delayed_future_pca_bridge_geometry_limit_abs: 45000.0
+  split_delayed_future_pca_bridge_geometry_limit_fraction: 0.045
+  split_delayed_future_pca_bridge_max_valley_from_bright: 0.50
+  split_delayed_future_pca_bridge_max_gap_density: 0.20
+  split_delayed_future_pca_bridge_min_axis_length_scale: 1.0
+  split_delayed_future_pca_bridge_max_drift_abs: 18.0
+  split_delayed_future_pca_bridge_max_drift_scale: 0.45

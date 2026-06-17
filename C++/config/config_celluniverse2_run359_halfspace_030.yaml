@@ -1,0 +1,8 @@
+base_config: config_celluniverse2_tuning.yaml
+
+prob:
+  # Delayed-future crowded misses at frame 85 still took only the global weak
+  # daughter halfspace clamp and then drifted back into overlap / dense-bridge
+  # states during refit. Raise the shared clamp modestly as a parameter-only
+  # test before adding any new delayed-future-specific logic.
+  split_daughter_refit_halfspace_min_fraction: 0.30

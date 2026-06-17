@@ -1,0 +1,9 @@
+base_config: config_celluniverse2_tuning.yaml
+
+prob:
+  # Crowded frame-85/86 misses showed future-supported raw PCA-bridge daughters
+  # getting only the weak general halfspace clamp because their parent-balance
+  # was slightly below the strong clean-future floor. Lower just this floor so
+  # clean future-supported bridges can keep a stronger daughter-side clamp
+  # before dense-flat bio/cost gates run.
+  split_clean_future_halfspace_min_parent_balance: 0.30

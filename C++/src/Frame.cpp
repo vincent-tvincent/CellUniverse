@@ -478,6 +478,24 @@ static float ellipsoidOverlapFractionOfFirst(const std::vector<cv::Mat> &frameSh
     return static_cast<float>(overlapCount) / static_cast<float>(bodyCount);
 }
 
+static inline float ellipsoidBoundingRadius(const Ellipsoid &cell, float scale)
+{
+    return std::max({cell.getARadius(), cell.getBRadius(), cell.getCRadius()}) *
+           std::max(1e-3f, scale);
+}
+
+static inline bool ellipsoidBoundingSpheresCanOverlap(const Ellipsoid &a,
+                                                      const Ellipsoid &b,
+                                                      float aScale,
+                                                      float bScale)
+{
+    const cv::Point3f aPos(a.getX(), a.getY(), a.getZ());
+    const cv::Point3f bPos(b.getX(), b.getY(), b.getZ());
+    const float maxReach = ellipsoidBoundingRadius(a, aScale) +
+                           ellipsoidBoundingRadius(b, bScale);
+    return cv::norm(aPos - bPos) <= maxReach;
+}
+
 static bool findAnyCellBodyOverlapIn(const std::vector<cv::Mat> &frameShape,
                                      const std::vector<Ellipsoid> &cellList,
                                      bool includeTrash,
@@ -492,6 +510,10 @@ static bool findAnyCellBodyOverlapIn(const std::vector<cv::Mat> &frameShape,
         if (!includeTrash && cellList[i].isTrash()) continue;
         for (size_t j = i + 1; j < cellList.size(); ++j) {
             if (!includeTrash && cellList[j].isTrash()) continue;
+            if (!ellipsoidBoundingSpheresCanOverlap(
+                    cellList[i], cellList[j], bodyScale, bodyScale)) {
+                continue;
+            }
             const float ij = ellipsoidOverlapFractionOfFirst(
                 frameShape, cellList[i], cellList[j], bodyScale, bodyScale);
             const float ji = ellipsoidOverlapFractionOfFirst(
@@ -534,6 +556,10 @@ static bool findNewOrWorseCellBodyOverlapIn(const std::vector<cv::Mat> &frameSha
         if (!includeTrash && candidateCells[i].isTrash()) continue;
         for (size_t j = i + 1; j < candidateCells.size(); ++j) {
             if (!includeTrash && candidateCells[j].isTrash()) continue;
+            if (!ellipsoidBoundingSpheresCanOverlap(
+                    candidateCells[i], candidateCells[j], bodyScale, bodyScale)) {
+                continue;
+            }
 
             const float ij = ellipsoidOverlapFractionOfFirst(
                 frameShape, candidateCells[i], candidateCells[j], bodyScale, bodyScale);
@@ -548,6 +574,9 @@ static bool findNewOrWorseCellBodyOverlapIn(const std::vector<cv::Mat> &frameSha
             if (isAcceptedSiblingPair(candidateA, candidateB)) {
                 continue;
             }
+            if (ij <= overlapTolerance && ji <= overlapTolerance) {
+                continue;
+            }
 
             bool existed = false;
             float baselineAInB = 0.0f;
@@ -559,6 +588,12 @@ static bool findNewOrWorseCellBodyOverlapIn(const std::vector<cv::Mat> &frameSha
                     const std::string baselineA = baselineCells[bi].getName();
                     const std::string baselineB = baselineCells[bj].getName();
                     if (baselineA == candidateA && baselineB == candidateB) {
+                        if (!ellipsoidBoundingSpheresCanOverlap(
+                                baselineCells[bi], baselineCells[bj],
+                                bodyScale, bodyScale)) {
+                            existed = true;
+                            break;
+                        }
                         baselineAInB = ellipsoidOverlapFractionOfFirst(
                             frameShape, baselineCells[bi], baselineCells[bj],
                             bodyScale, bodyScale);
@@ -569,6 +604,12 @@ static bool findNewOrWorseCellBodyOverlapIn(const std::vector<cv::Mat> &frameSha
                         break;
                     }
                     if (baselineA == candidateB && baselineB == candidateA) {
+                        if (!ellipsoidBoundingSpheresCanOverlap(
+                                baselineCells[bj], baselineCells[bi],
+                                bodyScale, bodyScale)) {
+                            existed = true;
+                            break;
+                        }
                         baselineAInB = ellipsoidOverlapFractionOfFirst(
                             frameShape, baselineCells[bj], baselineCells[bi],
                             bodyScale, bodyScale);
@@ -2258,14 +2299,23 @@ bool bioCheckDaughters(
     size_t d2Idx,
     const ProbabilityConfig &probConfig,
     std::string &reasonOut,
+    float existingCellBuriedScale = 1.0f,
     bool skipExistingCellBuriedCheck = false,
     bool skipNeighborBridgeCheck = false,
-    bool ignoreTrashNeighbors = false)
+    bool ignoreTrashNeighbors = false,
+    bool ignoreSuspiciousRodBlockers = false)
 {
     const auto cellVolume = [](const Ellipsoid &c) {
         return static_cast<double>(c.getARadius()) *
                static_cast<double>(c.getBRadius()) *
                static_cast<double>(c.getCRadius());
+    };
+    const auto isSuspiciousRodBlocker = [&](const Ellipsoid &c) {
+        const float maxR = std::max({c.getARadius(), c.getBRadius(), c.getCRadius()});
+        const float minR = std::max(
+            1e-3f,
+            std::min({c.getARadius(), c.getBRadius(), c.getCRadius()}));
+        return maxR / minR >= probConfig.split_overlap_suspicious_rod_shape_ratio;
     };
 
     const float d1R = std::max({daughter1.getARadius(),
@@ -2320,13 +2370,16 @@ bool bioCheckDaughters(
             if (i == d1Idx || i == d2Idx) continue;
             const Ellipsoid &other = allCells[i];
             if (ignoreTrashNeighbors && other.isTrash()) continue;
+            if (ignoreSuspiciousRodBlockers && isSuspiciousRodBlocker(other)) continue;
             if (other.isPointInsideEllipsoid(cv::Point3f(
-                    daughter1.getX(), daughter1.getY(), daughter1.getZ()), 1.0f)) {
+                    daughter1.getX(), daughter1.getY(), daughter1.getZ()),
+                    existingCellBuriedScale)) {
                 reasonOut = "d1_buried_in_" + other.getName();
                 return false;
             }
             if (other.isPointInsideEllipsoid(cv::Point3f(
-                    daughter2.getX(), daughter2.getY(), daughter2.getZ()), 1.0f)) {
+                    daughter2.getX(), daughter2.getY(), daughter2.getZ()),
+                    existingCellBuriedScale)) {
                 reasonOut = "d2_buried_in_" + other.getName();
                 return false;
             }
@@ -2368,6 +2421,7 @@ bool bioCheckDaughters(
             if (i == d1Idx || i == d2Idx) continue;
             const Ellipsoid &other = allCells[i];
             if (ignoreTrashNeighbors && other.isTrash()) continue;
+            if (ignoreSuspiciousRodBlockers && isSuspiciousRodBlocker(other)) continue;
             const cv::Point3f oPos(other.getX(), other.getY(), other.getZ());
             const float d1ToOther = static_cast<float>(cv::norm(oPos - d1Pos));
             const float d2ToOther = static_cast<float>(cv::norm(oPos - d2Pos));
@@ -3540,6 +3594,7 @@ bool Frame::discoverPcaBridgeProposal(size_t cellIndex,
     outProposal.gapEndBin = bestEnd;
     outProposal.leftPixelCount = leftCount;
     outProposal.rightPixelCount = rightCount;
+    outProposal.pcaBridgeHasDarkBridge = darkBridgeFound;
 
     log << "  [PCA Bridge Propose] cell=" << parent.getName()
         << " elong=" << elong
@@ -4189,6 +4244,42 @@ CostCallbackPair Frame::trySplitCellPhased(
             altCand.sphereRadiusOverride = bridgeProposal->daughterSphereRadius;
             bridgeCandidates.push_back(altCand);
         }
+        const float rodTipAxisPlaceMaxShape =
+            std::max(0.0f,
+                     probConfig
+                         .pca_bridge_future_window_rod_tip_axis_place_max_parent_shape);
+        const bool highShapeFutureAlignedRodTipAxisPlace =
+            simulationConfig.celluniverse2_enabled &&
+            bridgeProposal->daughterSphereRadius > 0.0f &&
+            bridgeProposal->gapStartBin <= -8 &&
+            bridgeProposal->immediateFutureCenterBacked &&
+            bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            rodTipAxisPlaceMaxShape > 0.0f &&
+            bridgeProposal->parentShapeElongation > rodTipAxisPlaceMaxShape;
+        if (bridgeProposal->daughterSphereRadius > 0.0f &&
+            !axisPlace.empty() && axisPlace.front().valid &&
+            !highShapeFutureAlignedRodTipAxisPlace) {
+            Candidate axisCand;
+            axisCand.d1Pos = axisPlace.front().d1;
+            axisCand.d2Pos = axisPlace.front().d2;
+            axisCand.label = "bridge_axis_place";
+            axisCand.sphereRadiusOverride = -1.0f;
+            bridgeCandidates.push_back(axisCand);
+        } else if (highShapeFutureAlignedRodTipAxisPlace &&
+                   !axisPlace.empty() && axisPlace.front().valid) {
+            std::cout << "  [Split Bridge AxisPlace Skip] " << parentName
+                      << " reason=high_shape_future_aligned_rod_tip"
+                      << " parentShape="
+                      << bridgeProposal->parentShapeElongation
+                      << " maxParentShape=" << rodTipAxisPlaceMaxShape
+                      << " futureBoth="
+                      << bridgeProposal->windowBothDaughtersSupported
+                      << " futureMissing="
+                      << bridgeProposal->windowMissingDaughterCount
+                      << " futureBestMinBrightness="
+                      << bridgeProposal->windowBestMatchedMinBrightness
+                      << std::endl;
+        }
         if (bridgeProposalOnly) {
             candidates.clear();
             candidates.insert(candidates.end(),
@@ -4306,9 +4397,14 @@ CostCallbackPair Frame::trySplitCellPhased(
     std::vector<double> savedPerSlice = _currentCostPerSlice;
     const double savedCost = _currentCost;
     std::vector<Ellipsoid> savedCells = cells;
+    int savedNonTrashCellCount = 0;
+    for (const auto &cell : savedCells) {
+        if (!cell.isTrash()) ++savedNonTrashCellCount;
+    }
 
     int bestIdx = -1;
     double bestTotal = std::numeric_limits<double>::infinity();
+    double bestSelectionScore = std::numeric_limits<double>::infinity();
     std::vector<Ellipsoid> bestCells;
     std::vector<cv::Mat> bestSynth;
     std::vector<double> bestPerSlice;
@@ -4316,6 +4412,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     cv::Point3f bestSeedD1{0, 0, 0};
     cv::Point3f bestSeedD2{0, 0, 0};
     std::string bestLabel;
+    bool bestFutureSupportedRodTipPrimary = false;
 
     int burnIters = std::max(0, probConfig.split_candidate_burn_in_iterations);
     if (lumenProposal != nullptr && lumenBurnInIterations >= 0) {
@@ -4373,6 +4470,32 @@ CostCallbackPair Frame::trySplitCellPhased(
             candIsPcaBridgeOnly &&
             bridgeProposal != nullptr &&
             bridgeProposal->futureWindowSplitRescue;
+        const bool futureSupportedPcaBridgeDimBypass =
+            candIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            probConfig.pca_bridge_future_window_enabled &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >=
+                std::max(1, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+            bridgeProposal->windowMissingDaughterCount <=
+                std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+            bridgeProposal->windowParentPersists <=
+                std::max(0, probConfig.pca_bridge_future_window_max_parent_persists);
+        const bool futureSupportedRodTipPrimaryCandidate =
+            candIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->daughterSphereRadius > 0.0f &&
+            bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >=
+                static_cast<int>(probConfig.split_future_rod_tip_primary_min_future_both) &&
+            bridgeProposal->windowMissingDaughterCount <=
+                static_cast<int>(probConfig.split_future_rod_tip_primary_max_missing_daughters) &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                probConfig.split_future_rod_tip_primary_min_brightness &&
+            bridgeProposal->parentDistanceBalance >=
+                probConfig.split_future_rod_tip_primary_min_parent_balance;
         const float activeDaughterVolumeScale =
             (candIsCellLumenPrior && lumenDaughterVolumeScale > 0.0f)
                 ? lumenDaughterVolumeScale
@@ -4527,7 +4650,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                 ? lumenMinEdgeBrightness
                 : probConfig.bio_bridge_min_edge_brightness_absolute;
         const float activeMinDaughterBright = candIsPcaBridgeOnly
-            ? 0.5f * kMinDaughterBright
+            ? probConfig.split_pca_bridge_edge_brightness_scale * kMinDaughterBright
             : kMinDaughterBright;
         auto measureLocalBrightness = [&](float cx, float cy, float cz) -> float {
             const int ix = static_cast<int>(std::round(cx));
@@ -4563,7 +4686,27 @@ CostCallbackPair Frame::trySplitCellPhased(
             (d1LocalBright >= activeMinDaughterBright) &&
             (d2LocalBright >= activeMinDaughterBright);
         const bool futureWindowDimBypass =
-            futureBackedBridgeRescue && !bothDaughtersBright;
+            (futureBackedBridgeRescue || futureSupportedPcaBridgeDimBypass) &&
+            !bothDaughtersBright;
+        const float dimNearMissFloor =
+            probConfig.split_future_near_dim_bypass_min_edge_fraction *
+            activeMinDaughterBright;
+        const bool futureWindowNearDimBypass =
+            candIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->bioSeparationSoftRescued &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >=
+                static_cast<int>(probConfig.split_future_near_dim_bypass_min_future_both) &&
+            bridgeProposal->windowMissingDaughterCount <=
+                static_cast<int>(probConfig.split_future_near_dim_bypass_max_missing_daughters) &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                probConfig.split_future_near_dim_bypass_min_brightness &&
+            bridgeProposal->parentDistanceBalance >=
+                probConfig.split_future_near_dim_bypass_min_parent_balance &&
+            std::min(d1LocalBright, d2LocalBright) >= dimNearMissFloor &&
+            !bothDaughtersBright;
 
         // Quick valley pre-filter: project the parent's pixel cloud onto
         // the d1→d2 axis and measure gap vs max(edges). Same logic as the
@@ -4641,7 +4784,9 @@ CostCallbackPair Frame::trySplitCellPhased(
             candIsPcaBridgeOnly && !probConfig.pca_bridge_require_valley;
         const bool lumenPrefilterValleyIsSoft =
             candIsCellLumenPrior && lumenUseDedicatedCostGate && lumenSoftGateEnabled;
-        const bool candPassesPreFilter = (bothDaughtersBright || futureWindowDimBypass) &&
+        const bool candPassesPreFilter = (bothDaughtersBright ||
+                                          futureWindowDimBypass  ||
+                                          futureWindowNearDimBypass) &&
                                          (bypassPcaBridgeValley ||
                                           lumenPrefilterValleyIsSoft ||
                                           candValleyFromBright < valleyLimit);
@@ -4655,6 +4800,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " valley=" << candValleyFromBright
                       << (bothDaughtersBright ? "" : " EDGE_DIM")
                       << (futureWindowDimBypass ? " FUTURE_DIM_BYPASS" : "")
+                      << (futureWindowNearDimBypass ? " FUTURE_NEAR_DIM_BYPASS" : "")
                       << (bypassPcaBridgeValley ? " VALLEY_BYPASS" : "")
                       << (candValleyFromBright >= valleyLimit && !lumenPrefilterValleyIsSoft && !bypassPcaBridgeValley
                               ? " NO_VALLEY" : "")
@@ -4663,8 +4809,22 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << std::endl;
         }
 
-        if (candPassesPreFilter && candTotal < bestTotal) {
+        const double futureRodTipPrimarySelectionBonus =
+            futureSupportedRodTipPrimaryCandidate
+                ? std::max(static_cast<double>(
+                               probConfig
+                                   .split_future_rod_tip_primary_selection_bonus_abs),
+                           static_cast<double>(
+                               probConfig
+                                   .split_future_rod_tip_primary_selection_bonus_fraction) *
+                               baselineImageCost)
+                : 0.0;
+        const double candSelectionScore =
+            candTotal - futureRodTipPrimarySelectionBonus;
+
+        if (candPassesPreFilter && candSelectionScore < bestSelectionScore) {
             bestTotal = candTotal;
+            bestSelectionScore = candSelectionScore;
             bestIdx = static_cast<int>(ci);
             // Move instead of copy — cells, _synthFrame, _currentCostPerSlice
             // are immediately overwritten from savedCells/savedSynth/savedPerSlice
@@ -4676,6 +4836,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             bestSeedD1 = cand.d1Pos;
             bestSeedD2 = cand.d2Pos;
             bestLabel = cand.label;
+            bestFutureSupportedRodTipPrimary =
+                futureSupportedRodTipPrimaryCandidate;
         }
 
         // Revert to pre-split state for the next candidate.
@@ -4779,13 +4941,38 @@ CostCallbackPair Frame::trySplitCellPhased(
         //     past ~1.1× built due to immature sibling-Voronoi boundary
         //     absorbing neighbor/halo pixels during refit.
         if (daughterRefitIters > 0) {
+            const bool winningCleanFutureSupportedPcaBridge =
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->gapStartBin >= 0 &&
+                bridgeProposal->gapEndBin >= 0 &&
+                probConfig.pca_bridge_future_window_enabled &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(1, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount <=
+                    std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+                bridgeProposal->windowParentPersists <=
+                    std::max(0, probConfig.pca_bridge_future_window_max_parent_persists);
+            const float futureHalfspaceSnapLimit = std::max(
+                probConfig.pca_bridge_future_window_match_distance *
+                    probConfig.split_future_halfspace_snap_distance_scale,
+                probConfig.pca_bridge_future_window_match_distance +
+                    probConfig.pca_bridge_future_window_match_distance_per_frame);
+            const bool winningStrongCleanFutureHalfspace =
+                winningCleanFutureSupportedPcaBridge &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_clean_future_halfspace_min_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <= futureHalfspaceSnapLimit;
             const bool winningFutureBackedBridgeRescue =
                 bridgeProposalOnly &&
                 bestLabel == "bridge_primary" &&
                 bridgeProposal != nullptr &&
-                bridgeProposal->futureWindowSplitRescue &&
-                bridgeProposal->parentShapeElongation >=
-                    probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue;
+                ((bridgeProposal->futureWindowSplitRescue &&
+                  bridgeProposal->parentShapeElongation >=
+                      probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue) ||
+                 winningStrongCleanFutureHalfspace);
             const float minFrac = std::max(0.0f, std::min(1.0f,
                 probConfig.split_daughter_refit_min_radius_fraction));
             const float maxFrac = std::max(1.0f,
@@ -4795,6 +4982,347 @@ CostCallbackPair Frame::trySplitCellPhased(
                 (bestLabel == "bridge_primary" || bestLabel == "bridge_tip_alt") &&
                 bridgeProposal != nullptr &&
                 bridgeProposal->daughterSphereRadius > 0.0f;
+            const bool winningFutureSupportedRodTipClampBypass =
+                bestUsesSphereOverride &&
+                bestLabel == "bridge_primary" &&
+                probConfig.pca_bridge_future_window_enabled &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 1 &&
+                bridgeProposal->windowMissingDaughterCount <= 2 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    std::max(0.0f,
+                             probConfig
+                                 .pca_bridge_future_window_rod_tip_balance_min_brightness);
+            const bool lockFutureRodTipDaughterPosition =
+                winningFutureSupportedRodTipClampBypass &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback;
+            const float cleanFuturePcaBridgePositionLockSnapLimit =
+                std::max(
+                    futureHalfspaceSnapLimit,
+                    std::max(
+                        probConfig.split_clean_future_position_lock_min_snap_scale,
+                        std::max(
+                            0.0f,
+                            probConfig
+                                .pca_bridge_future_window_pca_snap_max_radius_scale)) *
+                        std::max(1.0f, srcMaxR));
+            const bool lockCleanFuturePcaBridgeDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                winningCleanFutureSupportedPcaBridge &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_immediate_pca_continuation_lock_min_brightness &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.split_immediate_pca_continuation_min_parent_shape &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_immediate_pca_continuation_min_parent_balance &&
+                bridgeProposal->parentDistanceBalance <=
+                    probConfig.split_immediate_pca_continuation_max_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    cleanFuturePcaBridgePositionLockSnapLimit;
+            const bool lockTwoFrameAlignedFuturePcaBridgeDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                winningCleanFutureSupportedPcaBridge &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_one_frame_aligned_pca_continuation_lock_min_brightness &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(cleanFuturePcaBridgePositionLockSnapLimit,
+                             probConfig
+                                 .split_one_frame_aligned_pca_continuation_snap_scale *
+                                 std::max(1.0f, srcMaxR));
+            const bool lockOneFrameAlignedFuturePcaBridgeDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->gapStartBin >= 0 &&
+                bridgeProposal->gapEndBin >= 0 &&
+                probConfig.pca_bridge_future_window_enabled &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 1 &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_one_frame_aligned_pca_continuation_lock_min_brightness &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance &&
+                bridgeProposal->parentDistanceBalance <=
+                    probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(cleanFuturePcaBridgePositionLockSnapLimit,
+                             probConfig
+                                 .split_one_frame_aligned_pca_continuation_snap_scale *
+                                 std::max(1.0f, srcMaxR));
+            const bool lockExactFutureCenterBridgeDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                probConfig.pca_bridge_future_window_enabled &&
+                bridgeProposal->centerSnapApplied &&
+                bridgeProposal->immediateFutureCenterBacked &&
+                !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_exact_future_center_bridge_lock_min_brightness &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.split_exact_future_center_bridge_min_parent_shape &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_exact_future_center_bridge_min_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(probConfig.split_exact_future_center_bridge_snap_abs,
+                             probConfig.split_exact_future_center_bridge_snap_scale *
+                                 std::max(1.0f, srcMaxR));
+            const bool lockCurrentCleanPcaBridgeDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->gapStartBin >= 0 &&
+                bridgeProposal->gapEndBin >= 0 &&
+                bridgeProposal->centerSnapApplied &&
+                !bridgeProposal->immediateFutureCenterBacked &&
+                !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 1 &&
+                bridgeProposal->windowMissingDaughterCount <=
+                    std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_current_locked_bridge_lock_min_brightness &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.split_current_locked_bridge_min_parent_shape &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_current_locked_bridge_min_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(cleanFuturePcaBridgePositionLockSnapLimit,
+                             probConfig.split_current_locked_bridge_snap_scale *
+                                 std::max(1.0f, srcMaxR));
+            const float generalCleanFuturePcaBridgeMinBrightness = std::min(
+                probConfig.split_current_locked_bridge_lock_min_brightness,
+                std::min(
+                    probConfig.split_one_frame_aligned_pca_continuation_lock_min_brightness,
+                    probConfig.split_exact_future_center_bridge_lock_min_brightness));
+            const float generalCleanFuturePcaBridgeMinParentShape = std::min(
+                probConfig.split_current_locked_bridge_min_parent_shape,
+                std::min(
+                    probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape,
+                    probConfig.split_exact_future_center_bridge_min_parent_shape));
+            const float generalCleanFuturePcaBridgeMinParentBalance = std::min(
+                probConfig.split_current_locked_bridge_min_parent_balance,
+                std::min(
+                    probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance,
+                    probConfig.split_exact_future_center_bridge_min_parent_balance));
+            const float generalCleanFuturePcaBridgeMaxParentBalance = std::max(
+                probConfig.split_current_locked_bridge_max_parent_balance,
+                probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance);
+            const bool lockGeneralCleanFuturePcaBridgeDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                probConfig.pca_bridge_future_window_enabled &&
+                bridgeProposal->centerSnapApplied &&
+                (bridgeProposal->immediateFutureCenterBacked ||
+                 bridgeProposal->centerSnapUsedAlignedPairFallback) &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 1 &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    generalCleanFuturePcaBridgeMinBrightness &&
+                bridgeProposal->parentShapeElongation >=
+                    generalCleanFuturePcaBridgeMinParentShape &&
+                bridgeProposal->parentDistanceBalance >=
+                    generalCleanFuturePcaBridgeMinParentBalance &&
+                bridgeProposal->parentDistanceBalance <=
+                    generalCleanFuturePcaBridgeMaxParentBalance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    cleanFuturePcaBridgePositionLockSnapLimit;
+            const bool dimButGeometricallyCleanSignalCenter =
+                bridgeProposal != nullptr &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 2 &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_dim_exact_future_signal_min_brightness &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_dim_exact_future_signal_min_parent_balance &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    probConfig.split_dim_exact_future_signal_snap_epsilon &&
+                bridgeProposal->bioSeparationRequired >
+                    probConfig.split_dim_exact_future_signal_snap_epsilon &&
+                bridgeProposal->bioSeparationObserved >=
+                    bridgeProposal->bioSeparationRequired;
+            const bool lockCleanSignalCenterDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->gapStartBin <=
+                    static_cast<int>(probConfig.split_clean_signal_center_gap_bin_max) &&
+                bridgeProposal->gapEndBin <=
+                    static_cast<int>(probConfig.split_clean_signal_center_gap_bin_max) &&
+                probConfig.pca_bridge_future_window_enabled &&
+                !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(1, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount <=
+                    std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+                bridgeProposal->windowParentPersists == 0 &&
+                (bridgeProposal->windowBestMatchedMinBrightness >=
+                     probConfig.split_clean_signal_center_min_brightness ||
+                 dimButGeometricallyCleanSignalCenter) &&
+                bridgeProposal->parentShapeElongation >=
+                    std::max(1.0f, probConfig.signal_center_split_min_parent_elongation);
+            const bool lockExactSignalCenterDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                probConfig.signal_center_refit_position_lock_enabled &&
+                bridgeProposal->signalCenterScore >= 0.0f &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(0.0f,
+                             probConfig.signal_center_refit_position_lock_max_snap_distance) &&
+                bridgeProposal->parentShapeElongation >=
+                    std::max(1.0f, probConfig.signal_center_split_min_parent_elongation);
+            const bool lockBridgeAxisPlaceDaughterPosition =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_axis_place" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->daughterSphereRadius > 0.0f;
+            const bool lockSplitDaughterRefitPosition =
+                lockFutureRodTipDaughterPosition ||
+                lockCleanFuturePcaBridgeDaughterPosition ||
+                lockTwoFrameAlignedFuturePcaBridgeDaughterPosition ||
+                lockOneFrameAlignedFuturePcaBridgeDaughterPosition ||
+                lockExactFutureCenterBridgeDaughterPosition ||
+                lockCurrentCleanPcaBridgeDaughterPosition ||
+                lockGeneralCleanFuturePcaBridgeDaughterPosition ||
+                lockCleanSignalCenterDaughterPosition ||
+                lockExactSignalCenterDaughterPosition ||
+                lockBridgeAxisPlaceDaughterPosition;
+            const char *splitDaughterRefitLockReason = "none";
+            if (lockFutureRodTipDaughterPosition) {
+                splitDaughterRefitLockReason = "future_supported_rod_tip";
+            } else if (lockCleanFuturePcaBridgeDaughterPosition) {
+                splitDaughterRefitLockReason = "clean_future_pca_bridge";
+            } else if (lockTwoFrameAlignedFuturePcaBridgeDaughterPosition) {
+                splitDaughterRefitLockReason =
+                    "two_frame_aligned_future_pca_bridge";
+            } else if (lockOneFrameAlignedFuturePcaBridgeDaughterPosition) {
+                splitDaughterRefitLockReason =
+                    "one_frame_aligned_future_pca_bridge";
+            } else if (lockExactFutureCenterBridgeDaughterPosition) {
+                splitDaughterRefitLockReason = "clean_future_center_bridge";
+            } else if (lockCurrentCleanPcaBridgeDaughterPosition) {
+                splitDaughterRefitLockReason = "clean_current_pca_bridge";
+            } else if (lockGeneralCleanFuturePcaBridgeDaughterPosition) {
+                splitDaughterRefitLockReason =
+                    "general_clean_future_pca_bridge";
+            } else if (lockCleanSignalCenterDaughterPosition) {
+                splitDaughterRefitLockReason = "clean_signal_center_split";
+            } else if (lockExactSignalCenterDaughterPosition) {
+                splitDaughterRefitLockReason = "exact_signal_center_split";
+            } else if (lockBridgeAxisPlaceDaughterPosition) {
+                splitDaughterRefitLockReason = "bridge_axis_place_seed";
+            }
+            const bool allowFutureBridgeDaughterPcaPositionUpdate =
+                simulationConfig.celluniverse2_enabled &&
+                probConfig
+                    .split_daughter_refit_allow_future_bridge_position_update &&
+                winningCleanFutureSupportedPcaBridge &&
+                (lockCleanFuturePcaBridgeDaughterPosition ||
+                 lockTwoFrameAlignedFuturePcaBridgeDaughterPosition ||
+                 lockOneFrameAlignedFuturePcaBridgeDaughterPosition) &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(2,
+                             probConfig
+                                 .pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0;
+            bool allowFutureRodTipDaughterPcaPositionUpdate = false;
+            bool allowFutureRodTipD1PcaPositionUpdate = false;
+            bool allowFutureRodTipD2PcaPositionUpdate = false;
+            float futureRodTipUnlockD1Mean = 0.0f;
+            float futureRodTipUnlockD2Mean = 0.0f;
+            float futureRodTipUnlockMinMean = 0.0f;
+            float futureRodTipUnlockThreshold = 0.0f;
+            if (simulationConfig.celluniverse2_enabled &&
+                probConfig
+                    .split_daughter_refit_allow_future_rod_tip_position_update &&
+                lockFutureRodTipDaughterPosition &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 2 &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                !_realFrame.empty()) {
+                const auto parentBrightnessStats =
+                    parent.measureBrightnessStats(_realFrame);
+                const auto d1BrightnessStats =
+                    cells[d1IdxRefine].measureBrightnessStats(_realFrame);
+                const auto d2BrightnessStats =
+                    cells[d2IdxRefine].measureBrightnessStats(_realFrame);
+                const float localBackground = _backgroundValue;
+                const float parentSignal =
+                    std::max(0.0f, parentBrightnessStats.first - localBackground);
+                const float adaptiveSignalThreshold = std::max(
+                    std::max(0.0f,
+                             probConfig
+                                 .bio_min_daughter_mean_brightness_background_margin),
+                    std::max(0.0f,
+                             probConfig
+                                 .bio_min_daughter_mean_brightness_parent_fraction) *
+                        parentSignal);
+                futureRodTipUnlockThreshold =
+                    std::max(localBackground + adaptiveSignalThreshold,
+                             std::max(0.0f,
+                                      probConfig
+                                          .bio_min_daughter_mean_brightness_absolute));
+                futureRodTipUnlockD1Mean = d1BrightnessStats.first;
+                futureRodTipUnlockD2Mean = d2BrightnessStats.first;
+                futureRodTipUnlockMinMean =
+                    std::min(futureRodTipUnlockD1Mean,
+                             futureRodTipUnlockD2Mean);
+                allowFutureRodTipD1PcaPositionUpdate =
+                    futureRodTipUnlockD1Mean < futureRodTipUnlockThreshold;
+                allowFutureRodTipD2PcaPositionUpdate =
+                    futureRodTipUnlockD2Mean < futureRodTipUnlockThreshold;
+                allowFutureRodTipDaughterPcaPositionUpdate =
+                    allowFutureRodTipD1PcaPositionUpdate ||
+                    allowFutureRodTipD2PcaPositionUpdate;
+            }
             float dBuiltA = volumeScale * srcMajor;
             float dBuiltB = volumeScale * srcB;
             float dBuiltC = volumeScale * srcMinor;
@@ -4833,6 +5361,17 @@ CostCallbackPair Frame::trySplitCellPhased(
             };
 
             auto refitOne = [&](size_t idx, const char *label) {
+                const bool allowFutureRodTipThisDaughter =
+                    (idx == d1IdxRefine && allowFutureRodTipD1PcaPositionUpdate) ||
+                    (idx == d2IdxRefine && allowFutureRodTipD2PcaPositionUpdate);
+                const float futureRodTipUnlockThisMean =
+                    (idx == d1IdxRefine)
+                        ? futureRodTipUnlockD1Mean
+                        : ((idx == d2IdxRefine) ? futureRodTipUnlockD2Mean : 0.0f);
+                const bool effectiveSplitDaughterRefitPositionLock =
+                    lockSplitDaughterRefitPosition &&
+                    !allowFutureBridgeDaughterPcaPositionUpdate &&
+                    !allowFutureRodTipThisDaughter;
                 const float preA = cells[idx].getARadius();
                 const float preB = cells[idx].getBRadius();
                 const float preC = cells[idx].getCRadius();
@@ -4841,6 +5380,45 @@ CostCallbackPair Frame::trySplitCellPhased(
                                          cells[idx].getZ());
                 ClaimSet others = buildRefitClaimSet(idx);
                 bool flattenedPlaneRotationApplied = false;
+                if (effectiveSplitDaughterRefitPositionLock) {
+                    std::cout << "  [Split Daughter Refit Position Lock] "
+                              << parentName
+                              << " " << label
+                              << " reason=" << splitDaughterRefitLockReason
+                              << " prePos=(" << prePos.x << ","
+                              << prePos.y << "," << prePos.z << ")"
+                              << std::endl;
+                } else if (lockSplitDaughterRefitPosition) {
+                    std::cout << "  [Split Daughter Refit Position Update Enabled] "
+                              << parentName
+                              << " " << label
+                              << " originalLockReason="
+                              << splitDaughterRefitLockReason
+                              << " rodTipDimUnlock="
+                              << (allowFutureRodTipThisDaughter ? 1 : 0)
+                              << " rodTipMean="
+                              << futureRodTipUnlockThisMean
+                              << " rodTipMinMean="
+                              << futureRodTipUnlockMinMean
+                              << " rodTipThreshold="
+                              << futureRodTipUnlockThreshold
+                              << " futureBoth="
+                              << (bridgeProposal
+                                      ? bridgeProposal->windowBothDaughtersSupported
+                                      : 0)
+                              << " futureBrightness="
+                              << (bridgeProposal
+                                      ? bridgeProposal
+                                            ->windowBestMatchedMinBrightness
+                                      : 0.0f)
+                              << " parentBalance="
+                              << (bridgeProposal
+                                      ? bridgeProposal->parentDistanceBalance
+                                      : 0.0f)
+                              << " prePos=(" << prePos.x << ","
+                              << prePos.y << "," << prePos.z << ")"
+                              << std::endl;
+                }
                 if (simulationConfig.celluniverse2_enabled &&
                     probConfig.split_daughter_flattened_plane_rotation_enabled) {
                     const float builtMax = std::max({dBuiltA, dBuiltB, dBuiltC});
@@ -5066,7 +5644,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                     Ellipsoid::cellConfig.pcaShapeMaskScale,
                     Ellipsoid::cellConfig.pcaShapeConvergeRadius,
                     Ellipsoid::cellConfig.pcaShapeConvergeAngleDeg,
-                    /*updatePosition=*/true,
+                    /*updatePosition=*/!effectiveSplitDaughterRefitPositionLock,
                     Ellipsoid::cellConfig.pcaShapeMaxPosShiftFraction,
                     dBuiltA, dBuiltB, dBuiltC);
                 const float fitA = std::clamp(cells[idx].getARadius(), floorA, ceilA);
@@ -5088,7 +5666,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                         Ellipsoid::cellConfig.pcaShapeMaskScale,
                         Ellipsoid::cellConfig.pcaShapeConvergeRadius,
                         Ellipsoid::cellConfig.pcaShapeConvergeAngleDeg,
-                        /*updatePosition=*/true,
+                        /*updatePosition=*/!effectiveSplitDaughterRefitPositionLock,
                         Ellipsoid::cellConfig.pcaShapeMaxPosShiftFraction,
                         dBuiltA, dBuiltB, dBuiltC);
                     const float extraFitA =
@@ -5140,6 +5718,74 @@ CostCallbackPair Frame::trySplitCellPhased(
             refitOne(d2IdxRefine, "d2");
 
             if (simulationConfig.celluniverse2_enabled &&
+                winningFutureSupportedRodTipClampBypass) {
+                const cv::Point3f refitD1(cells[d1IdxRefine].getX(),
+                                          cells[d1IdxRefine].getY(),
+                                          cells[d1IdxRefine].getZ());
+                const cv::Point3f refitD2(cells[d2IdxRefine].getX(),
+                                          cells[d2IdxRefine].getY(),
+                                          cells[d2IdxRefine].getZ());
+                const float seedDistance =
+                    static_cast<float>(cv::norm(preRefineD2 - preRefineD1));
+                const float refitDistance =
+                    static_cast<float>(cv::norm(refitD2 - refitD1));
+                const float configuredMinDistance =
+                    std::max(0.0f,
+                             probConfig
+                                 .bio_min_daughter_separation_parent_fraction) *
+                    std::max(1.0f, srcMaxR);
+                const float targetDistance =
+                    std::min(seedDistance, configuredMinDistance);
+                if (seedDistance > 1e-3f &&
+                    targetDistance > 1e-3f &&
+                    refitDistance < targetDistance) {
+                    float loT = 0.0f;
+                    float hiT = 1.0f;
+                    for (int it = 0; it < 24; ++it) {
+                        const float midT = 0.5f * (loT + hiT);
+                        const cv::Point3f candD1 =
+                            preRefineD1 + (refitD1 - preRefineD1) * midT;
+                        const cv::Point3f candD2 =
+                            preRefineD2 + (refitD2 - preRefineD2) * midT;
+                        const float candDistance =
+                            static_cast<float>(cv::norm(candD2 - candD1));
+                        if (candDistance >= targetDistance) {
+                            loT = midT;
+                        } else {
+                            hiT = midT;
+                        }
+                    }
+                    const cv::Point3f clampedD1 =
+                        preRefineD1 + (refitD1 - preRefineD1) * loT;
+                    const cv::Point3f clampedD2 =
+                        preRefineD2 + (refitD2 - preRefineD2) * loT;
+                    cells[d1IdxRefine].setPosition(clampedD1.x,
+                                                   clampedD1.y,
+                                                   clampedD1.z);
+                    cells[d2IdxRefine].setPosition(clampedD2.x,
+                                                   clampedD2.y,
+                                                   clampedD2.z);
+                    std::cout << "  [Split Daughter RodTip Distance Clamp] "
+                              << parentName
+                              << " seedDistance=" << seedDistance
+                              << " refitDistance=" << refitDistance
+                              << " targetDistance=" << targetDistance
+                              << " configuredMinDistance="
+                              << configuredMinDistance
+                              << " driftScale=" << loT
+                              << " d1From=(" << refitD1.x << ","
+                              << refitD1.y << "," << refitD1.z << ")"
+                              << " d1To=(" << clampedD1.x << ","
+                              << clampedD1.y << "," << clampedD1.z << ")"
+                              << " d2From=(" << refitD2.x << ","
+                              << refitD2.y << "," << refitD2.z << ")"
+                              << " d2To=(" << clampedD2.x << ","
+                              << clampedD2.y << "," << clampedD2.z << ")"
+                              << std::endl;
+                }
+            }
+
+            if (simulationConfig.celluniverse2_enabled &&
                 probConfig.split_daughter_refit_keep_seed_halfspace_enabled) {
                 cv::Point3f seedAxis = preRefineD2 - preRefineD1;
                 const float seedDistance = static_cast<float>(cv::norm(seedAxis));
@@ -5147,12 +5793,39 @@ CostCallbackPair Frame::trySplitCellPhased(
                     seedAxis *= (1.0f / seedDistance);
                     const cv::Point3f seedMidpoint =
                         0.5f * (preRefineD1 + preRefineD2);
+                    const bool useFutureRodTipHalfspaceClamp =
+                        winningFutureSupportedRodTipClampBypass &&
+                        probConfig.split_future_rod_tip_refit_halfspace_min_fraction > 0.0f;
+                    const bool useDelayedFutureHalfspaceClamp =
+                        bridgeProposalOnly &&
+                        bestLabel == "bridge_primary" &&
+                        bridgeProposal != nullptr &&
+                        probConfig.split_delayed_future_refit_halfspace_min_fraction > 0.0f &&
+                        bridgeProposal->windowImmediateBothDaughtersSupported == 0 &&
+                        bridgeProposal->windowBothDaughtersSupported >=
+                            static_cast<int>(probConfig.split_delayed_future_pca_bridge_min_future_both) &&
+                        bridgeProposal->windowMissingDaughterCount <=
+                            static_cast<int>(probConfig.split_delayed_future_pca_bridge_max_missing_daughters) &&
+                        bridgeProposal->windowParentPersists == 0 &&
+                        bridgeProposal->windowBestMatchedMinBrightness >=
+                            probConfig.split_delayed_future_pca_bridge_min_brightness &&
+                        bridgeProposal->parentShapeElongation >=
+                            probConfig.split_delayed_future_pca_bridge_min_parent_shape &&
+                        bridgeProposal->parentDistanceBalance >=
+                            probConfig.split_delayed_future_pca_bridge_min_parent_balance;
                     const float requestedHalfspaceMinFraction =
-                        winningFutureBackedBridgeRescue
-                            ? std::max(
-                                  probConfig.split_daughter_refit_halfspace_min_fraction,
-                                  probConfig.pca_bridge_future_window_refit_halfspace_min_fraction)
-                            : probConfig.split_daughter_refit_halfspace_min_fraction;
+                        useFutureRodTipHalfspaceClamp
+                            ? probConfig.split_future_rod_tip_refit_halfspace_min_fraction
+                        : (useDelayedFutureHalfspaceClamp
+                               ? std::max(
+                                     probConfig.split_daughter_refit_halfspace_min_fraction,
+                                     probConfig
+                                         .split_delayed_future_refit_halfspace_min_fraction)
+                        : (winningFutureBackedBridgeRescue
+                               ? std::max(
+                                     probConfig.split_daughter_refit_halfspace_min_fraction,
+                                     probConfig.pca_bridge_future_window_refit_halfspace_min_fraction)
+                               : probConfig.split_daughter_refit_halfspace_min_fraction));
                     const float minFraction = std::clamp(
                         requestedHalfspaceMinFraction,
                         0.0f,
@@ -5188,6 +5861,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                                   << " minFraction=" << minFraction
                                   << " futureBackedBridge="
                                   << (winningFutureBackedBridgeRescue ? 1 : 0)
+                                  << " delayedFutureBridge="
+                                  << (useDelayedFutureHalfspaceClamp ? 1 : 0)
                                   << " coord=" << coord
                                   << " clampedCoord=" << clampedCoord
                                   << " from=(" << pos.x << "," << pos.y
@@ -5198,8 +5873,45 @@ CostCallbackPair Frame::trySplitCellPhased(
                                   << std::endl;
                     };
 
-                    keepOnSeedSide(d1IdxRefine, -1.0f, "d1");
-                    keepOnSeedSide(d2IdxRefine, 1.0f, "d2");
+                    if (winningFutureSupportedRodTipClampBypass &&
+                        !useFutureRodTipHalfspaceClamp) {
+                        std::cout << "  [Split Daughter Halfspace Clamp Bypass] "
+                                  << parentName
+                                  << " reason=future_supported_rod_tip"
+                                  << " seedDistance=" << seedDistance
+                                  << " windowBoth="
+                                  << bridgeProposal->windowBothDaughtersSupported
+                                  << " futureImmediate="
+                                  << bridgeProposal->windowImmediateBothDaughtersSupported
+                                  << " futureMissing="
+                                  << bridgeProposal->windowMissingDaughterCount
+                                  << " parentPersists="
+                                  << bridgeProposal->windowParentPersists
+                                  << " futureBestMinBrightness="
+                                  << bridgeProposal->windowBestMatchedMinBrightness
+                                  << std::endl;
+                    } else {
+                        if (useFutureRodTipHalfspaceClamp) {
+                            std::cout << "  [Split Daughter Halfspace Clamp Mode] "
+                                      << parentName
+                                      << " reason=future_supported_rod_tip"
+                                      << " minFraction=" << minFraction
+                                      << " seedDistance=" << seedDistance
+                                      << " futureBoth="
+                                      << bridgeProposal->windowBothDaughtersSupported
+                                      << " futureImmediate="
+                                      << bridgeProposal->windowImmediateBothDaughtersSupported
+                                      << " futureMissing="
+                                      << bridgeProposal->windowMissingDaughterCount
+                                      << " parentPersists="
+                                      << bridgeProposal->windowParentPersists
+                                      << " futureBestMinBrightness="
+                                      << bridgeProposal->windowBestMatchedMinBrightness
+                                      << std::endl;
+                        }
+                        keepOnSeedSide(d1IdxRefine, -1.0f, "d1");
+                        keepOnSeedSide(d2IdxRefine, 1.0f, "d2");
+                    }
                 }
             }
 
@@ -5378,10 +6090,53 @@ CostCallbackPair Frame::trySplitCellPhased(
         bestIsDeterministicSingleProposal &&
         bridgeProposal->gapStartBin >= 0 &&
         bridgeProposal->gapEndBin >= 0;
+    const bool bestHasCleanFutureBridgeSupport =
+        bestIsPcaBridgeOnly &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(1, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists <=
+            std::max(0, probConfig.pca_bridge_future_window_max_parent_persists);
     const bool bestIsSignalCenterProposal =
         bestIsDeterministicSingleProposal &&
         bridgeProposal->gapStartBin <= -4 &&
         bridgeProposal->gapEndBin <= -4;
+    const bool bestHasCleanFutureSignalSupport =
+        bestIsSignalCenterProposal &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(
+                0.0f,
+                probConfig
+                    .pca_bridge_future_window_geometry_rescue_min_brightness) &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(
+                std::max(0.0f, probConfig.pca_bridge_future_window_match_distance),
+                probConfig.split_clean_pca_bridge_snap_base_scale * std::max(1.0f, srcMaxR));
+    const bool bestHasCleanCurrentBridgeSupport =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal->centerSnapApplied &&
+        !bridgeProposal->immediateFutureCenterBacked &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        (bridgeProposal->bioSeparationSoftRescued ||
+         (bridgeProposal->bioSeparationRequired > 0.0f &&
+          bridgeProposal->bioSeparationObserved >=
+              bridgeProposal->bioSeparationRequired)) &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_long_raw_pca_bridge_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(
+                std::max(0.0f, probConfig.pca_bridge_future_window_match_distance),
+                0.75f * std::max(1.0f, srcMaxR));
+    const bool bestHasCleanFutureSplitSupport =
+        bestHasCleanFutureBridgeSupport || bestHasCleanFutureSignalSupport;
     const bool bestIsCellLumenPrepassFallback =
         bestIsCellLumenPrior && lumenProposal != nullptr &&
         lumenProposal->gapStartBin <= -2 && lumenProposal->gapEndBin <= -2;
@@ -5471,6 +6226,18 @@ CostCallbackPair Frame::trySplitCellPhased(
     const float finalAxisLen = static_cast<float>(cv::norm(bestD2Pos - bestD1Pos));
     const float parentMaxRadiusForSoftGeometry =
         std::max(1.0f, std::max({srcMajor, srcB, srcMinor}));
+    const bool bestIsFutureSupportedBridgeAxisPlace =
+        bridgeProposalOnly &&
+        bestLabel == "bridge_axis_place" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0;
+
     if (simulationConfig.celluniverse2_enabled &&
         probConfig.split_soft_geometry_gate_enabled) {
         const float softDriftFraction =
@@ -5501,11 +6268,28 @@ CostCallbackPair Frame::trySplitCellPhased(
                 static_cast<double>(
                     std::max(0.0f, finalAxisLen - softFinalSepLimit)) /
                 std::max(1.0, static_cast<double>(softFinalSepLimit));
-            addSplitSoftGeometryPenalty(
-                "daughter_final_separation",
-                normalizedExcess,
-                static_cast<double>(
-                    std::max(0.0f, probConfig.split_soft_geometry_penalty_fraction)));
+            if (bestIsFutureSupportedBridgeAxisPlace && normalizedExcess > 0.0) {
+                std::cout << "[Split Soft Gate Waived] " << parentName
+                          << " reason=bridge_axis_place_final_separation"
+                          << " normalizedExcess=" << normalizedExcess
+                          << " finalAxisLen=" << finalAxisLen
+                          << " softFinalSepLimit=" << softFinalSepLimit
+                          << " windowBoth="
+                          << bridgeProposal->windowBothDaughtersSupported
+                          << " futureImmediate="
+                          << bridgeProposal->windowImmediateBothDaughtersSupported
+                          << " futureMissing="
+                          << bridgeProposal->windowMissingDaughterCount
+                          << " parentPersists="
+                          << bridgeProposal->windowParentPersists
+                          << std::endl;
+            } else {
+                addSplitSoftGeometryPenalty(
+                    "daughter_final_separation",
+                    normalizedExcess,
+                    static_cast<double>(
+                        std::max(0.0f, probConfig.split_soft_geometry_penalty_fraction)));
+            }
         }
     }
     const float seedDx = bestSeedD2.x - bestSeedD1.x;
@@ -6117,22 +6901,47 @@ CostCallbackPair Frame::trySplitCellPhased(
                     std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
                 bridgeProposal->windowParentPersists <=
                     std::max(0, probConfig.pca_bridge_future_window_max_parent_persists);
+            const bool futureBackedBridgeAxisPlaceDaughterOverlap =
+                simulationConfig.celluniverse2_enabled &&
+                bestIsFutureSupportedBridgeAxisPlace &&
+                daughterOverlap <= pcaBridgeFutureOverlapMax;
+            const bool futureBackedRodTipDaughterOverlap =
+                simulationConfig.celluniverse2_enabled &&
+                bestIsDeterministicSingleProposal &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->daughterSphereRadius > 0.0f &&
+                daughterOverlap <= pcaBridgeFutureOverlapMax &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(1, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount <=
+                    std::max(0, probConfig.pca_bridge_future_window_max_missing_daughters) &&
+                bridgeProposal->windowParentPersists <=
+                    std::max(0, probConfig.pca_bridge_future_window_max_parent_persists);
             const bool impossibleOverlap =
                 (!useCellLumenSoftGate &&
                  !softPcaBridgeDaughterOverlap &&
                  !immediateFutureBackedPcaBridgeDaughterOverlap &&
-                 !futureBackedPcaBridgeDaughterOverlap) ||
+                 !futureBackedPcaBridgeDaughterOverlap &&
+                 !futureBackedBridgeAxisPlaceDaughterOverlap &&
+                 !futureBackedRodTipDaughterOverlap) ||
                 daughterOverlap > std::clamp(lumenHardMaxDaughterOverlapFraction, 0.0f, 1.0f);
             if (!impossibleOverlap) {
                 if (softPcaBridgeDaughterOverlap ||
                     immediateFutureBackedPcaBridgeDaughterOverlap ||
-                    futureBackedPcaBridgeDaughterOverlap) {
+                    futureBackedPcaBridgeDaughterOverlap ||
+                    futureBackedBridgeAxisPlaceDaughterOverlap ||
+                    futureBackedRodTipDaughterOverlap) {
                     std::cout << "[Split Soft Gate] " << parentName
                               << " reason="
-                              << ((futureBackedPcaBridgeDaughterOverlap ||
-                                   immediateFutureBackedPcaBridgeDaughterOverlap)
+                              << ((futureBackedRodTipDaughterOverlap)
+                                      ? "rod_tip_future_window_overlap"
+                                      : ((futureBackedBridgeAxisPlaceDaughterOverlap)
+                                      ? "bridge_axis_place_future_window_overlap"
+                                      : ((futureBackedPcaBridgeDaughterOverlap ||
+                                          immediateFutureBackedPcaBridgeDaughterOverlap)
                                       ? "pca_bridge_future_window_overlap"
-                                      : "pca_bridge_daughter_overlap")
+                                      : "pca_bridge_daughter_overlap")))
                               << " d1InD2Overlap=" << d1InD2Overlap
                               << " d2InD1Overlap=" << d2InD1Overlap
                               << " daughterOverlap=" << daughterOverlap
@@ -6590,11 +7399,108 @@ CostCallbackPair Frame::trySplitCellPhased(
                 (useCellLumenGateParams && lumenBridgeMaxValleyRatio >= 0.0f)
                     ? lumenBridgeMaxValleyRatio
                     : probConfig.bio_bridge_max_valley_ratio;
+            const bool bridgeFlat = valleyFromBright > valleyLimit;
+            const bool denseFlatFutureRescue =
+                bridgeProposalOnly &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->windowBothDaughtersSupported >= 2 &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_dense_flat_future_min_parent_balance &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_dense_flat_future_min_brightness &&
+                gapDensity < probConfig.split_dense_flat_future_max_gap_density;
+            const bool denseFlatRodTipFutureRescue =
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->daughterSphereRadius > 0.0f &&
+                bridgeProposal->immediateFutureCenterBacked &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= 1 &&
+                bridgeProposal->windowMissingDaughterCount <= 2 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.split_dense_flat_rod_tip_min_brightness &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.split_dense_flat_rod_tip_min_parent_balance &&
+                valleyFromBright <=
+                    probConfig.split_dense_flat_rod_tip_max_valley_from_bright;
+            const bool denseFlatDeterministicBridge =
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeFlat &&
+                gapDensity >= probConfig.split_dense_flat_bridge_min_gap_density &&
+                !denseFlatFutureRescue &&
+                !denseFlatRodTipFutureRescue;
+            if (edgeCount > 0 && denseFlatDeterministicBridge) {
+                std::cout << "[Split Reject bio] " << parentName
+                          << " reason=dense_flat_bridge"
+                          << " valleyFromBright=" << valleyFromBright
+                          << " valleyLimit=" << valleyLimit
+                          << " gapDensity=" << gapDensity
+                          << " gapBright=" << gapBright
+                          << " edge1Bright=" << edge1Bright
+                          << " edge2Bright=" << edge2Bright
+                          << " gapWidth=" << gapWidth
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+                restoreLiveParent();
+                return {0.0, noop};
+            }
+            const float maxDaughterSeedDrift = std::max(drift1, drift2);
+            const bool denseDriftingDeterministicBridge =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                gapDensity >= probConfig.split_dense_drifting_bridge_min_gap_density &&
+                valleyFromBright >=
+                    probConfig.split_dense_drifting_bridge_min_valley_from_bright &&
+                maxDaughterSeedDrift >=
+                    probConfig.split_dense_drifting_bridge_seed_drift_fraction *
+                        std::max(1.0f, parentMaxRadiusForSoftGeometry) &&
+                (bridgeProposal == nullptr ||
+                 bridgeProposal->windowBestMatchedMinBrightness <
+                     probConfig.split_dense_drifting_bridge_future_brightness_floor ||
+                 bridgeProposal->windowBothDaughtersSupported <
+                     std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) ||
+                 bridgeProposal->windowMissingDaughterCount > 0 ||
+                 bridgeProposal->windowParentPersists > 0);
+            if (edgeCount > 0 && denseDriftingDeterministicBridge) {
+                std::cout << "[Split Reject bio] " << parentName
+                          << " reason=dense_drifting_bridge"
+                          << " valleyFromBright=" << valleyFromBright
+                          << " gapDensity=" << gapDensity
+                          << " maxDaughterSeedDrift=" << maxDaughterSeedDrift
+                          << " driftLimit="
+                          << probConfig.split_dense_drifting_bridge_seed_drift_fraction *
+                                 std::max(1.0f, parentMaxRadiusForSoftGeometry)
+                          << " futureBestMinBrightness="
+                          << (bridgeProposal != nullptr
+                                  ? bridgeProposal->windowBestMatchedMinBrightness
+                                  : 0.0f)
+                          << " futureBoth="
+                          << (bridgeProposal != nullptr
+                                  ? bridgeProposal->windowBothDaughtersSupported
+                                  : 0)
+                          << " futureMissing="
+                          << (bridgeProposal != nullptr
+                                  ? bridgeProposal->windowMissingDaughterCount
+                                  : 0)
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+                restoreLiveParent();
+                return {0.0, noop};
+            }
             const bool bypassPcaBridgeValley =
                 bridgeProposalOnly &&
                 bestLabel == "bridge_primary" &&
-                !probConfig.pca_bridge_require_valley;
-            const bool bridgeFlat = valleyFromBright > valleyLimit;
+                (!probConfig.pca_bridge_require_valley ||
+                 denseFlatRodTipFutureRescue);
             if (edgeCount > 0 && bridgeFlat && !bypassPcaBridgeValley) {
                 const bool impossibleValley =
                     bestIsCellLumenPrepassFallback ||
@@ -6652,6 +7558,40 @@ CostCallbackPair Frame::trySplitCellPhased(
     }
 
     // 5b. Size ratio, volume fraction, and buried checks.
+    const bool futureSupportedMidpointRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(0.0f,
+                     probConfig
+                         .pca_bridge_future_window_rod_tip_balance_min_brightness);
+    const bool futureSupportedRodTipMidpointRescue =
+        futureSupportedMidpointRescue &&
+        bridgeProposal->daughterSphereRadius > 0.0f;
+    const bool immediateFutureRodTipBioRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        bridgeProposal->immediateFutureCenterBacked &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount <= 2 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(0.0f,
+                     probConfig
+                         .pca_bridge_future_window_rod_tip_balance_min_brightness) &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_rod_tip_primary_min_parent_balance;
+    const bool futureSupportedRodTipBioRescue =
+        futureSupportedRodTipMidpointRescue ||
+        immediateFutureRodTipBioRescue;
+
     ProbabilityConfig finalBioConfig = probConfig;
     const bool finalBioSeparationSoftRescue =
         simulationConfig.celluniverse2_enabled &&
@@ -6681,8 +7621,47 @@ CostCallbackPair Frame::trySplitCellPhased(
         finalBioConfig.bio_min_daughter_separation_parent_fraction =
             activeSeparationFraction;
     }
+    if (simulationConfig.celluniverse2_enabled && bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationRequired > 0.0f && srcMaxR > 1e-3f) {
+        const float effectiveSeparationFraction =
+            bridgeProposal->bioSeparationRequired / std::max(1.0f, srcMaxR);
+        finalBioConfig.bio_min_daughter_separation_parent_fraction = std::min(
+            std::max(0.0f, finalBioConfig.bio_min_daughter_separation_parent_fraction),
+            std::max(0.0f, effectiveSeparationFraction));
+    }
+    const bool futureSupportedPcaBridgeNearSeparationRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_future_pca_bridge_near_sep_min_brightness &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_pca_bridge_near_sep_min_parent_balance;
+    if (futureSupportedPcaBridgeNearSeparationRescue) {
+        const float nearSeparationFraction = std::clamp(
+            probConfig.pca_bridge_future_window_near_separation_fraction,
+            0.0f,
+            1.0f);
+        finalBioConfig.bio_min_daughter_separation_parent_fraction = std::min(
+            finalBioConfig.bio_min_daughter_separation_parent_fraction,
+            std::max(0.0f, probConfig.bio_min_daughter_separation_parent_fraction) *
+                nearSeparationFraction);
+    }
     const float midpointParentFraction =
-        std::max(0.0f, probConfig.bio_max_midpoint_parent_fraction);
+        futureSupportedMidpointRescue
+            ? std::max(
+                  std::max(0.0f, probConfig.bio_max_midpoint_parent_fraction),
+                  std::max(
+                      0.0f,
+                      probConfig
+                          .pca_bridge_future_window_rod_tip_midpoint_parent_fraction))
+            : std::max(0.0f, probConfig.bio_max_midpoint_parent_fraction);
     if (midpointParentFraction > 0.0f && snapshotValid) {
         const cv::Point3f daughterMidpoint(
             0.5f * (bestD1Pos.x + bestD2Pos.x),
@@ -6691,13 +7670,63 @@ CostCallbackPair Frame::trySplitCellPhased(
         const float midpointDistance =
             static_cast<float>(cv::norm(daughterMidpoint - snapshot.position));
         const float midpointLimit = midpointParentFraction * std::max(1.0f, srcMaxR);
-        if (midpointDistance > midpointLimit) {
-            std::cout << "[Split Reject bio] " << parentName
-                      << " reason=daughter_midpoint_parent_drift"
-                      << " midpointDistance=" << midpointDistance
+        const float midpointSeedDriftLimit =
+            std::max(2.0f, 0.30f * std::max(1.0f, srcMaxR));
+        const float midpointMaxDaughterSeedDrift = std::max(drift1, drift2);
+	        const bool cleanFutureMidpointNearMiss =
+	            futureSupportedMidpointRescue &&
+	            bridgeProposal != nullptr &&
+	            bridgeProposal->windowBothDaughtersSupported >= 2 &&
+	            bridgeProposal->windowMissingDaughterCount == 0 &&
+	            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                probConfig.split_future_midpoint_near_miss_min_brightness &&
+            midpointMaxDaughterSeedDrift <= midpointSeedDriftLimit &&
+            midpointDistance <=
+                probConfig.split_future_midpoint_near_miss_limit_scale *
+                    std::max(1.0f, midpointLimit);
+        const bool signalCenterMidpointNearMiss =
+            simulationConfig.celluniverse2_enabled &&
+            bridgeProposal != nullptr &&
+            probConfig.signal_center_midpoint_near_miss_enabled &&
+            bridgeProposal->signalCenterScore >=
+                probConfig.signal_center_midpoint_near_miss_min_score &&
+            bridgeProposal->signalCenterSeparationRatio >=
+                probConfig.signal_center_midpoint_near_miss_min_separation_ratio &&
+            bridgeProposal->signalCenterAxisAlignment >=
+                probConfig.signal_center_midpoint_near_miss_min_axis_alignment &&
+            bridgeProposal->windowBothDaughtersSupported >=
+                std::max(1, probConfig.signal_center_midpoint_near_miss_min_future_both) &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                probConfig.signal_center_midpoint_near_miss_min_future_brightness &&
+            midpointMaxDaughterSeedDrift <= midpointSeedDriftLimit &&
+            midpointDistance <=
+                std::max(1.0f, probConfig.signal_center_midpoint_near_miss_limit_scale) *
+                std::max(1.0f, midpointLimit);
+	        if (midpointDistance > midpointLimit &&
+	            !cleanFutureMidpointNearMiss &&
+	            !signalCenterMidpointNearMiss) {
+	            std::cout << "[Split Reject bio] " << parentName
+	                      << " reason=daughter_midpoint_parent_drift"
+	                      << " midpointDistance=" << midpointDistance
                       << " limit=" << midpointLimit
                       << " fraction=" << midpointParentFraction
+                      << " futureSupportedMidpointRescue="
+                      << (futureSupportedMidpointRescue ? 1 : 0)
+	                      << " futureSupportedRodTipMidpointRescue="
+	                      << (futureSupportedRodTipMidpointRescue ? 1 : 0)
+	                      << " signalCenterMidpointNearMiss="
+	                      << (signalCenterMidpointNearMiss ? 1 : 0)
+	                      << " futureBestMinBrightness="
+                      << (bridgeProposal != nullptr
+                              ? bridgeProposal->windowBestMatchedMinBrightness
+                              : 0.0f)
                       << " parentMaxR=" << srcMaxR
+                      << " maxDaughterSeedDrift="
+                      << midpointMaxDaughterSeedDrift
+                      << " seedDriftLimit=" << midpointSeedDriftLimit
                       << " midpoint=(" << daughterMidpoint.x << ","
                       << daughterMidpoint.y << "," << daughterMidpoint.z << ")"
                       << " snapshot=(" << snapshot.position.x << ","
@@ -6707,17 +7736,190 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << std::endl;
             restoreLiveParent();
             return {0.0, noop};
+        } else if (midpointDistance > midpointLimit) {
+            std::cout << "[Split Soft Gate Waived] " << parentName
+                      << " reason=clean_future_midpoint_parent_drift_near_miss"
+                      << " midpointDistance=" << midpointDistance
+                      << " limit=" << midpointLimit
+                      << " fraction=" << midpointParentFraction
+                      << " futureBestMinBrightness="
+                      << (bridgeProposal != nullptr
+                              ? bridgeProposal->windowBestMatchedMinBrightness
+                              : 0.0f)
+                      << " maxDaughterSeedDrift="
+                      << midpointMaxDaughterSeedDrift
+                      << " seedDriftLimit=" << midpointSeedDriftLimit
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << std::endl;
         }
     }
+
+    if (futureSupportedRodTipBioRescue) {
+        finalBioConfig.bio_combined_volume_max_fraction = std::max(
+            finalBioConfig.bio_combined_volume_max_fraction,
+            std::max(
+                0.0f,
+                probConfig
+                    .pca_bridge_future_window_rod_tip_combined_volume_max_fraction));
+        finalBioConfig.bio_max_single_daughter_volume_fraction = std::max(
+            finalBioConfig.bio_max_single_daughter_volume_fraction,
+            std::max(
+                0.0f,
+                probConfig
+                    .pca_bridge_future_window_rod_tip_single_daughter_volume_max_fraction));
+    }
+    const bool futureSupportedBridgeAxisBuriedRescue =
+        futureSupportedRodTipMidpointRescue &&
+        bestLabel == "bridge_axis_place" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_bridge_axis_buried_min_parent_balance &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_bridge_axis_buried_min_brightness;
+    const bool cleanTwoFrameRodTipContinuationRescue =
+        futureSupportedRodTipMidpointRescue &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_clean_rod_tip_continuation_min_parent_balance &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_clean_rod_tip_continuation_min_brightness;
+    const float cleanPcaContinuationBaseSnapLimit =
+        std::max(
+            std::max(0.0f, probConfig.pca_bridge_future_window_match_distance),
+            probConfig.split_clean_pca_continuation_base_snap_scale * std::max(1.0f, srcMaxR));
+    const float cleanPcaContinuationSnapLimit =
+        std::max(
+            cleanPcaContinuationBaseSnapLimit,
+            std::max(probConfig.split_clean_pca_continuation_min_snap_scale,
+                     std::max(
+                         0.0f,
+                         probConfig
+                             .pca_bridge_future_window_pca_snap_max_radius_scale)) *
+                std::max(1.0f, srcMaxR));
+    const bool cleanPcaContinuationImmediateSupport =
+        bridgeProposal != nullptr &&
+        (bridgeProposal->immediateFutureCenterBacked ||
+         bridgeProposal->windowImmediateBothDaughtersSupported > 0);
+    const bool immediateFuturePcaContinuationRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        cleanPcaContinuationImmediateSupport &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_immediate_pca_continuation_min_brightness &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_immediate_pca_continuation_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_immediate_pca_continuation_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <= cleanPcaContinuationSnapLimit;
+    const bool oneFrameAlignedFuturePcaContinuationRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        cleanPcaContinuationImmediateSupport &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_one_frame_aligned_pca_continuation_min_brightness &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance &&
+        bridgeProposal->parentDistanceBalance <= probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaContinuationSnapLimit,
+                     probConfig.split_one_frame_aligned_pca_continuation_snap_scale * std::max(1.0f, srcMaxR));
+    const bool currentPcaContinuationRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        !bridgeProposal->immediateFutureCenterBacked &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount <= 2 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_current_pca_continuation_min_brightness &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_current_pca_continuation_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_current_pca_continuation_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <= cleanPcaContinuationSnapLimit;
+    const bool cleanPcaBridgeContinuationRescue =
+        immediateFuturePcaContinuationRescue ||
+        oneFrameAlignedFuturePcaContinuationRescue ||
+        currentPcaContinuationRescue;
+    const bool skipExistingCellBuriedForBio =
+        (useCellLumenGateParams && lumenSkipExistingCellBuriedCheck) ||
+        futureSupportedBridgeAxisBuriedRescue ||
+        cleanTwoFrameRodTipContinuationRescue ||
+        cleanPcaBridgeContinuationRescue;
+    const bool skipNeighborBridgeForBio =
+        (useCellLumenGateParams && lumenSkipNeighborBridgeCheck) ||
+        cleanTwoFrameRodTipContinuationRescue ||
+        cleanPcaBridgeContinuationRescue;
+    const bool dimExactFutureSignalRodBlockerRescue =
+        bestIsSignalCenterProposal &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_dim_exact_future_signal_min_brightness &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_dim_exact_future_signal_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <= probConfig.split_dim_exact_future_signal_snap_epsilon &&
+        bridgeProposal->bioSeparationRequired >
+            probConfig.split_dim_exact_future_signal_min_bio_separation &&
+        bridgeProposal->bioSeparationObserved >=
+            bridgeProposal->bioSeparationRequired;
+    const bool ignoreSuspiciousRodBlockersForBio =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bridgeProposal != nullptr &&
+        bestLabel == "bridge_primary" &&
+        (bestHasCleanFutureSplitSupport ||
+         dimExactFutureSignalRodBlockerRescue) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        (bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_ignore_suspicious_rod_min_brightness ||
+         dimExactFutureSignalRodBlockerRescue) &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_ignore_suspicious_rod_min_parent_shape;
+    const bool delayedFuturePcaBridgeBioOwnershipRescue =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        probConfig.split_delayed_future_existing_cell_buried_scale > 0.0f &&
+        probConfig.split_delayed_future_existing_cell_buried_scale < 1.0f &&
+        bridgeProposal->windowImmediateBothDaughtersSupported == 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            static_cast<int>(probConfig.split_delayed_future_pca_bridge_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            static_cast<int>(probConfig.split_delayed_future_pca_bridge_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_delayed_future_pca_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_delayed_future_pca_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_delayed_future_pca_bridge_min_parent_balance;
+    const float existingCellBuriedScaleForBio =
+        delayedFuturePcaBridgeBioOwnershipRescue
+            ? std::clamp(
+                  probConfig.split_delayed_future_existing_cell_buried_scale,
+                  0.0f,
+                  1.0f)
+            : 1.0f;
 
     std::string bioReason;
     if (!bioCheckDaughters(bestD1, bestD2, refParentVolume, srcMaxR,
                            bestCells, d1IdxBest, d2IdxBest,
                            finalBioConfig, bioReason,
-                           useCellLumenGateParams && lumenSkipExistingCellBuriedCheck,
-                           useCellLumenGateParams && lumenSkipNeighborBridgeCheck,
+                           existingCellBuriedScaleForBio,
+                           skipExistingCellBuriedForBio,
+                           skipNeighborBridgeForBio,
                            simulationConfig.celluniverse2_enabled &&
-                               probConfig.split_bio_ignore_trash_neighbors_enabled)) {
+                               probConfig.split_bio_ignore_trash_neighbors_enabled,
+                           ignoreSuspiciousRodBlockersForBio)) {
         std::cout << "[Split Reject bio] " << parentName
                   << " reason=" << bioReason
                   << " d1=(" << bestD1.getX() << "," << bestD1.getY() << "," << bestD1.getZ() << ")"
@@ -6725,6 +7927,46 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " d2=(" << bestD2.getX() << "," << bestD2.getY() << "," << bestD2.getZ() << ")"
                   << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
                   << " refParentVolume=" << refParentVolume
+                  << " futureSupportedRodTipBioRescue="
+                  << (futureSupportedRodTipBioRescue ? 1 : 0)
+                  << " futureSupportedPcaBridgeNearSepRescue="
+                  << (futureSupportedPcaBridgeNearSeparationRescue ? 1 : 0)
+                  << " bridgeAxisBuriedRescue="
+                  << (futureSupportedBridgeAxisBuriedRescue ? 1 : 0)
+                  << " cleanTwoFrameRodTipContinuationRescue="
+                  << (cleanTwoFrameRodTipContinuationRescue ? 1 : 0)
+                  << " cleanPcaBridgeContinuationRescue="
+                  << (cleanPcaBridgeContinuationRescue ? 1 : 0)
+                  << " oneFrameAlignedPcaContinuationRescue="
+                  << (oneFrameAlignedFuturePcaContinuationRescue ? 1 : 0)
+                  << " cleanPcaImmediateSupport="
+                  << (cleanPcaContinuationImmediateSupport ? 1 : 0)
+                  << " delayedFutureBioOwnershipRescue="
+                  << (delayedFuturePcaBridgeBioOwnershipRescue ? 1 : 0)
+                  << " existingCellBuriedScale="
+                  << existingCellBuriedScaleForBio
+                  << " centerSnapMaxSeedDistance="
+                  << (bridgeProposal != nullptr
+                          ? bridgeProposal->centerSnapMaxSeedDistance
+                          : 0.0f)
+                  << " cleanPcaSnapLimit="
+                  << cleanPcaContinuationSnapLimit
+                  << " parentDistBalance="
+                  << (bridgeProposal != nullptr
+                          ? bridgeProposal->parentDistanceBalance
+                          : 0.0f)
+                  << " futureBestMinBrightness="
+                  << (bridgeProposal != nullptr
+                          ? bridgeProposal->windowBestMatchedMinBrightness
+                          : 0.0f)
+                  << " skipNeighborBridgeForBio="
+                  << (skipNeighborBridgeForBio ? 1 : 0)
+                  << " ignoreSuspiciousRodBlockersForBio="
+                  << (ignoreSuspiciousRodBlockersForBio ? 1 : 0)
+                  << " activeCombinedVolumeMax="
+                  << finalBioConfig.bio_combined_volume_max_fraction
+                  << " activeSingleDaughterVolumeMax="
+                  << finalBioConfig.bio_max_single_daughter_volume_fraction
                   << std::endl;
         restoreLiveParent();
         return {0.0, noop};
@@ -6737,6 +7979,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     const float minDaughterBackgroundMargin =
         std::max(0.0f,
                  probConfig.bio_min_daughter_mean_brightness_background_margin);
+    bool costBackedCleanFuturePcaBridgeDensityWaivedActive = false;
     if (!_realFrame.empty() &&
         (minDaughterMeanAbs > 0.0f ||
          minDaughterMeanParentFraction > 0.0f ||
@@ -6756,23 +7999,187 @@ CostCallbackPair Frame::trySplitCellPhased(
         if (minDaughterMean < densityThreshold) {
             const float softMinFraction = std::clamp(
                 probConfig.bio_daughter_density_soft_min_fraction, 0.0f, 1.0f);
-            const float hardDensityThreshold =
-                localBackground + minDaughterMeanAbs * softMinFraction;
-            const bool belowObviousBackgroundFloor =
-                minDaughterMeanAbs <= 0.0f ||
-                minDaughterMean < hardDensityThreshold;
             const bool densityFutureSupportOk =
                 !probConfig.bio_daughter_density_soft_require_future_support ||
-                (bridgeProposal != nullptr && bridgeProposal->futureWindowSplitRescue);
+                (bridgeProposal != nullptr &&
+                 (bridgeProposal->futureWindowSplitRescue ||
+                  bestFutureSupportedRodTipPrimary ||
+                  bestHasCleanFutureSplitSupport));
+            const bool oneFrameFutureBridgeDensityRescue =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->futureWindowSplitRescue &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported == 1 &&
+                bridgeProposal->windowMissingDaughterCount <= 2 &&
+                bridgeProposal->parentShapeElongation >= probConfig.split_density_one_frame_min_parent_shape &&
+                bridgeProposal->parentShapeElongation < probConfig.split_density_one_frame_max_parent_shape;
+            const float activeSoftMinFraction =
+                oneFrameFutureBridgeDensityRescue
+                    ? std::min(softMinFraction, probConfig.split_density_one_frame_soft_min_fraction)
+                    : ((simulationConfig.celluniverse2_enabled &&
+                        (bestHasCleanFutureSplitSupport ||
+                         (bridgeProposal != nullptr &&
+                          bridgeProposal->futureWindowSplitRescue)) &&
+                        densityFutureSupportOk)
+                           ? std::min(softMinFraction, probConfig.split_density_future_soft_min_fraction)
+                           : softMinFraction);
+            const float hardDensityThreshold =
+                localBackground + minDaughterMeanAbs * activeSoftMinFraction;
+            const bool lockedCleanFuturePcaBridgeDensityContext =
+                simulationConfig.celluniverse2_enabled &&
+                bestIsPcaBridgeOnly &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->futureWindowSplitRescue &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0;
+            const float lockedCleanFuturePcaBridgeDensityFloor =
+                localBackground +
+                std::max(probConfig.split_density_locked_floor_abs,
+                         probConfig.split_density_locked_floor_parent_fraction * std::max(0.0f, parentSignal));
+            const bool belowObviousBackgroundFloor =
+                minDaughterMeanAbs <= 0.0f ||
+                minDaughterMean < hardDensityThreshold ||
+                (lockedCleanFuturePcaBridgeDensityContext &&
+                 minDaughterMean < lockedCleanFuturePcaBridgeDensityFloor);
+            const float densityCleanFuturePairSnapLimit =
+                std::max(
+                    std::max(
+                        std::max(0.0f,
+                                 probConfig.pca_bridge_future_window_match_distance),
+                        0.75f * std::max(1.0f, srcMaxR)),
+                    std::max(
+                        0.0f,
+                        probConfig
+                            .pca_bridge_future_window_pca_snap_max_radius_scale) *
+                        std::max(1.0f, srcMaxR));
+            const bool lockedCleanFuturePcaBridgeDensityWaived =
+                simulationConfig.celluniverse2_enabled &&
+                bestIsPcaBridgeOnly &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->futureWindowSplitRescue &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                !belowObviousBackgroundFloor &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(2,
+                             probConfig
+                                 .pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    std::min(probConfig.split_immediate_pca_continuation_min_brightness,
+                             probConfig.split_one_frame_aligned_pca_continuation_min_brightness) &&
+                bridgeProposal->parentShapeElongation >=
+                    std::min(probConfig.split_immediate_pca_continuation_min_parent_shape,
+                             probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape) &&
+                bridgeProposal->parentDistanceBalance >=
+                    std::min(probConfig.split_immediate_pca_continuation_min_parent_balance,
+                             probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance) &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(densityCleanFuturePairSnapLimit,
+                             probConfig.split_one_frame_aligned_pca_continuation_snap_scale *
+                                 std::max(1.0f, srcMaxR)) &&
+                std::max(drift1, drift2) <=
+                    std::max(probConfig.split_overlap_one_frame_signal_max_drift_abs,
+                             probConfig.split_current_locked_bridge_max_drift_scale * std::max(1.0f, srcMaxR));
+            const bool costBackedCleanFuturePcaBridgeDensityWaived =
+                simulationConfig.celluniverse2_enabled &&
+                bestIsPcaBridgeOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->futureWindowSplitRescue &&
+                bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(2,
+                             probConfig
+                                 .pca_bridge_future_window_min_both_daughter_support) &&
+                bridgeProposal->windowMissingDaughterCount == 0 &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig
+                        .split_density_cost_backed_clean_future_min_future_brightness &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig
+                        .split_density_cost_backed_clean_future_min_parent_balance &&
+                std::max(d1BrightnessStats.first, d2BrightnessStats.first) >=
+                    densityThreshold &&
+                (baselineImageCost - bestImageCost) >=
+                    static_cast<double>(
+                        probConfig
+                            .split_density_cost_backed_clean_future_min_image_gain_abs) &&
+                (baselineTotal - bestTotal) >=
+                    static_cast<double>(
+                        probConfig
+                            .split_density_cost_backed_clean_future_min_total_gain_abs);
+            costBackedCleanFuturePcaBridgeDensityWaivedActive =
+                costBackedCleanFuturePcaBridgeDensityWaived;
             const bool softEligible =
                 simulationConfig.celluniverse2_enabled &&
                 probConfig.bio_daughter_density_soft_gate_enabled &&
                 densityFutureSupportOk &&
-                !belowObviousBackgroundFloor;
+                !belowObviousBackgroundFloor &&
+                !lockedCleanFuturePcaBridgeDensityWaived &&
+                !costBackedCleanFuturePcaBridgeDensityWaived;
             const double normalizedExcess =
                 static_cast<double>(densityThreshold - minDaughterMean) /
                 std::max(1e-6, static_cast<double>(densityThreshold - localBackground));
-            if (softEligible) {
+            if (lockedCleanFuturePcaBridgeDensityWaived) {
+                std::cout << "[Split Soft Gate Waived] " << parentName
+                          << " reason=locked_clean_future_pca_bridge_density"
+                          << " d1Mean=" << d1BrightnessStats.first
+                          << " d1Std=" << d1BrightnessStats.second
+                          << " d2Mean=" << d2BrightnessStats.first
+                          << " d2Std=" << d2BrightnessStats.second
+                          << " parentMean=" << parentBrightnessStats.first
+                          << " background=" << localBackground
+                          << " parentSignal=" << parentSignal
+                          << " threshold=" << densityThreshold
+                          << " hardThreshold=" << hardDensityThreshold
+                          << " lockedDensityFloor="
+                          << lockedCleanFuturePcaBridgeDensityFloor
+                          << " normalizedExcess=" << normalizedExcess
+                          << " futureSupportOk=" << (densityFutureSupportOk ? 1 : 0)
+                          << " parentDistBalance="
+                          << bridgeProposal->parentDistanceBalance
+                          << " centerSnapMaxSeedDistance="
+                          << bridgeProposal->centerSnapMaxSeedDistance
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+            } else if (costBackedCleanFuturePcaBridgeDensityWaived) {
+                std::cout << "[Split Soft Gate Waived] " << parentName
+                          << " reason=cost_backed_clean_future_pca_bridge_density"
+                          << " d1Mean=" << d1BrightnessStats.first
+                          << " d1Std=" << d1BrightnessStats.second
+                          << " d2Mean=" << d2BrightnessStats.first
+                          << " d2Std=" << d2BrightnessStats.second
+                          << " parentMean=" << parentBrightnessStats.first
+                          << " background=" << localBackground
+                          << " parentSignal=" << parentSignal
+                          << " threshold=" << densityThreshold
+                          << " hardThreshold=" << hardDensityThreshold
+                          << " normalizedExcess=" << normalizedExcess
+                          << " futureSupportOk=" << (densityFutureSupportOk ? 1 : 0)
+                          << " parentDistBalance="
+                          << bridgeProposal->parentDistanceBalance
+                          << " futureMinBrightness="
+                          << bridgeProposal->windowBestMatchedMinBrightness
+                          << " futureMinBrightnessLimit="
+                          << probConfig
+                                 .split_density_cost_backed_clean_future_min_future_brightness
+                          << " centerSnapMaxSeedDistance="
+                          << bridgeProposal->centerSnapMaxSeedDistance
+                          << " imageCostDiff="
+                          << (bestImageCost - baselineImageCost)
+                          << " totalCostDiff="
+                          << (bestTotal - baselineTotal)
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+            } else if (softEligible) {
                 addSplitSoftGeometryPenalty(
                     "daughter_density_brightness_near_miss",
                     normalizedExcess,
@@ -6791,6 +8198,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " threshold=" << densityThreshold
                           << " adaptiveSignalThreshold=" << adaptiveSignalThreshold
                           << " hardThreshold=" << hardDensityThreshold
+                          << " hardThresholdFraction="
+                          << activeSoftMinFraction
                           << " normalizedExcess=" << normalizedExcess
                           << " futureSupportOk=" << (densityFutureSupportOk ? 1 : 0)
                           << " bestIdx=" << bestIdx
@@ -6809,6 +8218,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " threshold=" << densityThreshold
                           << " adaptiveSignalThreshold=" << adaptiveSignalThreshold
                           << " hardThreshold=" << hardDensityThreshold
+                          << " hardThresholdFraction="
+                          << activeSoftMinFraction
                           << " absoluteMin=" << minDaughterMeanAbs
                           << " backgroundMargin=" << minDaughterBackgroundMargin
                           << " parentFraction=" << minDaughterMeanParentFraction
@@ -6856,15 +8267,286 @@ CostCallbackPair Frame::trySplitCellPhased(
         }
     }
 
+    bool softOverlapAcceptedForCost = false;
+    bool cleanContinuationDaughterOverlapAcceptedForCost = false;
     if (simulationConfig.celluniverse2_enabled) {
         std::string overlapA;
         std::string overlapB;
         float aInB = 0.0f;
         float bInA = 0.0f;
+        const double overlapGateCostDiff = bestTotal - baselineTotal;
+        const double overlapGateImageCostDiff = bestImageCost - baselineImageCost;
         const std::string acceptedSiblingA =
             bestIsDeterministicSingleProposal ? bestCells[d1IdxBest].getName() : "";
         const std::string acceptedSiblingB =
             bestIsDeterministicSingleProposal ? bestCells[d2IdxBest].getName() : "";
+        const bool oneFrameRawPcaBridgeOverlapSupport =
+            bestIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            !bridgeProposal->centerSnapApplied &&
+            !bridgeProposal->immediateFutureCenterBacked &&
+            ((bridgeProposal->windowBothDaughtersSupported >= 1 &&
+              bridgeProposal->windowMissingDaughterCount <= 2 &&
+             bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_overlap_one_frame_raw_min_brightness) ||
+             (bridgeProposal->parentShapeElongation >= probConfig.split_overlap_one_frame_raw_min_parent_shape &&
+              finalAxisLen >= probConfig.split_long_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+              bridgeProposal->parentDistanceBalance >= probConfig.split_overlap_one_frame_raw_min_parent_balance_secondary)) &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->parentDistanceBalance >= probConfig.split_overlap_one_frame_raw_min_parent_balance;
+        const bool asymmetricRawPcaBridgeOverlapSupport =
+            bestIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount <= 2 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->parentShapeElongation >= probConfig.split_asymmetric_raw_pca_bridge_min_parent_shape &&
+            bridgeProposal->parentDistanceBalance >= probConfig.split_asymmetric_raw_pca_bridge_min_parent_balance &&
+            finalAxisLen >= probConfig.split_asymmetric_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR);
+        const bool oneFrameCurrentFallbackPcaBridgeOverlapSupport =
+            bestIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->centerSnapApplied &&
+            !bridgeProposal->immediateFutureCenterBacked &&
+            bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount <= 2 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >= probConfig.pca_bridge_current_fallback_min_future_brightness &&
+            bridgeProposal->parentDistanceBalance >= probConfig.pca_bridge_current_fallback_low_balance_min_parent_balance &&
+            bridgeProposal->centerSnapMaxSeedDistance <=
+                std::max(probConfig.pca_bridge_future_window_match_distance,
+                         probConfig.pca_bridge_current_fallback_max_snap_radius_scale * std::max(1.0f, srcMaxR)) &&
+            finalAxisLen >= probConfig.split_asymmetric_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR);
+        const bool oneFrameAlignedFuturePcaBridgeOverlapSupport =
+            bestIsPcaBridgeOnly &&
+            bestLabel == "bridge_primary" &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->centerSnapApplied &&
+            bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_one_frame_aligned_pca_continuation_min_brightness &&
+            bridgeProposal->parentShapeElongation >= probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape &&
+            bridgeProposal->parentDistanceBalance >= probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance &&
+            bridgeProposal->parentDistanceBalance <= probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance &&
+            bridgeProposal->centerSnapMaxSeedDistance <=
+                std::max(probConfig.pca_bridge_future_window_match_distance,
+                         probConfig.split_one_frame_aligned_pca_continuation_snap_scale * std::max(1.0f, srcMaxR)) &&
+            finalAxisLen >= probConfig.split_asymmetric_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR);
+        const bool twoFrameBridgeAxisPlaceOverlapSupport =
+            bridgeProposalOnly &&
+            bestLabel == "bridge_axis_place" &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->daughterSphereRadius > 0.0f &&
+            bridgeProposal->windowBothDaughtersSupported >= 2 &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_bridge_axis_place_future_min_brightness;
+        const bool oneFrameSignalCenterOverlapSupport =
+            bestIsSignalCenterProposal &&
+            bridgeProposal != nullptr &&
+            probConfig.pca_bridge_future_window_enabled &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_overlap_one_frame_signal_min_brightness &&
+            bridgeProposal->parentDistanceBalance >= probConfig.split_overlap_one_frame_signal_min_parent_balance &&
+            std::max(drift1, drift2) <=
+                std::max(probConfig.split_overlap_one_frame_signal_max_drift_abs,
+                         probConfig.split_overlap_one_frame_signal_max_drift_scale * std::max(1.0f, srcMaxR));
+        const bool twoFrameSignalCenterOverlapSupport =
+            bestIsSignalCenterProposal &&
+            bridgeProposal != nullptr &&
+            probConfig.pca_bridge_future_window_enabled &&
+            bridgeProposal->windowBothDaughtersSupported >= 2 &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            (bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_overlap_two_frame_signal_min_brightness ||
+             dimExactFutureSignalRodBlockerRescue) &&
+            bridgeProposal->parentDistanceBalance >= probConfig.split_overlap_two_frame_signal_min_parent_balance;
+        const bool cleanFutureSupportedSplitOverlap =
+            bestHasCleanFutureSignalSupport ||
+            oneFrameSignalCenterOverlapSupport ||
+            twoFrameSignalCenterOverlapSupport ||
+            (bridgeProposal != nullptr &&
+             (bridgeProposal->futureWindowSplitRescue ||
+              bestHasCleanFutureSplitSupport ||
+              bestHasCleanCurrentBridgeSupport ||
+              oneFrameRawPcaBridgeOverlapSupport ||
+              asymmetricRawPcaBridgeOverlapSupport ||
+              oneFrameCurrentFallbackPcaBridgeOverlapSupport ||
+              oneFrameAlignedFuturePcaBridgeOverlapSupport ||
+              twoFrameBridgeAxisPlaceOverlapSupport));
+        const bool strongFutureSupportedSplitOverlap =
+            twoFrameBridgeAxisPlaceOverlapSupport ||
+            (cleanFutureSupportedSplitOverlap &&
+             bridgeProposal != nullptr &&
+             bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+             bridgeProposal->windowBothDaughtersSupported >= 2 &&
+             bridgeProposal->windowMissingDaughterCount == 0 &&
+             bridgeProposal->windowParentPersists == 0 &&
+             bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_bridge_axis_place_future_min_brightness);
+        const float cleanFutureOverlapTolerance =
+            twoFrameSignalCenterOverlapSupport
+                ? std::max(
+                      probConfig.split_overlap_signal_tolerance_min,
+                      std::clamp(
+                          probConfig.split_future_supported_hard_overlap_tolerance *
+                              probConfig.split_overlap_signal_tolerance_multiplier,
+                          probConfig.split_overlap_signal_tolerance_clamp_min,
+                          probConfig.split_overlap_signal_tolerance_clamp_max))
+            : (bestHasCleanFutureSignalSupport ||
+               oneFrameSignalCenterOverlapSupport)
+                ? std::max(
+                      probConfig.split_overlap_signal_tolerance_min,
+                      std::clamp(
+                          probConfig.split_future_supported_hard_overlap_tolerance * probConfig.split_overlap_signal_tolerance_multiplier,
+                          probConfig.split_overlap_signal_tolerance_clamp_min,
+                          probConfig.split_overlap_signal_tolerance_clamp_max))
+                : std::max(probConfig.split_overlap_default_tolerance_min,
+                           std::clamp(
+                               probConfig
+                                   .split_future_supported_hard_overlap_tolerance,
+                               probConfig.split_overlap_default_tolerance_min,
+                               probConfig.split_overlap_default_tolerance_max));
+        const float strongFutureOverlapTolerance =
+            strongFutureSupportedSplitOverlap
+                ? std::max(
+                      cleanFutureOverlapTolerance,
+                      twoFrameBridgeAxisPlaceOverlapSupport
+                          ? probConfig.split_overlap_bridge_axis_tolerance
+                          : (bestIsPcaBridgeOnly ? probConfig.split_overlap_pca_bridge_tolerance : probConfig.split_overlap_other_strong_tolerance))
+                : cleanFutureOverlapTolerance;
+        const float cleanCurrentBridgeOverlapTolerance =
+            bestHasCleanCurrentBridgeSupport
+                ? std::max(strongFutureOverlapTolerance, probConfig.split_overlap_clean_current_bridge_tolerance)
+                : strongFutureOverlapTolerance;
+        const float currentFallbackBridgeOverlapTolerance =
+            oneFrameCurrentFallbackPcaBridgeOverlapSupport
+                ? std::max(cleanCurrentBridgeOverlapTolerance, probConfig.split_overlap_current_fallback_bridge_tolerance)
+                : cleanCurrentBridgeOverlapTolerance;
+        const float alignedFutureBridgeOverlapTolerance =
+            oneFrameAlignedFuturePcaBridgeOverlapSupport
+                ? std::max(currentFallbackBridgeOverlapTolerance, probConfig.split_overlap_aligned_future_bridge_tolerance)
+                : currentFallbackBridgeOverlapTolerance;
+        const bool delayedFuturePcaBridgeOverlapSupport =
+            simulationConfig.celluniverse2_enabled &&
+            bestIsPcaBridgeOnly &&
+            bestLabel == "bridge_primary" &&
+            bridgeProposal != nullptr &&
+            probConfig.split_delayed_future_hard_overlap_tolerance > 0.0f &&
+            bridgeProposal->windowImmediateBothDaughtersSupported == 0 &&
+            bridgeProposal->windowBothDaughtersSupported >=
+                static_cast<int>(
+                    probConfig.split_delayed_future_pca_bridge_min_future_both) &&
+            bridgeProposal->windowMissingDaughterCount <=
+                static_cast<int>(
+                    probConfig
+                        .split_delayed_future_pca_bridge_max_missing_daughters) &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                probConfig.split_delayed_future_pca_bridge_min_brightness &&
+            bridgeProposal->parentShapeElongation >=
+                probConfig.split_delayed_future_pca_bridge_min_parent_shape &&
+            bridgeProposal->parentDistanceBalance >=
+                probConfig.split_delayed_future_pca_bridge_min_parent_balance;
+        const float delayedFutureOverlapTolerance =
+            delayedFuturePcaBridgeOverlapSupport
+                ? std::max(
+                      alignedFutureBridgeOverlapTolerance,
+                      probConfig.split_delayed_future_hard_overlap_tolerance)
+                : alignedFutureBridgeOverlapTolerance;
+        const float hardOverlapTolerance =
+            (cleanFutureSupportedSplitOverlap || delayedFuturePcaBridgeOverlapSupport)
+                ? delayedFutureOverlapTolerance
+                : probConfig.split_overlap_hard_default_tolerance;
+        const float generalCleanFutureOverlapMinBrightness = std::min(
+            probConfig.split_current_locked_bridge_min_brightness,
+            std::min(
+                probConfig.split_one_frame_aligned_pca_continuation_min_brightness,
+                probConfig.split_exact_future_center_bridge_min_brightness));
+        const float generalCleanFutureOverlapMinParentShape = std::min(
+            probConfig.split_current_locked_bridge_min_parent_shape,
+            std::min(
+                probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape,
+                probConfig.split_exact_future_center_bridge_min_parent_shape));
+        const float generalCleanFutureOverlapMinParentBalance = std::min(
+            probConfig.split_current_locked_bridge_min_parent_balance,
+            std::min(
+                probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance,
+                probConfig.split_exact_future_center_bridge_min_parent_balance));
+        const float generalCleanFutureOverlapMaxParentBalance = std::max(
+            probConfig.split_current_locked_bridge_max_parent_balance,
+            probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance);
+        const float generalCleanFutureOverlapSnapLimit = std::max(
+            probConfig.pca_bridge_future_window_match_distance,
+            std::max(probConfig.split_clean_future_position_lock_min_snap_scale,
+                     std::max(
+                         0.0f,
+                         probConfig.pca_bridge_future_window_pca_snap_max_radius_scale)) *
+                std::max(1.0f, srcMaxR));
+        const float generalCleanFutureOverlapMaxDrift = std::max(
+            probConfig.split_locked_clean_future_pca_bridge_max_drift_abs,
+            probConfig.split_locked_clean_future_pca_bridge_max_drift_scale *
+                std::max(1.0f, srcMaxR));
+        const float overlapGateMaxDaughterSeedDrift = std::max(drift1, drift2);
+        const double generalCleanFutureImageGainRequired = std::max(
+            static_cast<double>(
+                probConfig.split_general_clean_future_pca_bridge_image_gain_abs),
+            static_cast<double>(
+                probConfig
+                    .split_general_clean_future_pca_bridge_image_gain_fraction) *
+                baselineImageCost);
+        const bool crowdedGeneralCleanFuturePcaBridgeSupport =
+            bestIsPcaBridgeOnly &&
+            bestLabel == "bridge_primary" &&
+            bridgeProposal != nullptr &&
+            probConfig.pca_bridge_future_window_enabled &&
+            bridgeProposal->centerSnapApplied &&
+            (bridgeProposal->immediateFutureCenterBacked ||
+             bridgeProposal->centerSnapUsedAlignedPairFallback) &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                generalCleanFutureOverlapMinBrightness &&
+            bridgeProposal->parentShapeElongation >=
+                generalCleanFutureOverlapMinParentShape &&
+            bridgeProposal->parentDistanceBalance >=
+                generalCleanFutureOverlapMinParentBalance &&
+            bridgeProposal->parentDistanceBalance <=
+                generalCleanFutureOverlapMaxParentBalance &&
+            bridgeProposal->centerSnapMaxSeedDistance <=
+                generalCleanFutureOverlapSnapLimit &&
+            overlapGateMaxDaughterSeedDrift <= generalCleanFutureOverlapMaxDrift &&
+            savedNonTrashCellCount >=
+                probConfig
+                    .split_general_clean_future_pca_bridge_crowded_cell_count_min;
+        auto isSuspiciousRodOverlapBlocker = [&](const std::string &name) {
+            if (name.empty() ||
+                name == acceptedSiblingA ||
+                name == acceptedSiblingB) {
+                return false;
+            }
+            for (const auto &cell : savedCells) {
+                if (cell.getName() != name || cell.isTrash()) continue;
+                const float maxR = std::max({cell.getARadius(),
+                                             cell.getBRadius(),
+                                             cell.getCRadius()});
+                const float minR = std::max(
+                    1e-3f,
+                    std::min({cell.getARadius(),
+                              cell.getBRadius(),
+                              cell.getCRadius()}));
+                return maxR / minR >= probConfig.split_overlap_suspicious_rod_shape_ratio;
+            }
+            return false;
+        };
         if (findNewOrWorseCellBodyOverlapIn(_realFrame,
                                             bestCells,
                                             savedCells,
@@ -6872,22 +8554,163 @@ CostCallbackPair Frame::trySplitCellPhased(
                                             /*scale=*/1.0f,
                                             acceptedSiblingA,
                                             acceptedSiblingB,
-                                            /*tolerance=*/0.02f,
+                                            /*tolerance=*/hardOverlapTolerance,
                                             &overlapA,
                                             &overlapB,
                                             &aInB,
                                             &bInA)) {
+            const bool cleanContinuationDaughterOverlap =
+                cleanTwoFrameRodTipContinuationRescue &&
+                !acceptedSiblingA.empty() &&
+                ((overlapA == acceptedSiblingA ||
+                  overlapA == acceptedSiblingB ||
+                  overlapB == acceptedSiblingA ||
+                  overlapB == acceptedSiblingB) &&
+                 !((overlapA == acceptedSiblingA && overlapB == acceptedSiblingB) ||
+                   (overlapA == acceptedSiblingB && overlapB == acceptedSiblingA))) &&
+                aInB <= probConfig.split_overlap_clean_continuation_a_in_b_max &&
+                bInA <= probConfig.split_overlap_clean_continuation_b_in_a_max;
+            const bool cleanExactFutureSignalOverlap =
+                twoFrameSignalCenterOverlapSupport &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->centerSnapApplied &&
+                bridgeProposal->immediateFutureCenterBacked &&
+                !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+                bridgeProposal->centerSnapMaxSeedDistance <=
+                    std::max(probConfig.split_overlap_exact_signal_snap_abs,
+                             probConfig.split_overlap_exact_signal_snap_scale * std::max(1.0f, srcMaxR)) &&
+                bridgeProposal->parentDistanceBalance >= probConfig.split_overlap_exact_signal_min_parent_balance &&
+                bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_overlap_exact_signal_min_brightness &&
+                aInB <= probConfig.split_overlap_exact_signal_a_in_b_max &&
+                bInA <= probConfig.split_overlap_exact_signal_b_in_a_max;
+            const bool cleanTwoFrameSignalOverlap =
+                twoFrameSignalCenterOverlapSupport &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->parentDistanceBalance >= probConfig.split_overlap_exact_signal_min_parent_balance &&
+                bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_overlap_exact_signal_min_brightness &&
+                aInB <= probConfig.split_overlap_exact_signal_a_in_b_max &&
+                bInA <= probConfig.split_overlap_exact_signal_b_in_a_max;
+            const bool highShapeRawRodSignalOverlap =
+                bestIsSignalCenterProposal &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->gapStartBin <= static_cast<int>(probConfig.split_high_shape_rod_signal_gap_start_max) &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                bridgeProposal->windowBothDaughtersSupported >= static_cast<int>(probConfig.split_high_shape_rod_signal_min_future_both) &&
+                bridgeProposal->windowMissingDaughterCount <= static_cast<int>(probConfig.split_high_shape_rod_signal_max_missing_daughters) &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->parentShapeElongation >= probConfig.split_high_shape_rod_signal_min_parent_shape &&
+                bridgeProposal->parentDistanceBalance >= probConfig.split_high_shape_rod_signal_min_parent_balance &&
+                bridgeCostRescueGapDensity <= probConfig.split_high_shape_rod_signal_max_gap_density &&
+                bridgeCostRescueValleyFromBright <= probConfig.split_high_shape_rod_signal_max_valley_from_bright &&
+                finalAxisLen >= probConfig.split_high_shape_rod_signal_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+                aInB <= probConfig.split_overlap_high_shape_rod_a_in_b_max &&
+                bInA <= probConfig.split_overlap_high_shape_rod_b_in_a_max;
+            const bool asymmetricRawPcaBridgeSoftOverlap =
+                probConfig.split_asymmetric_raw_pca_bridge_soft_overlap_enabled &&
+                asymmetricRawPcaBridgeOverlapSupport &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                aInB <= probConfig.split_asymmetric_raw_pca_bridge_soft_overlap_a_in_b_max &&
+                bInA <= probConfig.split_asymmetric_raw_pca_bridge_soft_overlap_b_in_a_max &&
+                overlapGateImageCostDiff <= -std::max(
+                    static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_image_gain_abs),
+                    static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_image_gain_fraction) *
+                        baselineImageCost) &&
+                overlapGateCostDiff <= -std::max(
+                    static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_cost_limit_abs),
+                    static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_cost_limit_fraction) *
+                        baselineImageCost) &&
+                bridgeCostRescueValleyFromBright <=
+                    probConfig.split_asymmetric_raw_pca_bridge_max_valley_from_bright &&
+                bridgeCostRescueGapDensity <=
+                    probConfig.split_asymmetric_raw_pca_bridge_max_gap_density &&
+                std::max(drift1, drift2) <= std::max(
+                    probConfig.split_asymmetric_raw_pca_bridge_max_drift_abs,
+                    probConfig.split_asymmetric_raw_pca_bridge_max_drift_scale *
+                        std::max(1.0f, srcMaxR));
+            const bool crowdedGeneralCleanFuturePcaBridgeSoftOverlap =
+                crowdedGeneralCleanFuturePcaBridgeSupport &&
+                overlapGateImageCostDiff <= -generalCleanFutureImageGainRequired &&
+                aInB <=
+                    probConfig
+                        .split_general_clean_future_pca_bridge_overlap_a_in_b_max &&
+                bInA <=
+                    probConfig
+                        .split_general_clean_future_pca_bridge_overlap_b_in_a_max &&
+                bridgeCostRescueGapDensity <=
+                    probConfig.split_locked_clean_future_pca_bridge_max_gap_density &&
+                bridgeCostRescueValleyFromBright <=
+                    probConfig
+                        .split_locked_clean_future_pca_bridge_max_valley_from_bright;
+            if (cleanContinuationDaughterOverlap ||
+                cleanExactFutureSignalOverlap ||
+                cleanTwoFrameSignalOverlap ||
+                highShapeRawRodSignalOverlap ||
+                asymmetricRawPcaBridgeSoftOverlap ||
+                crowdedGeneralCleanFuturePcaBridgeSoftOverlap) {
+                softOverlapAcceptedForCost = true;
+                if (cleanContinuationDaughterOverlap) {
+                    cleanContinuationDaughterOverlapAcceptedForCost = true;
+                }
+                std::cout << "[Split Hard Overlap Bypass] "
+                          << parentName
+                          << " cellA=" << overlapA
+                          << " cellB=" << overlapB
+                          << " aInB=" << aInB
+                          << " bInA=" << bInA
+                          << " tolerance=" << hardOverlapTolerance
+                          << " reason="
+                          << (crowdedGeneralCleanFuturePcaBridgeSoftOverlap
+                                  ? "general_clean_future_pca_bridge_overlap"
+                              : (asymmetricRawPcaBridgeSoftOverlap
+                                  ? "asymmetric_raw_pca_bridge_soft_overlap"
+                              : (highShapeRawRodSignalOverlap
+                                  ? "high_shape_raw_rod_signal_overlap"
+                              : (cleanTwoFrameSignalOverlap
+                                         ? "clean_two_frame_signal_overlap"
+                              : (cleanExactFutureSignalOverlap
+                                         ? "clean_exact_future_signal_overlap"
+                                         : "clean_two_frame_rod_tip_continuation")))))
+                          << " bestIdx=" << bestIdx
+                          << " bestLabel=" << bestLabel
+                          << std::endl;
+            } else {
             std::cout << "[Split Reject hard overlap] " << parentName
                       << " cellA=" << overlapA
                       << " cellB=" << overlapB
                       << " aInB=" << aInB
                       << " bInA=" << bInA
+                      << " tolerance=" << hardOverlapTolerance
+                      << " cleanFutureSupported="
+                      << (cleanFutureSupportedSplitOverlap ? 1 : 0)
+                      << " strongFutureSupported="
+                      << (strongFutureSupportedSplitOverlap ? 1 : 0)
+                      << " rawPcaOneFrameSupport="
+                      << (oneFrameRawPcaBridgeOverlapSupport ? 1 : 0)
+                      << " asymmetricRawPcaSupport="
+                      << (asymmetricRawPcaBridgeOverlapSupport ? 1 : 0)
+                      << " currentFallbackPcaSupport="
+                      << (oneFrameCurrentFallbackPcaBridgeOverlapSupport ? 1 : 0)
+                      << " oneFrameAlignedPcaSupport="
+                      << (oneFrameAlignedFuturePcaBridgeOverlapSupport ? 1 : 0)
+                      << " bridgeAxisPlaceSupport="
+                      << (twoFrameBridgeAxisPlaceOverlapSupport ? 1 : 0)
+                      << " oneFrameSignalOverlapSupport="
+                      << (oneFrameSignalCenterOverlapSupport ? 1 : 0)
+                      << " twoFrameSignalOverlapSupport="
+                      << (twoFrameSignalCenterOverlapSupport ? 1 : 0)
+                      << " delayedFutureOverlapSupport="
+                      << (delayedFuturePcaBridgeOverlapSupport ? 1 : 0)
                       << " bestIdx=" << bestIdx
                       << " bestLabel=" << bestLabel
                       << std::endl;
             restoreLiveParent();
             return {0.0, noop};
+            }
         } else if (!acceptedSiblingA.empty()) {
+            softOverlapAcceptedForCost = true;
             std::cout << "[Split Soft Overlap Accepted] " << parentName
                       << " bestIdx=" << bestIdx
                       << " bestLabel=" << bestLabel
@@ -7083,7 +8906,7 @@ CostCallbackPair Frame::trySplitCellPhased(
         imageCostDiff <= -50.0 &&
         overlapCostDiff <= -baselineImageCost * 0.20 &&
         lumenBridgeGapWidth >= 8.0f &&
-        bridgeCostRescueValleyFromBright <= 0.45f;
+        bridgeCostRescueValleyFromBright <= probConfig.split_long_raw_pca_bridge_max_valley_from_bright;
     if (parentAnchorLikelyUnclaimedBlob &&
         !parentAnchorUnclaimedBlobWindowRescue) {
         std::cout << "[Split Reject CellLumen parent anchor unclaimed blob drift] "
@@ -7133,6 +8956,31 @@ CostCallbackPair Frame::trySplitCellPhased(
         std::max(
             std::max(0.0f, probConfig.pca_bridge_future_window_match_distance),
             0.75f * std::max(1.0f, srcMaxR));
+    const float cleanPcaBridgeFuturePairSnapLimit =
+        std::max(
+            cleanPcaBridgeSnapDistanceLimit,
+            std::max(
+                0.0f,
+                probConfig.pca_bridge_future_window_pca_snap_max_radius_scale) *
+                std::max(1.0f, srcMaxR));
+    const bool cleanPcaBridgeFutureGeometrySupport =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->futureWindowSplitRescue &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            cleanPcaBridgeFuturePairSnapLimit &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_clean_pca_bridge_future_geometry_min_parent_balance &&
+        costDiff > 0.0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(
+                0.0f,
+                probConfig
+                    .pca_bridge_future_window_geometry_rescue_min_brightness);
     const bool cleanPcaBridgeFutureSoftSupport =
         bestIsPcaBridgeOnly &&
         bridgeProposal != nullptr &&
@@ -7146,20 +8994,28 @@ CostCallbackPair Frame::trySplitCellPhased(
             std::max(0, probConfig.pca_bridge_future_window_max_parent_persists) &&
         !bridgeProposal->centerSnapUsedAlignedPairFallback &&
         bridgeProposal->centerSnapMaxSeedDistance <= cleanPcaBridgeSnapDistanceLimit &&
-        bridgeProposal->parentShapeElongation >= 1.75f &&
-        bridgeCostRescueValleyFromBright <= 0.98f &&
-        bridgeCostRescueGapDensity <= 0.20f &&
-        imageCostDiff <= -std::max(500.0, 0.02 * baselineImageCost) &&
-        costDiff <= std::max(5000.0, 0.02 * baselineImageCost);
+        bridgeProposal->parentShapeElongation >= probConfig.split_clean_pca_bridge_soft_min_parent_shape &&
+        (bridgeProposal->parentShapeElongation >= probConfig.split_clean_pca_bridge_soft_strong_parent_shape ||
+         bridgeProposal->windowBestMatchedMinBrightness >=
+             std::max(probConfig.split_clean_pca_bridge_soft_min_brightness,
+                      probConfig
+                          .pca_bridge_future_window_rod_tip_balance_min_brightness)) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_clean_pca_bridge_soft_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_long_raw_pca_bridge_max_gap_density &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_clean_pca_bridge_soft_image_gain_abs),
+                                   static_cast<double>(probConfig.split_clean_pca_bridge_soft_image_gain_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_clean_pca_bridge_soft_cost_limit_abs),
+                             static_cast<double>(probConfig.split_clean_pca_bridge_soft_cost_limit_fraction) * baselineImageCost);
     const bool weakBridgeStartedWorse =
         bestIsPcaBridgeOnly &&
         bridgeProposal != nullptr &&
         preCostDiff > 0.0 &&
-        bridgeCostRescueValleyFromBright > 0.65f &&
-        bridgeCostRescueGapDensity > 0.12f &&
+        bridgeCostRescueValleyFromBright > probConfig.split_weak_bridge_started_max_valley_from_bright &&
+        bridgeCostRescueGapDensity > probConfig.split_weak_bridge_started_min_gap_density &&
         bridgeProposal->parentShapeElongation <
             probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue &&
-        !cleanPcaBridgeFutureSoftSupport;
+        !cleanPcaBridgeFutureSoftSupport &&
+        !cleanPcaBridgeFutureGeometrySupport;
     if (weakBridgeStartedWorse) {
         std::cout << "[Split Reject weak pca bridge] " << parentName
                   << " preCostDiff=" << preCostDiff
@@ -7188,6 +9044,48 @@ CostCallbackPair Frame::trySplitCellPhased(
         restoreLiveParent();
         return {0.0, noop};
     }
+    const bool lowShapeDelayedAlignedPcaBridge =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported == 0 &&
+        (bridgeProposal->windowBothDaughtersSupported <
+             std::max(1, probConfig.split_low_shape_delayed_aligned_pca_bridge_min_future_both) ||
+         bridgeProposal->windowMissingDaughterCount >
+             std::max(0, probConfig.split_low_shape_delayed_aligned_pca_bridge_max_missing)) &&
+        bridgeProposal->windowParentPersists <=
+            std::max(0, probConfig.pca_bridge_future_window_max_parent_persists) &&
+        bridgeProposal->parentShapeElongation <
+            probConfig.split_low_shape_delayed_aligned_pca_bridge_min_parent_shape;
+    if (lowShapeDelayedAlignedPcaBridge) {
+        std::cout << "[Split Reject weak pca bridge] " << parentName
+                  << " reason=low_shape_delayed_aligned_pca_bridge"
+                  << " parentShapeElong="
+                  << bridgeProposal->parentShapeElongation
+                  << " minParentShape="
+                  << probConfig.split_low_shape_delayed_aligned_pca_bridge_min_parent_shape
+                  << " futureBoth="
+                  << bridgeProposal->windowBothDaughtersSupported
+                  << " minFutureBoth="
+                  << probConfig.split_low_shape_delayed_aligned_pca_bridge_min_future_both
+                  << " futureImmediate="
+                  << bridgeProposal->windowImmediateBothDaughtersSupported
+                  << " futureMissing="
+                  << bridgeProposal->windowMissingDaughterCount
+                  << " maxMissing="
+                  << probConfig.split_low_shape_delayed_aligned_pca_bridge_max_missing
+                  << " centerSnapMaxSeedDistance="
+                  << bridgeProposal->centerSnapMaxSeedDistance
+                  << " cleanSnapDistanceLimit="
+                  << cleanPcaBridgeSnapDistanceLimit
+                  << " parentDistBalance="
+                  << bridgeProposal->parentDistanceBalance
+                  << " bestIdx=" << bestIdx
+                  << " bestLabel=" << bestLabel
+                  << std::endl;
+        restoreLiveParent();
+        return {0.0, noop};
+    }
 
     const double bridgeRescueLimit =
         static_cast<double>(std::max(
@@ -7195,9 +9093,15 @@ CostCallbackPair Frame::trySplitCellPhased(
         baselineImageCost;
     const double geometryAdjustedCostDiff =
         costDiff + splitSoftGeometryPenaltyCost;
+    const bool signalLikeBridgeCostRescueAllowed =
+        !bestIsSignalCenterProposal ||
+        (costDiff <= -adaptiveThreshold &&
+         imageCostDiff <= -std::max(static_cast<double>(probConfig.split_signal_like_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_signal_like_bridge_image_gain_fraction) * baselineImageCost));
     const bool bridgeCostRescued =
         probConfig.split_bridge_cost_rescue_enabled &&
         bridgeCostRescueEligible &&
+        signalLikeBridgeCostRescueAllowed &&
         geometryAdjustedCostDiff >= -adaptiveThreshold &&
         geometryAdjustedCostDiff <= bridgeRescueLimit;
     const bool futureWindowStrictCostRescued =
@@ -7210,9 +9114,1454 @@ CostCallbackPair Frame::trySplitCellPhased(
         geometryAdjustedCostDiff <= bridgeRescueLimit;
     const bool futureWindowSoftCostRescued =
         cleanPcaBridgeFutureSoftSupport &&
-        costDiff <= std::max(5000.0, 0.02 * baselineImageCost);
+        costDiff <= std::max(static_cast<double>(probConfig.split_clean_pca_bridge_soft_cost_limit_abs),
+                             static_cast<double>(probConfig.split_clean_pca_bridge_soft_cost_limit_fraction) * baselineImageCost);
+    const bool futureWindowStrongCostRescued =
+        bridgeProposal != nullptr &&
+        bestHasCleanFutureBridgeSupport &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_future_strong_bridge_min_parent_balance &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeSnapDistanceLimit * probConfig.split_future_strong_bridge_snap_scale,
+                     probConfig.pca_bridge_future_window_match_distance +
+                         probConfig.pca_bridge_future_window_match_distance_per_frame) &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_future_strong_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_future_strong_bridge_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_future_strong_bridge_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_future_strong_bridge_overlap_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_future_strong_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_future_strong_bridge_max_gap_density &&
+        costDiff <= bridgeRescueLimit &&
+        geometryAdjustedCostDiff <= bridgeRescueLimit;
+    const bool futureWindowGeometryCostRescued =
+        cleanPcaBridgeFutureGeometrySupport &&
+        bridgeProposal->parentShapeElongation >=
+            std::max(
+                0.0f,
+                probConfig
+                    .pca_bridge_future_window_geometry_rescue_min_parent_shape) &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_future_geometry_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_future_geometry_bridge_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= static_cast<double>(probConfig.split_future_geometry_bridge_overlap_limit_fraction) * baselineImageCost &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_future_geometry_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_future_geometry_bridge_max_gap_density &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_future_geometry_bridge_cost_limit_abs),
+                             static_cast<double>(probConfig.split_future_geometry_bridge_cost_limit_fraction) * baselineImageCost) &&
+        geometryAdjustedCostDiff <= std::max(static_cast<double>(probConfig.split_future_geometry_bridge_cost_limit_abs),
+                                             static_cast<double>(probConfig.split_future_geometry_bridge_cost_limit_fraction) * baselineImageCost);
+    const bool twoFrameFutureBridgeCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bestHasCleanFutureBridgeSupport &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_two_frame_future_bridge_min_brightness &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_two_frame_future_bridge_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig.split_two_frame_future_bridge_snap_scale * std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -static_cast<double>(probConfig.split_two_frame_future_bridge_image_gain_abs) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_two_frame_future_bridge_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_two_frame_future_bridge_overlap_limit_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_two_frame_future_bridge_cost_limit_abs),
+                             static_cast<double>(probConfig.split_two_frame_future_bridge_cost_limit_fraction) * baselineImageCost) &&
+        geometryAdjustedCostDiff <= std::max(static_cast<double>(probConfig.split_two_frame_future_bridge_geometry_limit_abs),
+                                             static_cast<double>(probConfig.split_two_frame_future_bridge_geometry_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_two_frame_future_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_two_frame_future_bridge_max_gap_density &&
+        finalAxisLen >= probConfig.split_two_frame_future_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR);
+    const double futureSoftPenaltyRawGainLimit =
+        std::max(bridgeRescueLimit, static_cast<double>(probConfig.split_future_soft_penalty_raw_gain_fraction) * baselineImageCost);
+    const bool futureWindowSoftPenaltyRawGainRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bestHasCleanFutureBridgeSupport &&
+        (!bridgeProposal->centerSnapUsedAlignedPairFallback ||
+         probConfig
+             .split_future_soft_penalty_raw_gain_allow_aligned_pair_fallback) &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_soft_penalty_raw_gain_min_parent_balance &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        costDiff <= -adaptiveThreshold &&
+        geometryAdjustedCostDiff <= futureSoftPenaltyRawGainLimit &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_soft_penalty_raw_gain_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_future_soft_penalty_raw_gain_max_valley_from_bright;
+    const bool oneFrameBrightPcaBridgeSoftPenaltyRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationSoftRescued &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount <= 2 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_one_frame_bright_pca_bridge_soft_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_one_frame_bright_pca_bridge_soft_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_one_frame_bright_pca_bridge_soft_min_parent_balance &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        splitSoftGeometryPenaltyCost <=
+            static_cast<double>(
+                probConfig.split_one_frame_bright_pca_bridge_soft_penalty_fraction) *
+                baselineImageCost &&
+        imageCostDiff <= -adaptiveThreshold &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_one_frame_bright_pca_bridge_soft_overlap_limit_fraction) *
+                baselineImageCost &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_one_frame_bright_pca_bridge_soft_geometry_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_one_frame_bright_pca_bridge_soft_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_one_frame_bright_pca_bridge_soft_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_one_frame_bright_pca_bridge_soft_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_one_frame_bright_pca_bridge_soft_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const float maxDaughterSeedDrift = std::max(drift1, drift2);
+    const bool lockedCleanFuturePcaBridgeCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->futureWindowSplitRescue &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_immediate_pca_continuation_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_immediate_pca_continuation_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_immediate_pca_continuation_min_parent_balance &&
+        bridgeProposal->parentDistanceBalance <=
+            probConfig.split_immediate_pca_continuation_max_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig.split_locked_clean_future_pca_bridge_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_locked_clean_future_pca_bridge_max_drift_abs,
+                     probConfig.split_locked_clean_future_pca_bridge_max_drift_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        costDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_locked_clean_future_pca_bridge_cost_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_locked_clean_future_pca_bridge_cost_limit_fraction) *
+                         baselineImageCost) &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_locked_clean_future_pca_bridge_geometry_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_locked_clean_future_pca_bridge_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_locked_clean_future_pca_bridge_overlap_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_locked_clean_future_pca_bridge_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_locked_clean_future_pca_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_locked_clean_future_pca_bridge_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_locked_clean_future_pca_bridge_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const float generalCleanFutureCostMinBrightness = std::min(
+        probConfig.split_current_locked_bridge_min_brightness,
+        std::min(
+            probConfig.split_one_frame_aligned_pca_continuation_min_brightness,
+            probConfig.split_exact_future_center_bridge_min_brightness));
+    const float generalCleanFutureCostMinParentShape = std::min(
+        probConfig.split_current_locked_bridge_min_parent_shape,
+        std::min(
+            probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape,
+            probConfig.split_exact_future_center_bridge_min_parent_shape));
+    const float generalCleanFutureCostMinParentBalance = std::min(
+        probConfig.split_current_locked_bridge_min_parent_balance,
+        std::min(
+            probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance,
+            probConfig.split_exact_future_center_bridge_min_parent_balance));
+    const float generalCleanFutureCostMaxParentBalance = std::max(
+        probConfig.split_current_locked_bridge_max_parent_balance,
+        probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance);
+    const double generalCleanFutureImageGainRequired = std::max(
+        static_cast<double>(
+            probConfig.split_general_clean_future_pca_bridge_image_gain_abs),
+        static_cast<double>(
+            probConfig.split_general_clean_future_pca_bridge_image_gain_fraction) *
+            baselineImageCost);
+    const bool crowdedGeneralCleanFuturePcaBridgeSupport =
+        bestIsPcaBridgeOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->centerSnapApplied &&
+        (bridgeProposal->immediateFutureCenterBacked ||
+         bridgeProposal->centerSnapUsedAlignedPairFallback) &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            generalCleanFutureCostMinBrightness &&
+        bridgeProposal->parentShapeElongation >=
+            generalCleanFutureCostMinParentShape &&
+        bridgeProposal->parentDistanceBalance >=
+            generalCleanFutureCostMinParentBalance &&
+        bridgeProposal->parentDistanceBalance <=
+            generalCleanFutureCostMaxParentBalance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig.split_locked_clean_future_pca_bridge_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_locked_clean_future_pca_bridge_max_drift_abs,
+                     probConfig.split_locked_clean_future_pca_bridge_max_drift_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        savedNonTrashCellCount >=
+            probConfig
+                .split_general_clean_future_pca_bridge_crowded_cell_count_min;
+    const float generalCleanFutureCrowdingAlpha =
+        crowdedGeneralCleanFuturePcaBridgeSupport
+            ? std::clamp(
+                  static_cast<float>(
+                      savedNonTrashCellCount -
+                      probConfig
+                          .split_general_clean_future_pca_bridge_crowded_cell_count_min) /
+                      std::max(
+                          1,
+                          probConfig
+                              .split_general_clean_future_pca_bridge_crowding_span),
+                  0.0f, 1.0f)
+            : 0.0f;
+    const double generalCleanFutureCrowdingRelaxation =
+        1.0 +
+        static_cast<double>(generalCleanFutureCrowdingAlpha) *
+            static_cast<double>(
+                std::max(
+                    1.0f,
+                    probConfig
+                        .split_general_clean_future_pca_bridge_max_relaxation) -
+                1.0f);
+    const double crowdedGeneralCleanFuturePcaBridgeCostLimit =
+        std::max(
+            static_cast<double>(
+                probConfig.split_locked_clean_future_pca_bridge_cost_limit_abs),
+            static_cast<double>(
+                probConfig
+                    .split_locked_clean_future_pca_bridge_cost_limit_fraction) *
+                baselineImageCost) *
+        generalCleanFutureCrowdingRelaxation;
+    const double crowdedGeneralCleanFuturePcaBridgeGeometryLimit =
+        std::max(
+            static_cast<double>(
+                probConfig
+                    .split_locked_clean_future_pca_bridge_geometry_limit_abs),
+            static_cast<double>(
+                probConfig
+                    .split_locked_clean_future_pca_bridge_geometry_limit_fraction) *
+                baselineImageCost) *
+        generalCleanFutureCrowdingRelaxation;
+    const double crowdedGeneralCleanFuturePcaBridgeOverlapLimit =
+        std::max(
+            static_cast<double>(
+                probConfig
+                    .split_locked_clean_future_pca_bridge_overlap_limit_abs),
+            static_cast<double>(
+                probConfig
+                    .split_locked_clean_future_pca_bridge_overlap_limit_fraction) *
+                baselineImageCost) *
+        generalCleanFutureCrowdingRelaxation;
+    const bool crowdedGeneralCleanFuturePcaBridgeCostRescued =
+        crowdedGeneralCleanFuturePcaBridgeSupport &&
+        imageCostDiff <= -generalCleanFutureImageGainRequired &&
+        costDiff <= crowdedGeneralCleanFuturePcaBridgeCostLimit &&
+        geometryAdjustedCostDiff <=
+            crowdedGeneralCleanFuturePcaBridgeGeometryLimit &&
+        overlapCostDiff <= crowdedGeneralCleanFuturePcaBridgeOverlapLimit &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_locked_clean_future_pca_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_locked_clean_future_pca_bridge_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_locked_clean_future_pca_bridge_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const double oneFrameAlignedLockedPcaBridgeCostLimit =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_one_frame_aligned_locked_pca_bridge_cost_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_one_frame_aligned_locked_pca_bridge_cost_limit_fraction) *
+                     baselineImageCost);
+    const double oneFrameAlignedLockedPcaBridgeOverlapLimit =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_one_frame_aligned_locked_pca_bridge_overlap_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_one_frame_aligned_locked_pca_bridge_overlap_limit_fraction) *
+                     baselineImageCost);
+    const double oneFrameAlignedLockedPcaBridgeImageGainRequired =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_one_frame_aligned_locked_pca_bridge_image_gain_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_one_frame_aligned_locked_pca_bridge_image_gain_fraction) *
+                     baselineImageCost);
+    const bool oneFrameAlignedLockedFuturePcaBridgeCostRescued =
+        bestIsPcaBridgeOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        bridgeProposal->centerSnapApplied &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_one_frame_aligned_pca_continuation_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_one_frame_aligned_pca_continuation_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_one_frame_aligned_pca_continuation_min_parent_balance &&
+        bridgeProposal->parentDistanceBalance <=
+            probConfig.split_one_frame_aligned_pca_continuation_max_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig
+                             .split_one_frame_aligned_pca_continuation_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        maxDaughterSeedDrift <=
+            std::max(
+                probConfig
+                    .split_one_frame_aligned_locked_pca_bridge_max_drift_abs,
+                probConfig
+                    .split_one_frame_aligned_locked_pca_bridge_max_drift_scale *
+                    std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -oneFrameAlignedLockedPcaBridgeImageGainRequired &&
+        overlapCostDiff <= oneFrameAlignedLockedPcaBridgeOverlapLimit &&
+        costDiff <= oneFrameAlignedLockedPcaBridgeCostLimit &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_one_frame_aligned_locked_pca_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_one_frame_aligned_locked_pca_bridge_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_one_frame_aligned_locked_pca_bridge_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const double twoFrameAlignedLockedPcaBridgeCostLimit =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_two_frame_aligned_locked_pca_bridge_cost_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_two_frame_aligned_locked_pca_bridge_cost_limit_fraction) *
+                     baselineImageCost);
+    const double twoFrameAlignedLockedPcaBridgeOverlapLimit =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_two_frame_aligned_locked_pca_bridge_overlap_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_two_frame_aligned_locked_pca_bridge_overlap_limit_fraction) *
+                     baselineImageCost);
+    const double twoFrameAlignedLockedPcaBridgeImageGainRequired =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_two_frame_aligned_locked_pca_bridge_image_gain_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_two_frame_aligned_locked_pca_bridge_image_gain_fraction) *
+                     baselineImageCost);
+    const bool twoFrameAlignedLockedFuturePcaBridgeCostRescued =
+        bestIsPcaBridgeOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->centerSnapApplied &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_two_frame_aligned_locked_pca_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_two_frame_aligned_locked_pca_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig
+                .split_two_frame_aligned_locked_pca_bridge_min_parent_balance &&
+        bridgeProposal->parentDistanceBalance <=
+            probConfig
+                .split_two_frame_aligned_locked_pca_bridge_max_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig
+                             .split_one_frame_aligned_pca_continuation_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        maxDaughterSeedDrift <=
+            std::max(
+                probConfig
+                    .split_two_frame_aligned_locked_pca_bridge_max_drift_abs,
+                probConfig
+                    .split_two_frame_aligned_locked_pca_bridge_max_drift_scale *
+                    std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -twoFrameAlignedLockedPcaBridgeImageGainRequired &&
+        overlapCostDiff <= twoFrameAlignedLockedPcaBridgeOverlapLimit &&
+        costDiff <= twoFrameAlignedLockedPcaBridgeCostLimit &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_two_frame_aligned_locked_pca_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_two_frame_aligned_locked_pca_bridge_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_two_frame_aligned_locked_pca_bridge_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const bool lockedExactFutureCenterBridgeCostRescued =
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->centerSnapApplied &&
+        bridgeProposal->immediateFutureCenterBacked &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(probConfig.split_exact_future_center_bridge_snap_abs,
+                     probConfig.split_exact_future_center_bridge_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_exact_future_center_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_exact_future_center_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_locked_exact_future_bridge_min_parent_balance &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_locked_exact_future_bridge_max_drift_abs,
+                     probConfig.split_locked_exact_future_bridge_max_drift_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        costDiff <=
+            std::max(static_cast<double>(
+                         probConfig.split_locked_exact_future_bridge_cost_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_locked_exact_future_bridge_cost_limit_fraction) *
+                         baselineImageCost) &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_locked_exact_future_bridge_geometry_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_locked_exact_future_bridge_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_locked_exact_future_bridge_overlap_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_locked_exact_future_bridge_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_locked_exact_future_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_locked_exact_future_bridge_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_locked_exact_future_bridge_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const bool oneFrameFuturePcaBridgeSoftPenaltyRawGainRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationSoftRescued &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            static_cast<int>(probConfig.split_future_near_dim_bypass_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            static_cast<int>(probConfig.split_future_near_dim_bypass_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_one_frame_future_pca_soft_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_one_frame_future_pca_soft_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_one_frame_future_pca_soft_min_parent_balance &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        costDiff <= -adaptiveThreshold &&
+        imageCostDiff <= -adaptiveThreshold &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig.split_one_frame_future_pca_soft_overlap_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_one_frame_future_pca_soft_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_one_frame_future_pca_soft_geometry_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_one_frame_future_pca_soft_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_one_frame_future_pca_soft_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_one_frame_future_pca_soft_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_one_frame_future_pca_soft_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_one_frame_future_pca_soft_max_drift_abs,
+                     probConfig.split_one_frame_future_pca_soft_max_drift_scale *
+                         std::max(1.0f, srcMaxR));
+    const double futureSignalSoftPenaltyRawGainLimit =
+        std::max(bridgeRescueLimit,
+                 static_cast<double>(
+                     probConfig.split_future_signal_soft_penalty_fraction) *
+                     baselineImageCost);
+    const bool futureSignalSoftPenaltyRawGainRescued =
+        bestHasCleanFutureSignalSupport &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_signal_soft_min_parent_balance &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        costDiff <= -adaptiveThreshold &&
+        geometryAdjustedCostDiff <= futureSignalSoftPenaltyRawGainLimit &&
+        imageCostDiff <=
+            -std::max(static_cast<double>(
+                          probConfig.split_future_signal_soft_image_gain_abs),
+                      static_cast<double>(
+                          probConfig.split_future_signal_soft_image_gain_fraction) *
+                          baselineImageCost) &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig.split_future_signal_soft_overlap_limit_fraction) *
+                baselineImageCost &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_signal_soft_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_future_signal_soft_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_future_signal_soft_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_future_signal_soft_max_drift_abs,
+                     probConfig.split_future_signal_soft_max_drift_scale *
+                         std::max(1.0f, srcMaxR));
+    const bool futureSignalCleanCenterSoftPenaltyRescued =
+        bestHasCleanFutureSignalSupport &&
+        bridgeProposal != nullptr &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            probConfig.split_dim_exact_future_signal_snap_epsilon &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_signal_clean_center_min_parent_balance &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_future_signal_clean_center_min_brightness &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        splitSoftGeometryPenaltyCost <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_clean_center_soft_penalty_fraction) *
+                baselineImageCost &&
+        costDiff <= -adaptiveThreshold &&
+        imageCostDiff <= -adaptiveThreshold &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_clean_center_overlap_limit_fraction) *
+                baselineImageCost &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_signal_clean_center_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_future_signal_clean_center_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_future_signal_clean_center_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(
+                probConfig.split_future_signal_clean_center_max_drift_abs,
+                probConfig.split_future_signal_clean_center_max_drift_scale *
+                    std::max(1.0f, srcMaxR));
+    const bool futureSignalNearThresholdCostRescued =
+        bestHasCleanFutureSignalSupport &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_signal_near_threshold_min_parent_balance &&
+        costDiff <=
+            static_cast<double>(
+                probConfig.split_future_signal_near_threshold_cost_fraction) *
+                adaptiveThreshold &&
+        imageCostDiff <= -adaptiveThreshold &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_near_threshold_overlap_limit_fraction) *
+                baselineImageCost &&
+        splitSoftGeometryPenaltyCost <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_near_threshold_soft_penalty_fraction) *
+                baselineImageCost &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_future_signal_near_threshold_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_future_signal_near_threshold_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_future_signal_near_threshold_max_drift_abs,
+                     probConfig
+                             .split_future_signal_near_threshold_max_drift_scale *
+                         std::max(1.0f, srcMaxR));
+    const bool futureSignalCleanValleyCostRescued =
+        bestHasCleanFutureSignalSupport &&
+        bridgeProposal != nullptr &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            probConfig.split_dim_exact_future_signal_snap_epsilon &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_signal_clean_valley_min_parent_balance &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_future_signal_clean_valley_min_brightness &&
+        costDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_clean_valley_cost_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_clean_valley_cost_limit_fraction) *
+                         baselineImageCost) &&
+        imageCostDiff <=
+            -std::max(static_cast<double>(
+                          probConfig
+                              .split_future_signal_clean_valley_image_gain_abs),
+                      static_cast<double>(
+                          probConfig
+                              .split_future_signal_clean_valley_image_gain_fraction) *
+                          baselineImageCost) &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_clean_valley_overlap_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_clean_valley_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        splitSoftGeometryPenaltyCost <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_clean_valley_soft_penalty_fraction) *
+                baselineImageCost &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_signal_clean_valley_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_future_signal_clean_valley_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_future_signal_clean_valley_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_future_signal_clean_valley_max_drift_abs,
+                     probConfig
+                             .split_future_signal_clean_valley_max_drift_scale *
+                         std::max(1.0f, srcMaxR));
+    const bool futureSignalLockedOverlapCostRescued =
+        bestIsSignalCenterProposal &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        bridgeProposal->gapStartBin <= -4 &&
+        bridgeProposal->gapEndBin <= -4 &&
+        !bridgeProposal->centerSnapApplied &&
+        !bridgeProposal->immediateFutureCenterBacked &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            probConfig.split_dim_exact_future_signal_snap_epsilon &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_future_signal_locked_overlap_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_future_signal_locked_overlap_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_signal_locked_overlap_min_parent_balance &&
+        maxDaughterSeedDrift <=
+            std::max(
+                probConfig.split_future_signal_locked_overlap_max_drift_abs,
+                probConfig.split_future_signal_locked_overlap_max_drift_scale *
+                    std::max(1.0f, srcMaxR)) &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        splitSoftGeometryPenaltyCost <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_locked_overlap_soft_penalty_fraction) *
+                baselineImageCost &&
+        imageCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_image_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_image_limit_fraction) *
+                         baselineImageCost) &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_overlap_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        costDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_cost_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_cost_limit_fraction) *
+                         baselineImageCost) &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_geometry_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_locked_overlap_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_signal_locked_overlap_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_future_signal_locked_overlap_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_future_signal_locked_overlap_min_axis_length_scale *
+            std::max(1.0f, srcMaxR);
+    const double futureSignalBorderlineMovedCostLimit =
+        std::max(static_cast<double>(
+                     probConfig
+                         .split_future_signal_borderline_moved_cost_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_future_signal_borderline_moved_cost_limit_fraction) *
+                     baselineImageCost);
+    const bool futureSignalBorderlineMovedCostRescued =
+        bestHasCleanFutureSignalSupport &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->immediateFutureCenterBacked &&
+        bridgeProposal->centerSnapApplied &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            probConfig.split_dim_exact_future_signal_snap_epsilon &&
+        bridgeProposal->parentShapeElongation <=
+            probConfig.signal_center_split_min_parent_elongation +
+                probConfig
+                    .split_future_signal_borderline_moved_parent_shape_slack &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_signal_borderline_moved_min_parent_balance &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_future_signal_borderline_moved_min_brightness &&
+        costDiff <= futureSignalBorderlineMovedCostLimit &&
+        imageCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_signal_borderline_moved_image_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_signal_borderline_moved_image_limit_fraction) *
+                         baselineImageCost) &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_borderline_moved_overlap_limit_fraction) *
+                baselineImageCost &&
+        splitSoftGeometryPenaltyCost <=
+            static_cast<double>(
+                probConfig
+                    .split_future_signal_borderline_moved_soft_penalty_fraction) *
+                baselineImageCost &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_signal_borderline_moved_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_future_signal_borderline_moved_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_future_signal_borderline_moved_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_long_raw_pca_bridge_max_drift_abs, probConfig.split_long_raw_pca_bridge_max_drift_scale * std::max(1.0f, srcMaxR));
+    const bool futureRodTipCleanGapCostRescued =
+        bestIsSignalCenterProposal &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(0.0f,
+                     probConfig
+                         .pca_bridge_future_window_rod_tip_balance_min_brightness) &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_future_rod_tip_clean_gap_overlap_limit_fraction) *
+                baselineImageCost &&
+        imageCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_rod_tip_clean_gap_image_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_rod_tip_clean_gap_image_limit_fraction) *
+                         baselineImageCost) &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(
+                         probConfig
+                             .split_future_rod_tip_clean_gap_geometry_limit_abs),
+                     static_cast<double>(
+                         probConfig
+                             .split_future_rod_tip_clean_gap_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_future_rod_tip_clean_gap_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_future_rod_tip_clean_gap_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig.split_future_rod_tip_clean_gap_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_future_rod_tip_clean_gap_max_drift_abs,
+                     probConfig.split_future_rod_tip_clean_gap_max_drift_scale *
+                         std::max(1.0f, srcMaxR));
+    const double futureRodTipPrimaryCostLimit =
+        std::max(static_cast<double>(
+                     probConfig.split_future_rod_tip_primary_cost_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_future_rod_tip_primary_cost_limit_fraction) *
+                     baselineImageCost);
+    const double futureRodTipPrimaryImageCostLimit =
+        std::max(static_cast<double>(
+                     probConfig.split_future_rod_tip_primary_image_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_future_rod_tip_primary_image_limit_fraction) *
+                     baselineImageCost);
+    const double futureRodTipPrimaryOverlapCostLimit =
+        std::max(static_cast<double>(
+                     probConfig.split_future_rod_tip_primary_overlap_limit_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_future_rod_tip_primary_overlap_limit_fraction) *
+                     baselineImageCost);
+    const double futureRodTipPrimaryImageGainRequired =
+        std::max(static_cast<double>(
+                     probConfig.split_future_rod_tip_primary_image_gain_abs),
+                 static_cast<double>(
+                     probConfig
+                         .split_future_rod_tip_primary_image_gain_fraction) *
+                     baselineImageCost);
+    const bool futureRodTipPrimaryRequiresCurrentImageGain =
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue &&
+        bridgeProposal->centerSnapMaxSeedDistance > cleanPcaBridgeFuturePairSnapLimit;
+    const bool futureRodTipPrimaryHasCurrentImageGain =
+        imageCostDiff <= -futureRodTipPrimaryImageGainRequired;
+    const bool futureRodTipPrimaryCostRescued =
+        (bestIsSignalCenterProposal || bestIsPcaBridgeOnly) &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount <= 2 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_future_rod_tip_primary_min_brightness &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_future_rod_tip_primary_min_parent_balance &&
+        (!futureRodTipPrimaryRequiresCurrentImageGain ||
+         futureRodTipPrimaryHasCurrentImageGain) &&
+        costDiff <= futureRodTipPrimaryCostLimit &&
+        imageCostDiff <= futureRodTipPrimaryImageCostLimit &&
+        overlapCostDiff <= futureRodTipPrimaryOverlapCostLimit &&
+        bridgeCostRescueGapDensity <= probConfig.split_future_rod_tip_primary_max_gap_density &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_future_rod_tip_primary_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_future_rod_tip_primary_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_future_rod_tip_primary_max_drift_abs,
+                                        probConfig.split_future_rod_tip_primary_max_drift_scale * std::max(1.0f, srcMaxR));
+    const double oneFrameBridgeCostLimit =
+        std::max(static_cast<double>(probConfig.split_one_frame_future_bridge_cost_limit_abs),
+                 static_cast<double>(probConfig.split_one_frame_future_bridge_cost_limit_fraction) * baselineImageCost);
+    const bool oneFrameFutureBridgeCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->futureWindowSplitRescue &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported == 1 &&
+        bridgeProposal->windowMissingDaughterCount <= 2 &&
+        bridgeProposal->windowParentPersists <=
+            std::max(0, probConfig.pca_bridge_future_window_max_parent_persists) &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_one_frame_future_bridge_min_parent_shape &&
+        bridgeProposal->parentShapeElongation < probConfig.split_one_frame_future_bridge_max_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_one_frame_future_bridge_min_parent_balance &&
+        finalAxisLen >= std::max(1.0f, probConfig.split_one_frame_future_bridge_min_axis_length_scale * srcMaxR) &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit, probConfig.split_one_frame_future_bridge_snap_scale * srcMaxR) &&
+        costDiff <= oneFrameBridgeCostLimit;
+    const bool oneFramePcaBridgeOverlapCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported == 1 &&
+        bridgeProposal->windowMissingDaughterCount <=
+            std::max(0, probConfig.split_one_frame_pca_bridge_max_future_missing) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_one_frame_pca_bridge_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <= cleanPcaBridgeSnapDistanceLimit &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_one_frame_pca_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_one_frame_pca_bridge_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= static_cast<double>(probConfig.split_one_frame_pca_bridge_overlap_limit_fraction) * baselineImageCost &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_one_frame_pca_bridge_cost_limit_abs),
+                             static_cast<double>(probConfig.split_one_frame_pca_bridge_cost_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_one_frame_pca_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_one_frame_pca_bridge_max_gap_density &&
+        finalAxisLen >= probConfig.split_one_frame_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR);
+    const double cleanFuturePcaBridgeOverlapRescueLimit = std::max(
+        static_cast<double>(probConfig.split_clean_future_bridge_cost_limit_abs),
+        static_cast<double>(probConfig.split_clean_future_bridge_cost_limit_fraction) *
+            baselineImageCost);
+    const double cleanFuturePcaBridgeImageGainRequired = std::max(
+        static_cast<double>(probConfig.split_clean_future_bridge_image_gain_abs),
+        static_cast<double>(probConfig.split_clean_future_bridge_image_gain_fraction) *
+            baselineImageCost);
+    const double cleanFuturePcaBridgeOverlapPenaltyLimit = std::max(
+        static_cast<double>(probConfig.split_clean_future_bridge_overlap_limit_abs),
+        static_cast<double>(probConfig.split_clean_future_bridge_overlap_limit_fraction) *
+            baselineImageCost);
+    const double alignedFuturePcaBridgeImageGainRequired = std::max(
+        static_cast<double>(probConfig.split_aligned_future_bridge_image_gain_abs),
+        static_cast<double>(probConfig.split_aligned_future_bridge_image_gain_fraction) *
+            baselineImageCost);
+    const double alignedFuturePcaBridgeOverlapPenaltyLimit = std::max(
+        static_cast<double>(probConfig.split_aligned_future_bridge_overlap_limit_abs),
+        static_cast<double>(probConfig.split_aligned_future_bridge_overlap_limit_fraction) *
+            baselineImageCost);
+    const bool cleanFuturePcaBridgeOverlapCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bestHasCleanFutureBridgeSupport &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_clean_future_bridge_min_brightness &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_clean_future_bridge_min_parent_balance &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        imageCostDiff <= -cleanFuturePcaBridgeImageGainRequired &&
+        costDiff <= cleanFuturePcaBridgeOverlapRescueLimit &&
+        overlapCostDiff <= cleanFuturePcaBridgeOverlapPenaltyLimit &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_clean_future_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_clean_future_bridge_max_gap_density &&
+        finalAxisLen >= probConfig.split_clean_future_bridge_min_axis_length_scale *
+                            std::max(1.0f, srcMaxR);
+    const bool alignedFuturePcaBridgeImageGainCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bestHasCleanFutureBridgeSupport &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_aligned_future_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_aligned_future_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_aligned_future_bridge_min_parent_balance &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig.split_aligned_future_bridge_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -alignedFuturePcaBridgeImageGainRequired &&
+        costDiff <= 0.0 &&
+        overlapCostDiff <= alignedFuturePcaBridgeOverlapPenaltyLimit &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_aligned_future_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_aligned_future_bridge_max_gap_density &&
+        finalAxisLen >= probConfig.split_aligned_future_bridge_min_axis_length_scale *
+                            std::max(1.0f, srcMaxR);
+    const double currentLockedPcaBridgeNearThresholdGainRequired = std::max(
+        static_cast<double>(probConfig.split_current_locked_bridge_image_gain_abs),
+        static_cast<double>(probConfig.split_current_locked_bridge_image_gain_fraction) *
+            baselineImageCost);
+    const bool currentLockedCleanPcaBridgeNearThresholdCostRescued =
+        bestIsPcaBridgeOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        bridgeProposal->centerSnapApplied &&
+        !bridgeProposal->immediateFutureCenterBacked &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_current_locked_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_current_locked_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_current_locked_bridge_min_parent_balance &&
+        bridgeProposal->parentDistanceBalance <=
+            probConfig.split_current_locked_bridge_max_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig.split_current_locked_bridge_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_current_locked_bridge_max_drift_abs,
+                     probConfig.split_current_locked_bridge_max_drift_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -currentLockedPcaBridgeNearThresholdGainRequired &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(probConfig.split_current_locked_bridge_overlap_limit_abs),
+                     static_cast<double>(probConfig.split_current_locked_bridge_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        costDiff <= static_cast<double>(probConfig.split_current_locked_bridge_cost_limit_fraction) * adaptiveThreshold &&
+        geometryAdjustedCostDiff <=
+            std::max(static_cast<double>(probConfig.split_current_locked_bridge_geometry_limit_abs),
+                     static_cast<double>(probConfig.split_current_locked_bridge_geometry_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_current_locked_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_current_locked_bridge_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_current_locked_bridge_min_axis_length_scale *
+                            std::max(1.0f, srcMaxR);
+    const double softOverlapFuturePcaBridgeCostLimit = std::max(
+        static_cast<double>(probConfig.split_soft_overlap_future_bridge_cost_limit_abs),
+        static_cast<double>(probConfig.split_soft_overlap_future_bridge_cost_limit_fraction) *
+            baselineImageCost);
+    const bool softOverlapFuturePcaBridgeCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        bestHasCleanFutureBridgeSupport &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_soft_overlap_future_bridge_min_brightness &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_soft_overlap_future_bridge_min_parent_balance &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->centerSnapMaxSeedDistance <=
+            std::max(cleanPcaBridgeFuturePairSnapLimit,
+                     probConfig.split_soft_overlap_future_bridge_snap_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        costDiff <= softOverlapFuturePcaBridgeCostLimit &&
+        imageCostDiff <=
+            std::max(static_cast<double>(probConfig.split_soft_overlap_future_bridge_image_limit_abs),
+                     static_cast<double>(probConfig.split_soft_overlap_future_bridge_image_limit_fraction) *
+                         baselineImageCost) &&
+        overlapCostDiff <=
+            std::max(static_cast<double>(probConfig.split_soft_overlap_future_bridge_overlap_limit_abs),
+                     static_cast<double>(probConfig.split_soft_overlap_future_bridge_overlap_limit_fraction) *
+                         baselineImageCost) &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_soft_overlap_future_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_soft_overlap_future_bridge_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_soft_overlap_future_bridge_min_axis_length_scale *
+                            std::max(1.0f, srcMaxR);
+    const double stableFuturePcaBridgeNearThresholdGainRequired = std::max(
+        static_cast<double>(probConfig.split_stable_future_bridge_image_gain_abs),
+        static_cast<double>(probConfig.split_stable_future_bridge_image_gain_fraction) *
+            baselineImageCost);
+    const double stableFuturePcaBridgeNearThresholdOverlapLimit = std::max(
+        static_cast<double>(probConfig.split_stable_future_bridge_overlap_limit_abs),
+        static_cast<double>(probConfig.split_stable_future_bridge_overlap_limit_fraction) *
+            baselineImageCost);
+    const bool stableFuturePcaBridgeNearThresholdCostRescued =
+        bestIsPcaBridgeOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        bestHasCleanFutureBridgeSupport &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_stable_future_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.split_stable_future_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_stable_future_bridge_min_parent_balance &&
+        maxDaughterSeedDrift <=
+            std::max(probConfig.split_stable_future_bridge_max_drift_abs,
+                     probConfig.split_stable_future_bridge_max_drift_scale *
+                         std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -stableFuturePcaBridgeNearThresholdGainRequired &&
+        costDiff <= -stableFuturePcaBridgeNearThresholdGainRequired &&
+        overlapCostDiff <= stableFuturePcaBridgeNearThresholdOverlapLimit &&
+        bridgeCostRescueGapDensity <=
+            probConfig.split_stable_future_bridge_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.split_stable_future_bridge_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_stable_future_bridge_min_axis_length_scale *
+                            std::max(1.0f, srcMaxR);
+    const bool cleanRodTipContinuationOverlapCostRescued =
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        cleanContinuationDaughterOverlapAcceptedForCost &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_clean_rod_tip_continuation_min_brightness &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_clean_rod_tip_continuation_min_parent_balance &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_clean_rod_tip_continuation_image_gain_abs),
+                                   static_cast<double>(probConfig.split_clean_rod_tip_continuation_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_clean_rod_tip_continuation_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_clean_rod_tip_continuation_overlap_limit_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_clean_rod_tip_continuation_cost_limit_abs),
+                             static_cast<double>(probConfig.split_clean_rod_tip_continuation_cost_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueGapDensity <= probConfig.split_clean_rod_tip_continuation_max_gap_density &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_clean_rod_tip_continuation_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_clean_rod_tip_continuation_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_clean_rod_tip_continuation_max_drift_abs,
+                                        probConfig.split_clean_rod_tip_continuation_max_drift_scale * std::max(1.0f, srcMaxR));
+    const bool dimExactFutureSignalOverlapCostRescued =
+        simulationConfig.celluniverse2_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        dimExactFutureSignalRodBlockerRescue &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_dim_exact_future_signal_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_dim_exact_future_signal_min_parent_balance &&
+        bridgeProposal->centerSnapMaxSeedDistance <= probConfig.split_dim_exact_future_signal_snap_epsilon &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_dim_exact_future_signal_max_drift_abs,
+                                        probConfig.split_dim_exact_future_signal_max_drift_scale * std::max(1.0f, srcMaxR)) &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_dim_exact_future_signal_image_gain_abs),
+                                   static_cast<double>(probConfig.split_dim_exact_future_signal_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_dim_exact_future_signal_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_dim_exact_future_signal_overlap_limit_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_dim_exact_future_signal_cost_limit_abs),
+                             static_cast<double>(probConfig.split_dim_exact_future_signal_cost_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueGapDensity <= probConfig.split_dim_exact_future_signal_max_gap_density &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_dim_exact_future_signal_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_dim_exact_future_signal_min_axis_length_scale * std::max(1.0f, srcMaxR);
+    const double bridgeAxisPlaceFutureImageGainRequired =
+        std::max(static_cast<double>(probConfig.split_bridge_axis_place_future_image_gain_abs),
+                 static_cast<double>(probConfig.split_bridge_axis_place_future_image_gain_fraction) * baselineImageCost);
+    const double bridgeAxisPlaceFutureOverlapPenaltyLimit =
+        std::max(static_cast<double>(probConfig.split_bridge_axis_place_future_overlap_limit_abs),
+                 static_cast<double>(probConfig.split_bridge_axis_place_future_overlap_limit_fraction) * baselineImageCost);
+    const bool bridgeAxisPlaceFutureImageGainCostRescued =
+        (bestIsPcaBridgeOnly || bridgeProposalOnly) &&
+        bestLabel == "bridge_axis_place" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_bridge_axis_place_future_min_brightness &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_bridge_axis_place_future_min_parent_balance &&
+        imageCostDiff <= -bridgeAxisPlaceFutureImageGainRequired &&
+        overlapCostDiff <= bridgeAxisPlaceFutureOverlapPenaltyLimit &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_bridge_axis_place_future_cost_limit_abs),
+                             static_cast<double>(probConfig.split_bridge_axis_place_future_cost_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_bridge_axis_place_future_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_bridge_axis_place_future_max_gap_density &&
+        finalAxisLen >= probConfig.split_bridge_axis_place_future_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_bridge_axis_place_future_max_drift_abs,
+                                        probConfig.split_bridge_axis_place_future_max_drift_scale * std::max(1.0f, srcMaxR));
+    const double bridgeAxisPlaceNearThresholdRequired =
+        std::max(static_cast<double>(probConfig.split_bridge_axis_place_near_image_gain_abs),
+                 static_cast<double>(probConfig.split_bridge_axis_place_near_image_gain_adaptive_fraction) * adaptiveThreshold);
+    const bool bridgeAxisPlaceCleanNearThresholdCostRescued =
+        bridgeProposalOnly &&
+        bestLabel == "bridge_axis_place" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->daughterSphereRadius > 0.0f &&
+        bridgeProposal->windowParentPersists == 0 &&
+        maxDaughterSeedDrift <= probConfig.split_bridge_axis_place_near_max_drift &&
+        finalAxisLen >= probConfig.split_bridge_axis_place_near_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        imageCostDiff <= -bridgeAxisPlaceNearThresholdRequired &&
+        costDiff <= -bridgeAxisPlaceNearThresholdRequired &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_bridge_axis_place_near_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_bridge_axis_place_near_overlap_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_bridge_axis_place_near_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_bridge_axis_place_near_max_gap_density;
+    const bool longRawPcaBridgeNearThresholdCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        !bridgeProposal->centerSnapApplied &&
+        !bridgeProposal->immediateFutureCenterBacked &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_long_raw_pca_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_long_raw_pca_bridge_min_parent_balance &&
+        finalAxisLen >= probConfig.split_long_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_long_raw_pca_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_long_raw_pca_bridge_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= 0.0 &&
+        costDiff <= -static_cast<double>(probConfig.split_long_raw_pca_bridge_cost_adaptive_fraction) * adaptiveThreshold &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_long_raw_pca_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_long_raw_pca_bridge_max_gap_density &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_long_raw_pca_bridge_max_drift_abs,
+                                        probConfig.split_long_raw_pca_bridge_max_drift_scale * std::max(1.0f, srcMaxR));
+    const bool asymmetricRawPcaBridgeNearThresholdCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowBothDaughtersSupported >= static_cast<int>(probConfig.split_asymmetric_raw_pca_bridge_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <= static_cast<int>(probConfig.split_asymmetric_raw_pca_bridge_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_asymmetric_raw_pca_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_asymmetric_raw_pca_bridge_min_parent_balance &&
+        finalAxisLen >= probConfig.split_asymmetric_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_overlap_limit_fraction) * baselineImageCost &&
+        costDiff <= -std::max(static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_cost_limit_abs),
+                              static_cast<double>(probConfig.split_asymmetric_raw_pca_bridge_cost_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_asymmetric_raw_pca_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_asymmetric_raw_pca_bridge_max_gap_density &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_asymmetric_raw_pca_bridge_max_drift_abs,
+                                        probConfig.split_asymmetric_raw_pca_bridge_max_drift_scale * std::max(1.0f, srcMaxR));
+    const bool delayedFuturePcaBridgeNearMissCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationSoftRescued &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported == 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= static_cast<int>(probConfig.split_delayed_future_pca_bridge_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <= static_cast<int>(probConfig.split_delayed_future_pca_bridge_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_delayed_future_pca_bridge_min_brightness &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_delayed_future_pca_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_delayed_future_pca_bridge_min_parent_balance &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        splitSoftGeometryPenaltyCost <= static_cast<double>(probConfig.split_delayed_future_pca_bridge_soft_penalty_fraction) * baselineImageCost &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_delayed_future_pca_bridge_image_gain_abs),
+                                   static_cast<double>(probConfig.split_delayed_future_pca_bridge_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_delayed_future_pca_bridge_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_delayed_future_pca_bridge_overlap_limit_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_delayed_future_pca_bridge_cost_limit_abs),
+                             static_cast<double>(probConfig.split_delayed_future_pca_bridge_cost_limit_fraction) * baselineImageCost) &&
+        geometryAdjustedCostDiff <= std::max(static_cast<double>(probConfig.split_delayed_future_pca_bridge_geometry_limit_abs),
+                                             static_cast<double>(probConfig.split_delayed_future_pca_bridge_geometry_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_delayed_future_pca_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_delayed_future_pca_bridge_max_gap_density &&
+        finalAxisLen >= probConfig.split_delayed_future_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_delayed_future_pca_bridge_max_drift_abs,
+                                        probConfig.split_delayed_future_pca_bridge_max_drift_scale * std::max(1.0f, srcMaxR));
+    const bool costBackedCleanFuturePcaBridgeNearThresholdCostRescued =
+        bestIsPcaBridgeOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        softOverlapAcceptedForCost &&
+        costBackedCleanFuturePcaBridgeDensityWaivedActive &&
+        probConfig.pca_bridge_future_window_enabled &&
+        bridgeProposal->centerSnapApplied &&
+        bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_density_cost_backed_clean_future_min_future_brightness &&
+        imageCostDiff <=
+            -static_cast<double>(
+                probConfig
+                    .split_density_cost_backed_clean_future_min_image_gain_abs) &&
+        costDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_density_cost_backed_clean_future_cost_fraction) *
+                adaptiveThreshold &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .split_density_cost_backed_clean_future_overlap_limit_fraction) *
+                baselineImageCost &&
+        bridgeCostRescueGapDensity <=
+            probConfig
+                .split_density_cost_backed_clean_future_max_gap_density &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .split_density_cost_backed_clean_future_max_valley_from_bright &&
+        finalAxisLen >=
+            probConfig
+                .split_density_cost_backed_clean_future_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            std::max(
+                probConfig
+                    .split_density_cost_backed_clean_future_max_drift_abs,
+                probConfig
+                    .split_density_cost_backed_clean_future_max_drift_scale *
+                    std::max(1.0f, srcMaxR));
+    const bool highShapeRawPcaBridgeBioNearMissCostRescued =
+        bestIsPcaBridgeOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->bioSeparationSoftRescued &&
+        !bridgeProposal->centerSnapApplied &&
+        !bridgeProposal->immediateFutureCenterBacked &&
+        !bridgeProposal->centerSnapUsedAlignedPairFallback &&
+        bridgeProposal->windowBothDaughtersSupported == 0 &&
+        bridgeProposal->windowMissingDaughterCount <= static_cast<int>(probConfig.split_high_shape_raw_pca_bridge_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_high_shape_raw_pca_bridge_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_high_shape_raw_pca_bridge_min_parent_balance &&
+        splitSoftGeometryPenaltyCost > 0.0 &&
+        splitSoftGeometryPenaltyCost <= static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_soft_penalty_fraction) * baselineImageCost &&
+        imageCostDiff <= std::max(static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_image_limit_abs),
+                                  static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_image_limit_fraction) * baselineImageCost) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_overlap_limit_fraction) * baselineImageCost) &&
+        geometryAdjustedCostDiff <= std::max(static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_geometry_limit_abs),
+                                             static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_geometry_limit_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_cost_limit_abs),
+                             static_cast<double>(probConfig.split_high_shape_raw_pca_bridge_cost_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_high_shape_raw_pca_bridge_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.split_high_shape_raw_pca_bridge_max_gap_density &&
+        finalAxisLen >= probConfig.split_high_shape_raw_pca_bridge_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_high_shape_raw_pca_bridge_max_drift_abs,
+                                        probConfig.split_high_shape_raw_pca_bridge_max_drift_scale * std::max(1.0f, srcMaxR));
+    const bool highShapeRawRodSignalNearTieCostRescued =
+        bestIsSignalCenterProposal &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->gapStartBin <= static_cast<int>(probConfig.split_high_shape_rod_signal_gap_start_max) &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= static_cast<int>(probConfig.split_high_shape_rod_signal_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <= static_cast<int>(probConfig.split_high_shape_rod_signal_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->parentShapeElongation >= probConfig.split_high_shape_rod_signal_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >= probConfig.split_high_shape_rod_signal_min_parent_balance &&
+        imageCostDiff <= -std::max(static_cast<double>(probConfig.split_high_shape_rod_signal_image_gain_abs),
+                                   static_cast<double>(probConfig.split_high_shape_rod_signal_image_gain_fraction) * baselineImageCost) &&
+        overlapCostDiff <= std::max(static_cast<double>(probConfig.split_high_shape_rod_signal_overlap_limit_abs),
+                                    static_cast<double>(probConfig.split_high_shape_rod_signal_overlap_limit_fraction) * baselineImageCost) &&
+        costDiff <= std::max(static_cast<double>(probConfig.split_high_shape_rod_signal_cost_limit_abs),
+                             static_cast<double>(probConfig.split_high_shape_rod_signal_cost_limit_fraction) * baselineImageCost) &&
+        geometryAdjustedCostDiff <= std::max(static_cast<double>(probConfig.split_high_shape_rod_signal_geometry_limit_abs),
+                                             static_cast<double>(probConfig.split_high_shape_rod_signal_geometry_limit_fraction) * baselineImageCost) &&
+        bridgeCostRescueGapDensity <= probConfig.split_high_shape_rod_signal_max_gap_density &&
+        bridgeCostRescueValleyFromBright <= probConfig.split_high_shape_rod_signal_max_valley_from_bright &&
+        finalAxisLen >= probConfig.split_high_shape_rod_signal_min_axis_length_scale * std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <= std::max(probConfig.split_high_shape_rod_signal_max_drift_abs,
+                                        probConfig.split_high_shape_rod_signal_max_drift_scale * std::max(1.0f, srcMaxR));
     const bool futureWindowCostRescued =
-        futureWindowStrictCostRescued || futureWindowSoftCostRescued;
+        futureWindowStrictCostRescued || futureWindowSoftCostRescued ||
+        futureWindowStrongCostRescued || futureWindowGeometryCostRescued ||
+        twoFrameFutureBridgeCostRescued ||
+        futureWindowSoftPenaltyRawGainRescued ||
+        oneFrameBrightPcaBridgeSoftPenaltyRescued ||
+        oneFrameFuturePcaBridgeSoftPenaltyRawGainRescued ||
+        futureSignalSoftPenaltyRawGainRescued ||
+        futureSignalCleanCenterSoftPenaltyRescued ||
+        futureSignalNearThresholdCostRescued ||
+        futureSignalCleanValleyCostRescued ||
+        futureSignalLockedOverlapCostRescued ||
+        futureSignalBorderlineMovedCostRescued ||
+        futureRodTipCleanGapCostRescued ||
+        futureRodTipPrimaryCostRescued ||
+        oneFrameFutureBridgeCostRescued ||
+        oneFramePcaBridgeOverlapCostRescued ||
+        cleanFuturePcaBridgeOverlapCostRescued ||
+        alignedFuturePcaBridgeImageGainCostRescued ||
+        currentLockedCleanPcaBridgeNearThresholdCostRescued ||
+        softOverlapFuturePcaBridgeCostRescued ||
+        stableFuturePcaBridgeNearThresholdCostRescued ||
+        lockedCleanFuturePcaBridgeCostRescued ||
+        crowdedGeneralCleanFuturePcaBridgeCostRescued ||
+        oneFrameAlignedLockedFuturePcaBridgeCostRescued ||
+        twoFrameAlignedLockedFuturePcaBridgeCostRescued ||
+        lockedExactFutureCenterBridgeCostRescued ||
+        cleanRodTipContinuationOverlapCostRescued ||
+        dimExactFutureSignalOverlapCostRescued ||
+        bridgeAxisPlaceFutureImageGainCostRescued ||
+        bridgeAxisPlaceCleanNearThresholdCostRescued ||
+        longRawPcaBridgeNearThresholdCostRescued ||
+        asymmetricRawPcaBridgeNearThresholdCostRescued ||
+        delayedFuturePcaBridgeNearMissCostRescued ||
+        costBackedCleanFuturePcaBridgeNearThresholdCostRescued ||
+        highShapeRawPcaBridgeBioNearMissCostRescued ||
+        highShapeRawRodSignalNearTieCostRescued;
     double acceptedCostDiff = costDiff;
     if (bridgeCostRescued) {
         acceptedCostDiff = -std::max(1.0, adaptiveThreshold);
@@ -7248,9 +10597,141 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << probConfig.pca_bridge_future_window_min_parent_shape_for_cost_rescue
                   << " softRescue=" << (futureWindowSoftCostRescued ? 1 : 0)
                   << " strictRescue=" << (futureWindowStrictCostRescued ? 1 : 0)
+                  << " strongRescue=" << (futureWindowStrongCostRescued ? 1 : 0)
+                  << " geometryRescue="
+                  << (futureWindowGeometryCostRescued ? 1 : 0)
+                  << " twoFrameBridgeRescue="
+                  << (twoFrameFutureBridgeCostRescued ? 1 : 0)
+                  << " softPenaltyRawGainRescue="
+                  << (futureWindowSoftPenaltyRawGainRescued ? 1 : 0)
+                  << " softPenaltyRawGainLimit="
+                  << futureSoftPenaltyRawGainLimit
+                  << " oneFrameBrightPcaBridgeSoftPenaltyRescue="
+                  << (oneFrameBrightPcaBridgeSoftPenaltyRescued ? 1 : 0)
+                  << " oneFrameFuturePcaBridgeSoftPenaltyRawGainRescue="
+                  << (oneFrameFuturePcaBridgeSoftPenaltyRawGainRescued ? 1 : 0)
+                  << " signalSoftPenaltyRawGainRescue="
+                  << (futureSignalSoftPenaltyRawGainRescued ? 1 : 0)
+                  << " signalSoftPenaltyRawGainLimit="
+                  << futureSignalSoftPenaltyRawGainLimit
+                  << " signalCleanCenterSoftPenaltyRescue="
+                  << (futureSignalCleanCenterSoftPenaltyRescued ? 1 : 0)
+                  << " signalNearThresholdRescue="
+                  << (futureSignalNearThresholdCostRescued ? 1 : 0)
+                  << " signalBorderlineMovedRescue="
+                  << (futureSignalBorderlineMovedCostRescued ? 1 : 0)
+                  << " signalBorderlineMovedLimit="
+                  << futureSignalBorderlineMovedCostLimit
+                  << " futureRodTipCleanGapRescue="
+                  << (futureRodTipCleanGapCostRescued ? 1 : 0)
+                  << " futureRodTipPrimaryRescue="
+                  << (futureRodTipPrimaryCostRescued ? 1 : 0)
+                  << " futureRodTipPrimaryCostLimit="
+                  << futureRodTipPrimaryCostLimit
+                  << " futureRodTipPrimaryImageLimit="
+                  << futureRodTipPrimaryImageCostLimit
+                  << " futureRodTipPrimaryOverlapLimit="
+                  << futureRodTipPrimaryOverlapCostLimit
+                  << " maxDaughterSeedDrift=" << maxDaughterSeedDrift
+                  << " oneFrameBridgeRescue="
+                  << (oneFrameFutureBridgeCostRescued ? 1 : 0)
+                  << " oneFramePcaBridgeOverlapRescue="
+                  << (oneFramePcaBridgeOverlapCostRescued ? 1 : 0)
+                  << " cleanFuturePcaBridgeOverlapRescue="
+                  << (cleanFuturePcaBridgeOverlapCostRescued ? 1 : 0)
+                  << " cleanFuturePcaBridgeOverlapRescueLimit="
+                  << cleanFuturePcaBridgeOverlapRescueLimit
+                  << " cleanFuturePcaBridgeImageGainRequired="
+                  << cleanFuturePcaBridgeImageGainRequired
+                  << " cleanFuturePcaBridgeOverlapPenaltyLimit="
+                  << cleanFuturePcaBridgeOverlapPenaltyLimit
+                  << " alignedFuturePcaBridgeImageGainRescue="
+                  << (alignedFuturePcaBridgeImageGainCostRescued ? 1 : 0)
+                  << " alignedFuturePcaBridgeImageGainRequired="
+                  << alignedFuturePcaBridgeImageGainRequired
+                  << " alignedFuturePcaBridgeOverlapPenaltyLimit="
+                  << alignedFuturePcaBridgeOverlapPenaltyLimit
+                  << " currentLockedCleanPcaBridgeNearThresholdRescue="
+                  << (currentLockedCleanPcaBridgeNearThresholdCostRescued ? 1 : 0)
+                  << " currentLockedPcaBridgeNearThresholdGainRequired="
+                  << currentLockedPcaBridgeNearThresholdGainRequired
+                  << " softOverlapFutureBridgeRescue="
+                  << (softOverlapFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " softOverlapFutureCostLimit="
+                  << softOverlapFuturePcaBridgeCostLimit
+                  << " stableFutureNearThresholdBridgeRescue="
+                  << (stableFuturePcaBridgeNearThresholdCostRescued ? 1 : 0)
+                  << " stableFutureNearThresholdGainRequired="
+                  << stableFuturePcaBridgeNearThresholdGainRequired
+                  << " stableFutureNearThresholdOverlapLimit="
+                  << stableFuturePcaBridgeNearThresholdOverlapLimit
+                  << " lockedCleanFuturePcaBridgeRescue="
+                  << (lockedCleanFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " crowdedGeneralCleanFuturePcaBridgeRescue="
+                  << (crowdedGeneralCleanFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " crowdedGeneralCleanFutureCostLimit="
+                  << crowdedGeneralCleanFuturePcaBridgeCostLimit
+                  << " crowdedGeneralCleanFutureGeometryLimit="
+                  << crowdedGeneralCleanFuturePcaBridgeGeometryLimit
+                  << " crowdedGeneralCleanFutureOverlapLimit="
+                  << crowdedGeneralCleanFuturePcaBridgeOverlapLimit
+                  << " crowdedGeneralCleanFutureImageGainRequired="
+                  << generalCleanFutureImageGainRequired
+                  << " crowdedGeneralCleanFutureCrowdingRelaxation="
+                  << generalCleanFutureCrowdingRelaxation
+                  << " savedNonTrashCellCount=" << savedNonTrashCellCount
+                  << " oneFrameAlignedLockedFuturePcaBridgeRescue="
+                  << (oneFrameAlignedLockedFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " twoFrameAlignedLockedFuturePcaBridgeRescue="
+                  << (twoFrameAlignedLockedFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " twoFrameAlignedLockedCostLimit="
+                  << twoFrameAlignedLockedPcaBridgeCostLimit
+                  << " twoFrameAlignedLockedOverlapLimit="
+                  << twoFrameAlignedLockedPcaBridgeOverlapLimit
+                  << " twoFrameAlignedLockedImageGainRequired="
+                  << twoFrameAlignedLockedPcaBridgeImageGainRequired
+                  << " oneFrameAlignedLockedCostLimit="
+                  << oneFrameAlignedLockedPcaBridgeCostLimit
+                  << " oneFrameAlignedLockedOverlapLimit="
+                  << oneFrameAlignedLockedPcaBridgeOverlapLimit
+                  << " oneFrameAlignedLockedImageGainRequired="
+                  << oneFrameAlignedLockedPcaBridgeImageGainRequired
+                  << " lockedExactFutureCenterBridgeRescue="
+                  << (lockedExactFutureCenterBridgeCostRescued ? 1 : 0)
+                  << " dimExactFutureSignalOverlapRescue="
+                  << (dimExactFutureSignalOverlapCostRescued ? 1 : 0)
+                  << " bridgeAxisPlaceFutureImageGainRescue="
+                  << (bridgeAxisPlaceFutureImageGainCostRescued ? 1 : 0)
+                  << " bridgeAxisPlaceFutureImageGainRequired="
+                  << bridgeAxisPlaceFutureImageGainRequired
+                  << " bridgeAxisPlaceFutureOverlapPenaltyLimit="
+                  << bridgeAxisPlaceFutureOverlapPenaltyLimit
+                  << " bridgeAxisPlaceCleanNearThresholdRescue="
+                  << (bridgeAxisPlaceCleanNearThresholdCostRescued ? 1 : 0)
+                  << " bridgeAxisPlaceNearThresholdRequired="
+                  << bridgeAxisPlaceNearThresholdRequired
+                  << " longRawPcaBridgeNearThresholdRescue="
+                  << (longRawPcaBridgeNearThresholdCostRescued ? 1 : 0)
+                  << " asymmetricRawPcaBridgeNearThresholdRescue="
+                  << (asymmetricRawPcaBridgeNearThresholdCostRescued ? 1 : 0)
+                  << " delayedFuturePcaBridgeNearMissRescue="
+                  << (delayedFuturePcaBridgeNearMissCostRescued ? 1 : 0)
+                  << " costBackedCleanFutureNearThresholdRescue="
+                  << (costBackedCleanFuturePcaBridgeNearThresholdCostRescued
+                          ? 1
+                          : 0)
+                  << " highShapeRawPcaBridgeBioNearMissRescue="
+                  << (highShapeRawPcaBridgeBioNearMissCostRescued ? 1 : 0)
+                  << " highShapeRawRodSignalNearTieRescue="
+                  << (highShapeRawRodSignalNearTieCostRescued ? 1 : 0)
+                  << " oneFrameBridgeCostLimit=" << oneFrameBridgeCostLimit
                   << " centerSnapMaxSeedDistance="
                   << bridgeProposal->centerSnapMaxSeedDistance
                   << " cleanSnapDistanceLimit=" << cleanPcaBridgeSnapDistanceLimit
+                  << " cleanFuturePairSnapLimit="
+                  << cleanPcaBridgeFuturePairSnapLimit
+                  << " parentDistBalance="
+                  << bridgeProposal->parentDistanceBalance
                   << " alignedPairFallback="
                   << (bridgeProposal->centerSnapUsedAlignedPairFallback ? 1 : 0)
                   << " futureBoth="
@@ -7298,21 +10779,37 @@ CostCallbackPair Frame::trySplitCellPhased(
         lumenParentAnchoredProposal &&
         lumenProposal != nullptr &&
         lumenParentAnchorOneRealCandidate &&
-        lumenProposal->windowBothDaughtersSupported >= 2 &&
-        lumenProposal->windowMissingDaughterCount == 0 &&
-        lumenProposal->windowParentPersists == 0 &&
-        lumenProposal->parentShapeElongation >= 1.75f &&
-        lumenProposal->elongation <= 45.0f &&
-        lumenProposal->neighborClaimPenalty <= 1e-5f &&
-        lumenProposal->continuationClaimSoftPenalty <= 1e-5f &&
+        lumenProposal->windowBothDaughtersSupported >=
+            probConfig.lumen_partial_parent_window_min_both_supported &&
+        lumenProposal->windowMissingDaughterCount <=
+            probConfig.lumen_partial_parent_window_max_missing_daughters &&
+        lumenProposal->windowParentPersists <=
+            probConfig.lumen_partial_parent_window_max_parent_persists &&
+        lumenProposal->parentShapeElongation >=
+            probConfig.lumen_partial_parent_window_min_parent_shape &&
+        lumenProposal->elongation <=
+            probConfig.lumen_partial_parent_window_max_prior_score &&
+        lumenProposal->neighborClaimPenalty <=
+            probConfig.lumen_partial_parent_window_max_claim_penalty &&
+        lumenProposal->continuationClaimSoftPenalty <=
+            probConfig.lumen_partial_parent_window_max_continuation_penalty &&
         imageCostDiff <= 0.0 &&
-        bridgeCostRescueValleyFromBright <= 0.95f &&
-        overlapCostDiff <= baselineImageCost * 1.05 &&
-        snapshotDriftMax <= std::max(9.0f, finalAxisLen * 0.55f);
+        bridgeCostRescueValleyFromBright <=
+            probConfig.lumen_partial_parent_window_max_valley_from_bright &&
+        overlapCostDiff <=
+            baselineImageCost *
+                probConfig.lumen_partial_parent_window_max_overlap_cost_fraction &&
+        snapshotDriftMax <=
+            std::max(probConfig.lumen_partial_parent_window_max_snapshot_drift_abs,
+                     finalAxisLen *
+                         probConfig
+                             .lumen_partial_parent_window_max_snapshot_drift_axis_fraction);
     if (partialParentAnchorWindowSupport) {
         effectiveLumenMaxOverlapCostFraction = std::max(
             effectiveLumenMaxOverlapCostFraction,
-            1.05);
+            static_cast<double>(
+                probConfig
+                    .lumen_partial_parent_window_max_overlap_cost_fraction));
     }
     const double lumenMaxOverlapCost =
         (useCellLumenCostGate && effectiveLumenMaxOverlapCostFraction >= 0.0f)
@@ -7332,16 +10829,24 @@ CostCallbackPair Frame::trySplitCellPhased(
             const bool priorShapeRescued =
                 lumenProposal != nullptr && lumenProposal->elongatedParentRescued;
             const double strongBridgeImageGain =
-                std::max(90.0,
-                         3.0 * static_cast<double>(
-                                   std::max(0.0f, lumenPositiveGateMinImageGain)));
+                std::max(static_cast<double>(
+                             probConfig.lumen_strong_bridge_image_gain_abs),
+                         static_cast<double>(
+                             probConfig.lumen_strong_bridge_image_gain_multiplier) *
+                             static_cast<double>(
+                                 std::max(0.0f, lumenPositiveGateMinImageGain)));
             const bool strongBridgeOverlapEvidence =
                 useCellLumenImageGate &&
                 lumenStrongBridgeEvidence &&
                 imageCostDiff <= -strongBridgeImageGain &&
-                bridgeCostRescueValleyFromBright <= 0.45f &&
-                bridgeCostRescueGapDensity <= 0.45f &&
-                (lumenBridgeGapWidth >= 8.0f || finalAxisLen >= 35.0f) &&
+                bridgeCostRescueValleyFromBright <=
+                    probConfig.lumen_strong_bridge_max_valley_from_bright &&
+                bridgeCostRescueGapDensity <=
+                    probConfig.lumen_strong_bridge_max_gap_density &&
+                (lumenBridgeGapWidth >=
+                     probConfig.lumen_strong_bridge_min_gap_width ||
+                 finalAxisLen >=
+                     probConfig.lumen_strong_bridge_min_axis_length) &&
                 priorShapeRescued;
             const bool configuredBridgeOverlapWaiver =
                 lumenBridgeEvidenceWaivesOverlapSoftPenalty &&
@@ -7445,7 +10950,8 @@ CostCallbackPair Frame::trySplitCellPhased(
     const float lumenContinuationClaimSoftPenalty =
         (lumenProposal != nullptr) ? lumenProposal->continuationClaimSoftPenalty : 0.0f;
     const float lumenPositiveGateEffectiveElongatedMinShape =
-        std::max(1.50f, lumenPositiveGateElongatedParentMinShape);
+        std::max(probConfig.lumen_positive_gate_min_shape_floor,
+                 lumenPositiveGateElongatedParentMinShape);
     const bool lumenPositiveGateElongatedShapeOk =
         lumenProposal != nullptr &&
         lumenPositiveGateElongatedParentMinShape >= 0.0f &&
@@ -7460,7 +10966,7 @@ CostCallbackPair Frame::trySplitCellPhased(
         lumenPositiveGateElongatedMaxScore < 0.0f ||
         lumenPriorScoreWithoutWindowBonus <= lumenPositiveGateElongatedMaxScore;
     const bool lumenCurrentParentDoesNotPersist =
-        lumenParentPersistencePenalty <= 1e-3f;
+        lumenParentPersistencePenalty <= probConfig.lumen_parent_persistence_epsilon;
     const bool lumenPositiveGateElongatedSupport =
         useCellLumenImageGate &&
         lumenCurrentParentDoesNotPersist &&
@@ -7473,23 +10979,29 @@ CostCallbackPair Frame::trySplitCellPhased(
         lumenProposal != nullptr &&
         lumenProposal->candidateIdA >= 0 &&
         lumenProposal->candidateIdB >= 0 &&
-        lumenProposal->windowBothDaughtersSupported > 0 &&
-        lumenProposal->windowMissingDaughterCount == 0 &&
-        lumenProposal->windowParentPersists == 0;
+        lumenProposal->windowBothDaughtersSupported >=
+            probConfig.lumen_clean_window_min_both_supported &&
+        lumenProposal->windowMissingDaughterCount <=
+            probConfig.lumen_clean_window_max_missing_daughters &&
+        lumenProposal->windowParentPersists <=
+            probConfig.lumen_clean_window_max_parent_persists;
     const bool lumenWeakImageGeometryOk =
-        lumenParentDistanceBalance >= 0.70f ||
+        lumenParentDistanceBalance >= probConfig.lumen_weak_image_min_parent_balance ||
         (lumenPositiveGateElongatedShapeOk && lumenPositiveGateElongatedScoreOk);
     const bool lumenRiskyContinuationClaim =
-        lumenParentDistanceBalance < 0.75f &&
-        (lumenNeighborClaimPenalty >= 10.0f ||
-         lumenContinuationClaimSoftPenalty >= 4.0f);
+        lumenParentDistanceBalance < probConfig.lumen_risky_claim_parent_balance &&
+        (lumenNeighborClaimPenalty >= probConfig.lumen_risky_claim_neighbor_penalty ||
+         lumenContinuationClaimSoftPenalty >=
+             probConfig.lumen_risky_claim_continuation_penalty);
     const bool lumenPositiveGateFutureTotalSupport =
         cleanFutureWindowSupport &&
         costDiff <= -adaptiveThreshold &&
         lumenPositiveGateSoftPenaltyFraction <=
-            std::max(0.02, static_cast<double>(
-                               std::max(0.0f,
-                                        lumenPositiveGateElongatedMaxSoftPenaltyFraction)));
+            std::max(static_cast<double>(
+                         probConfig.lumen_future_support_min_soft_penalty_fraction),
+                     static_cast<double>(
+                         std::max(0.0f,
+                                  lumenPositiveGateElongatedMaxSoftPenaltyFraction)));
     const bool lumenPositiveGateFutureWindowSoftSupport =
         windowBackedLumenPrior &&
         seedHasWindowLateralEvidence &&
@@ -7497,47 +11009,64 @@ CostCallbackPair Frame::trySplitCellPhased(
         lumenWeakImageGeometryOk &&
         imageCostDiff <= 0.0 &&
         lumenPositiveGateSoftPenaltyFraction <=
-            std::max(0.02, static_cast<double>(
-                               std::max(0.0f,
-                                        lumenPositiveGateElongatedMaxSoftPenaltyFraction)));
+            std::max(static_cast<double>(
+                         probConfig.lumen_future_support_min_soft_penalty_fraction),
+                     static_cast<double>(
+                         std::max(0.0f,
+                                  lumenPositiveGateElongatedMaxSoftPenaltyFraction)));
     const bool lumenCleanOneSidedWindowRescue =
         cleanFutureWindowSupport &&
         lumenPositiveGateElongatedShapeOk &&
-        lumenNeighborClaimPenalty <= 4.0f &&
-        lumenContinuationClaimSoftPenalty <= 4.0f &&
-        lumenParentPersistencePenalty <= 8.0f &&
+        lumenNeighborClaimPenalty <=
+            probConfig.lumen_clean_one_sided_max_neighbor_penalty &&
+        lumenContinuationClaimSoftPenalty <=
+            probConfig.lumen_clean_one_sided_max_continuation_penalty &&
+        lumenParentPersistencePenalty <=
+            probConfig.lumen_clean_one_sided_max_parent_persistence &&
         imageCostDiff <= 0.0 &&
-        lumenPriorScoreWithoutWindowBonus <= 12.0f &&
+        lumenPriorScoreWithoutWindowBonus <=
+            probConfig.lumen_clean_one_sided_max_prior_score &&
         lumenPositiveGateSoftPenaltyFraction <=
-            std::max(0.05, static_cast<double>(
-                               std::max(0.0f,
-                                        lumenPositiveGateElongatedMaxSoftPenaltyFraction)));
+            std::max(static_cast<double>(
+                         probConfig.lumen_clean_one_sided_min_soft_penalty_fraction),
+                     static_cast<double>(
+                         std::max(0.0f,
+                                  lumenPositiveGateElongatedMaxSoftPenaltyFraction)));
     const bool lumenPrepassFallbackSoftSupport =
         bestIsCellLumenPrepassFallback &&
         lumenPositiveGateElongatedShapeOk &&
         lumenCurrentParentDoesNotPersist &&
-        lumenNeighborClaimPenalty <= 1e-5f &&
-        lumenContinuationClaimSoftPenalty <= 1e-5f &&
-        lumenParentDistanceBalance >= 0.90f &&
-        imageCostDiff <= -20.0 &&
-        bridgeCostRescueValleyFromBright <= 0.65f &&
-        bridgeCostRescueGapDensity <= 0.20f &&
-        lumenPriorScoreWithoutWindowBonus <= 3.0f &&
-        lumenPositiveGateSoftPenaltyFraction <= 0.055;
+        lumenNeighborClaimPenalty <= probConfig.lumen_prepass_max_claim_penalty &&
+        lumenContinuationClaimSoftPenalty <= probConfig.lumen_prepass_max_claim_penalty &&
+        lumenParentDistanceBalance >= probConfig.lumen_prepass_min_parent_balance &&
+        imageCostDiff <= -probConfig.lumen_prepass_min_image_gain &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.lumen_prepass_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <= probConfig.lumen_prepass_max_gap_density &&
+        lumenPriorScoreWithoutWindowBonus <= probConfig.lumen_prepass_max_prior_score &&
+        lumenPositiveGateSoftPenaltyFraction <=
+            probConfig.lumen_prepass_max_soft_penalty_fraction;
     const bool lumenFutureContinuationConflictRescue =
         cleanFutureWindowSupport &&
         lumenProposal != nullptr &&
         lumenProposal->futureContinuationConflictRescued &&
         lumenCurrentParentDoesNotPersist &&
-        lumenParentPersistencePenalty <= 1e-5f &&
-        lumenNeighborClaimPenalty <= 1e-5f &&
-        lumenContinuationClaimSoftPenalty >= 15.0f &&
-        lumenParentDistanceBalance >= 0.45f &&
-        imageCostDiff <= -20.0 &&
-        overlapCostDiff <= baselineImageCost * 0.70 &&
-        bridgeCostRescueValleyFromBright <= 0.70f &&
-        lumenPriorScoreWithoutWindowBonus <= 50.0f &&
-        lumenPositiveGateSoftPenaltyFraction <= 0.02;
+        lumenParentPersistencePenalty <= probConfig.lumen_prepass_max_claim_penalty &&
+        lumenNeighborClaimPenalty <= probConfig.lumen_prepass_max_claim_penalty &&
+        lumenContinuationClaimSoftPenalty >=
+            probConfig.lumen_future_conflict_min_continuation_penalty &&
+        lumenParentDistanceBalance >=
+            probConfig.lumen_future_conflict_min_parent_balance &&
+        imageCostDiff <= -probConfig.lumen_future_conflict_min_image_gain &&
+        overlapCostDiff <=
+            baselineImageCost *
+                probConfig.lumen_future_conflict_max_overlap_cost_fraction &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.lumen_future_conflict_max_valley_from_bright &&
+        lumenPriorScoreWithoutWindowBonus <=
+            probConfig.lumen_future_conflict_max_prior_score &&
+        lumenPositiveGateSoftPenaltyFraction <=
+            probConfig.lumen_future_conflict_max_soft_penalty_fraction;
     const bool lumenCleanWindowTotalImprovement =
         windowBackedLumenPrior &&
         lumenCurrentParentDoesNotPersist &&
@@ -7545,15 +11074,21 @@ CostCallbackPair Frame::trySplitCellPhased(
         costDiff < 0.0 &&
         overlapCostDiff <= 0.0 &&
         imageCostDiff <= 0.0 &&
-        lumenBridgeGapWidth >= 4.0f &&
-        bridgeCostRescueValleyFromBright <= 0.75f &&
-        lumenPositiveGateSoftPenaltyFraction <= 0.04;
+        lumenBridgeGapWidth >= probConfig.lumen_clean_window_min_gap_width &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.lumen_clean_window_max_valley_from_bright &&
+        lumenPositiveGateSoftPenaltyFraction <=
+            probConfig.lumen_clean_window_max_soft_penalty_fraction;
     const char *lumenPositiveGateSupportReason = "normal_image_gain";
     if (useCellLumenCostGate &&
         useCellLumenImageGate &&
         lumenPositiveGateRequiredImageGain > 0.0) {
         const double riskyClaimImageGain =
-            lumenPositiveGateRequiredImageGain * (lumenRiskyContinuationClaim ? 2.0 : 1.0);
+            lumenPositiveGateRequiredImageGain *
+            (lumenRiskyContinuationClaim
+                 ? static_cast<double>(
+                       probConfig.lumen_risky_claim_image_gain_multiplier)
+                 : 1.0);
         const bool rawImageGainSupport =
             imageCostDiff <= -riskyClaimImageGain;
         lumenPositiveGateHasImageSupport =
@@ -7585,7 +11120,10 @@ CostCallbackPair Frame::trySplitCellPhased(
         }
     }
     const double lumenWeakSplitImageGain =
-        std::max(60.0, lumenPositiveGateRequiredImageGain * 2.0);
+        std::max(static_cast<double>(probConfig.lumen_weak_split_image_gain_abs),
+                 lumenPositiveGateRequiredImageGain *
+                     static_cast<double>(
+                         probConfig.lumen_weak_split_image_gain_multiplier));
     const bool lumenWeakImageSplit =
         useCellLumenCostGate &&
         useCellLumenImageGate &&
@@ -7597,30 +11135,38 @@ CostCallbackPair Frame::trySplitCellPhased(
         !lumenCleanOneSidedWindowRescue &&
         !lumenFutureContinuationConflictRescue &&
         !lumenCleanWindowTotalImprovement &&
-        (lumenParentShapeElongation < 1.50f ||
-         lumenParentDistanceBalance < 0.60f ||
-         (lumenNeighborClaimPenalty >= 10.0f &&
-          lumenParentDistanceBalance < 0.75f));
+        (lumenParentShapeElongation < probConfig.lumen_hijack_min_parent_shape ||
+         lumenParentDistanceBalance < probConfig.lumen_hijack_min_parent_balance ||
+         (lumenNeighborClaimPenalty >=
+              probConfig.lumen_risky_claim_neighbor_penalty &&
+          lumenParentDistanceBalance < probConfig.lumen_risky_claim_parent_balance));
     const bool lumenLikelyNeighborClaimDuplicate =
         lumenWeakImageSplit &&
         !lumenCleanOneSidedWindowRescue &&
         !lumenFutureContinuationConflictRescue &&
         !lumenCleanWindowTotalImprovement &&
-        lumenNeighborClaimPenalty >= 10.0f &&
-        imageCostDiff > -80.0 &&
-        (lumenParentDistanceBalance < 0.82f ||
-         (lumenBridgeGapWidth < 6.0f &&
-          bridgeCostRescueValleyFromBright > 0.45f));
+        lumenNeighborClaimPenalty >=
+            probConfig.lumen_neighbor_duplicate_min_claim_penalty &&
+        imageCostDiff > -probConfig.lumen_neighbor_duplicate_min_image_gain &&
+        (lumenParentDistanceBalance <
+             probConfig.lumen_neighbor_duplicate_min_parent_balance ||
+         (lumenBridgeGapWidth < probConfig.lumen_neighbor_duplicate_min_gap_width &&
+          bridgeCostRescueValleyFromBright >
+              probConfig.lumen_neighbor_duplicate_min_valley_from_bright));
     const bool lumenModerateClaimOverlapDuplicate =
         lumenWeakImageSplit &&
         !lumenCleanOneSidedWindowRescue &&
         !lumenFutureContinuationConflictRescue &&
         !lumenCleanWindowTotalImprovement &&
-        lumenNeighborClaimPenalty >= 7.0f &&
-        lumenParentDistanceBalance < 0.75f &&
-        overlapCostDiff > baselineImageCost * 0.50 &&
+        lumenNeighborClaimPenalty >=
+            probConfig.lumen_moderate_duplicate_min_claim_penalty &&
+        lumenParentDistanceBalance <
+            probConfig.lumen_moderate_duplicate_min_parent_balance &&
+        overlapCostDiff >
+            baselineImageCost *
+                probConfig.lumen_moderate_duplicate_min_overlap_cost_fraction &&
         costDiff > 0.0 &&
-        imageCostDiff > -80.0;
+        imageCostDiff > -probConfig.lumen_moderate_duplicate_min_image_gain;
     if (lumenLikelyContinuationHijack ||
         lumenLikelyNeighborClaimDuplicate ||
         lumenModerateClaimOverlapDuplicate) {
@@ -7741,6 +11287,42 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " totalDiff=" << costDiff
                   << " imageDiff=" << imageCostDiff
                   << " overlapDiff=" << overlapCostDiff
+                  << " geometryAdjustedDiff=" << geometryAdjustedCostDiff
+                  << " highShapeRawPcaBridgeBioNearMissRescue="
+                  << (highShapeRawPcaBridgeBioNearMissCostRescued ? 1 : 0)
+                  << " highShapeRawRodSignalNearTieRescue="
+                  << (highShapeRawRodSignalNearTieCostRescued ? 1 : 0)
+                  << " oneFrameAlignedLockedFuturePcaBridgeRescue="
+                  << (oneFrameAlignedLockedFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " twoFrameAlignedLockedFuturePcaBridgeRescue="
+                  << (twoFrameAlignedLockedFuturePcaBridgeCostRescued ? 1 : 0)
+                  << " stableFutureNearThresholdBridgeRescue="
+                  << (stableFuturePcaBridgeNearThresholdCostRescued ? 1 : 0)
+                  << " costBackedCleanFutureNearThresholdRescue="
+                  << (costBackedCleanFuturePcaBridgeNearThresholdCostRescued
+                          ? 1
+                          : 0)
+                  << " parentShapeElong="
+                  << (bridgeProposal != nullptr ? bridgeProposal->parentShapeElongation : 0.0f)
+                  << " parentDistBalance="
+                  << (bridgeProposal != nullptr ? bridgeProposal->parentDistanceBalance : 0.0f)
+                  << " futureBoth="
+                  << (bridgeProposal != nullptr ? bridgeProposal->windowBothDaughtersSupported : 0)
+                  << " futureMissing="
+                  << (bridgeProposal != nullptr ? bridgeProposal->windowMissingDaughterCount : 0)
+                  << " parentPersists="
+                  << (bridgeProposal != nullptr ? bridgeProposal->windowParentPersists : 0)
+                  << " centerSnapApplied="
+                  << (bridgeProposal != nullptr && bridgeProposal->centerSnapApplied ? 1 : 0)
+                  << " immediateFutureBacked="
+                  << (bridgeProposal != nullptr && bridgeProposal->immediateFutureCenterBacked ? 1 : 0)
+                  << " alignedPairFallback="
+                  << (bridgeProposal != nullptr && bridgeProposal->centerSnapUsedAlignedPairFallback ? 1 : 0)
+                  << " valleyFromBright=" << bridgeCostRescueValleyFromBright
+                  << " gapDensity=" << bridgeCostRescueGapDensity
+                  << " finalAxisLen=" << finalAxisLen
+                  << " srcMaxR=" << srcMaxR
+                  << " maxDaughterSeedDrift=" << maxDaughterSeedDrift
                   << " gateMode=" << (useCellLumenImageGate ? "image" : "total")
                   << " mode=" << (_useBboxCost ? "bbox" : "full")
                   << " threshold=" << -adaptiveThreshold

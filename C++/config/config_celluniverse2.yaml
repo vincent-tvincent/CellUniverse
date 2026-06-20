@@ -41,6 +41,45 @@ simulation:
   celluniverse2_stale_daughter_cleanup_enabled: true
   celluniverse2_stale_daughter_cleanup_min_age: 4
   celluniverse2_stale_daughter_cleanup_overlap: 0.50
+  # Limited, deterministic placement perturb before final PCA. This tries a
+  # small batch of signal-center and random nearby centers for suspicious cells
+  # so PCA starts near the right bright body instead of stopping halfway.
+  celluniverse2_pre_pca_placement_probe_enabled: true
+  celluniverse2_pre_pca_placement_probe_random_candidates: 12
+  celluniverse2_pre_pca_placement_probe_signal_candidates: 4
+  celluniverse2_pre_pca_placement_probe_trigger_background_margin: 0.08
+  celluniverse2_pre_pca_placement_probe_trigger_shape: 1.55
+  celluniverse2_pre_pca_placement_probe_search_radius_scale: 1.60
+  celluniverse2_pre_pca_placement_probe_max_move_units: 1.80
+  celluniverse2_pre_pca_placement_probe_min_mean_gain: 0.015
+  celluniverse2_pre_pca_placement_probe_score_margin: 0.005
+  celluniverse2_pre_pca_placement_probe_stddev_weight: 0.05
+  celluniverse2_pre_pca_placement_probe_distance_weight: 0.025
+  celluniverse2_pre_pca_placement_probe_neighbor_scale: 0.65
+  # Random probe positions are fallback guesses, so require stronger evidence
+  # than exact signal-center snaps before allowing them to move a cell.
+  celluniverse2_pre_pca_placement_probe_random_extra_mean_gain: 0.08
+  celluniverse2_pre_pca_placement_probe_random_max_move_units: 0.35
+  celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale: 0.45
+  # In crowded neighborhoods, shrink per-iteration PCA position movement so a
+  # cell cannot drift into a neighboring signal while shape fitting.
+  celluniverse2_crowded_pca_shift_cap_enabled: true
+  celluniverse2_crowded_pca_shift_cap_neighbor_scale: 2.20
+  celluniverse2_crowded_pca_shift_cap_min_fraction: 0.18
+  celluniverse2_crowded_pca_shift_cap_clearance_fraction: 0.35
+  celluniverse2_pre_pca_placement_probe_split_halfspace: true
+  celluniverse2_weighted_center_pull_enabled: true
+  celluniverse2_weighted_center_pull_iterations: 3
+  celluniverse2_weighted_center_pull_radius_scale: 1.50
+  celluniverse2_weighted_center_pull_step_fraction: 1.00
+  celluniverse2_weighted_center_pull_max_move_units: 0.75
+  celluniverse2_weighted_center_pull_min_signal: 0.000001
+  celluniverse2_weighted_center_pull_nonuniform_cv: 0.12
+  celluniverse2_weighted_center_pull_crowded_shrink_enabled: true
+  celluniverse2_weighted_center_pull_crowded_halfspace_fraction: 0.45
+  celluniverse2_weighted_center_pull_crowded_min_radius_scale: 1.05
+  celluniverse2_weighted_center_pull_neighbor_exclusion_enabled: true
+  celluniverse2_weighted_center_pull_neighbor_exclusion_scale: 1.05
   # Local bbox background should represent true surrounding background, not the
   # brightest halo outside the fitted cell body.
   adaptive_background_local_bbox_percentile: 20.0
@@ -135,6 +174,42 @@ prob:
   # refit positions on their own sides so PCA cannot pull the split pair back
   # into one short rod before validation.
   pca_bridge_future_window_refit_halfspace_min_fraction: 0.70
+  # Do not freeze ordinary split daughters after their birth frame. The
+  # original pipeline's correct frame-14 behavior depends on allowing the
+  # 1f2ed... daughter pair to keep localizing in frames 12-14.
+  celluniverse2_recent_daughter_position_lock_frames: 0
+  celluniverse2_recent_daughter_lock_shape: 2.0
+  # Prevent newly born daughters from immediately re-splitting into a false
+  # second generation while PCA is still localizing the original pair.
+  celluniverse2_split_daughter_resplit_cooldown_frames: 3
+  # A severe post-PCA rod with two clean future-supported daughters should not
+  # be rejected only because the current-frame center snap is far. This targets
+  # early rods such as the frame-3 bridge miss without relaxing low-shape cases.
+  split_severe_post_pca_rod_future_rescue_enabled: true
+  split_severe_post_pca_rod_future_rescue_min_shape: 2.40
+  split_severe_post_pca_rod_future_rescue_min_long_mid_ratio: 2.20
+  split_severe_post_pca_rod_future_rescue_max_mid_short_ratio: 1.25
+  split_severe_post_pca_rod_future_rescue_min_parent_balance: 0.65
+  split_severe_post_pca_rod_future_rescue_snap_scale: 1.00
+  split_severe_post_pca_rod_future_rescue_min_future_both: 2
+  # If that same severe rod still loses the final global cost check because
+  # both daughters overlap the former rod body, rescue only the clean low-valley
+  # case with small post-refit seed drift.
+  split_severe_post_pca_rod_future_cost_rescue_enabled: true
+  split_severe_post_pca_rod_future_cost_rescue_max_cost_abs: 30000.0
+  split_severe_post_pca_rod_future_cost_rescue_max_image_diff_abs: 5000.0
+  split_severe_post_pca_rod_future_cost_rescue_max_overlap_diff_abs: 30000.0
+  split_severe_post_pca_rod_future_cost_rescue_max_valley_from_bright: 0.35
+  split_severe_post_pca_rod_future_cost_rescue_max_gap_density: 0.15
+  split_severe_post_pca_rod_future_cost_rescue_max_drift_scale: 0.08
+  # Low-shape PCA bridge proposals still need a real valley. Future support is
+  # not enough if the bridge is bright/flat and PCA refit drifts a daughter far
+  # away from its seed, which was the frame-5 oversplit pattern.
+  split_weak_pca_bridge_strict_no_valley_enabled: true
+  split_weak_pca_bridge_strict_no_valley_max_parent_shape: 1.60
+  split_weak_pca_bridge_strict_no_valley_min_valley_from_bright: 0.90
+  split_weak_pca_bridge_strict_no_valley_min_gap_density: 0.12
+  split_weak_pca_bridge_strict_no_valley_min_drift_fraction: 0.55
   # Current-frame aligned-pair fallbacks must still show enough balance or
   # future brightness to count as trustworthy evidence.
   pca_bridge_current_aligned_pair_min_parent_balance: 0.45

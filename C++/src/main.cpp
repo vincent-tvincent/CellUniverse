@@ -314,6 +314,7 @@ int main(int argc, char *argv[])
     CellUniverse lineage = CellUniverse(cells, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
     const bool prepareAnalyzeOneFrame =
         (config.simulation.prepare_analyze_one_frame ||
+         config.simulation.celluniverse3_enabled ||
          (config.cellLumen.enabled && config.cellLumen.fusionEnabled)) &&
         !config.simulation.quit_after_preprocessing;
     if (prepareAnalyzeOneFrame) {
@@ -322,6 +323,11 @@ int main(int argc, char *argv[])
         if (config.cellLumen.enabled && config.cellLumen.fusionEnabled &&
             !config.simulation.prepare_analyze_one_frame) {
             std::cout << "[INFO] cell_lumen.fusionEnabled=true; forcing per-frame prepare so CellLumen rescue uses the shared prepared stack before optimization."
+                      << std::endl;
+        }
+        if (config.simulation.celluniverse3_enabled &&
+            !config.simulation.prepare_analyze_one_frame) {
+            std::cout << "[INFO] celluniverse3_enabled=true; forcing per-frame prepare so windowed max/sum guidance can use a rolling local frame window."
                       << std::endl;
         }
     } else {

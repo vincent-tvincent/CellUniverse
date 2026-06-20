@@ -1,0 +1,27 @@
+base_config: config_celluniverse2.yaml
+
+simulation:
+  # Restore a small amount of the old random perturb optimizer only for
+  # CellUniverse2 cells that look unhealthy after deterministic placement.
+  # Stable cells do not enter the perturb loop.
+  celluniverse2_conditional_perturb_enabled: true
+  celluniverse2_conditional_perturb_iterations_per_cell: 8
+  celluniverse2_conditional_perturb_radius_ratio: 0.45
+  celluniverse2_conditional_perturb_min_shape: 2.00
+  celluniverse2_conditional_perturb_dim_margin: 0.045
+  celluniverse2_conditional_perturb_nonuniform_cv: 0.85
+  celluniverse2_conditional_perturb_recent_daughter_frames: 3
+  celluniverse2_conditional_perturb_recent_daughter_min_shape: 1.65
+  celluniverse2_weighted_center_pull_voronoi_ownership_enabled: true
+  celluniverse2_weighted_center_pull_voronoi_margin_units: 0.00
+
+prob:
+  # If daughter PCA/refit makes a clean future-supported bridge split worse,
+  # keep the pre-refit split and let the normal bio/cost gates judge it.
+  split_daughter_refit_cost_fallback_enabled: true
+  split_daughter_refit_cost_fallback_min_worsen: 1.0
+  split_daughter_refit_cost_fallback_min_parent_shape: 1.45
+  split_daughter_refit_cost_fallback_min_future_both: 1
+  split_daughter_refit_cost_fallback_max_missing_daughters: 2
+  split_daughter_refit_cost_fallback_max_parent_persists: 0
+  split_daughter_refit_cost_fallback_require_pre_improvement: true

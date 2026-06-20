@@ -85,6 +85,7 @@ struct BridgeSplitProposal
     float signalCenterSeparationRatio = 0.0f;
     float signalCenterMidpointDistance = 0.0f;
     float signalCenterAxisAlignment = 0.0f;
+    bool cellUniverse3DelayedMissingDaughter = false;
     float parentPersistencePenalty = 0.0f;
     float neighborClaimPenalty = 0.0f;
     float continuationClaimSoftPenalty = 0.0f;
@@ -108,6 +109,28 @@ struct BridgeSplitProposal
     bool pcaBridgeRevertedFarFutureSnap = false;
     float pcaBridgeRevertedSnapDistance = 0.0f;
     float pcaBridgeRevertedSnapTrustLimit = 0.0f;
+
+    // CellUniverse3 local prior/future map evidence. These fields are filled
+    // from the windowed max/sum P/F/O/U/D guide before split validation and
+    // consumed as soft geometry priors inside trySplitCellPhased.
+    bool cellUniverse3MapProposal = false;
+    bool cellUniverse3MapPriorEvaluated = false;
+    bool cellUniverse3MapPriorConfident = false;
+    int cellUniverse3MapOverlapBoxes = 0;
+    int cellUniverse3MapUnionBoxes = 0;
+    int cellUniverse3MapFutureOnlyBoxes = 0;
+    float cellUniverse3MapOSupport = 0.0f;
+    float cellUniverse3MapDSupport = 0.0f;
+    float cellUniverse3MapUSupportD1 = 0.0f;
+    float cellUniverse3MapUSupportD2 = 0.0f;
+    float cellUniverse3MapAxisAlignment = 0.0f;
+    float cellUniverse3MapCenterDistanceUnits = 0.0f;
+    float cellUniverse3MapCenterPenalty = 0.0f;
+    float cellUniverse3MapAxisPenalty = 0.0f;
+    float cellUniverse3MapRegionPenalty = 0.0f;
+    cv::Point3f cellUniverse3MapOCenter{0.0f, 0.0f, 0.0f};
+    cv::Point3f cellUniverse3MapDCenter{0.0f, 0.0f, 0.0f};
+    cv::Point3f cellUniverse3MapAxis{0.0f, 0.0f, 0.0f};
 };
 
 class Frame

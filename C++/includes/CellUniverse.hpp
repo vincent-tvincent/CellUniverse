@@ -136,10 +136,49 @@ private:
    size_t resumePreviousCellCount = 0;
    int initialNonTrashCellCount = 0;
    int cumulativeAcceptedSplits = 0;
+   std::unordered_map<int, std::vector<Frame::SignalCenter>>
+       cellUniverse3WindowCentersByFrame;
+   struct CellUniverse3WindowMapBox {
+       cv::Point3f center{0.0f, 0.0f, 0.0f};
+       float priorMax = 0.0f;
+       float priorSum = 0.0f;
+       float futureMax = 0.0f;
+       float futureSum = 0.0f;
+       bool priorHot = false;
+       bool futureHot = false;
+       int voxels = 0;
+   };
+   struct CellUniverse3WindowMap {
+       bool valid = false;
+       int frameIndex = -1;
+       int gridX = 0;
+       int gridY = 0;
+       int gridZ = 0;
+       int boxSizeX = 1;
+       int boxSizeY = 1;
+       int boxSizeZ = 1;
+       float priorThreshold = 0.0f;
+       float futureThreshold = 0.0f;
+       std::vector<CellUniverse3WindowMapBox> boxes;
+   };
+   std::unordered_map<int, CellUniverse3WindowMap> cellUniverse3WindowMapsByFrame;
+   std::unordered_map<int, std::vector<cv::Mat>> cellUniverse3WindowProbabilityByFrame;
+   struct CellUniverse3MissedSplitMemory {
+       int frameIndex = -1;
+       cv::Point3f parentPosition{0.0f, 0.0f, 0.0f};
+       cv::Point3f splitAxis{0.0f, 0.0f, 0.0f};
+       float parentMaxRadius = 0.0f;
+       float parentShape = 1.0f;
+   };
+   std::unordered_map<std::string, CellUniverse3MissedSplitMemory>
+       cellUniverse3MissedSplitMemoryByCell;
 
    void prepareSignalCentersForFrame(int frameIndex,
                                      const std::vector<cv::Mat> &realFrame,
                                      bool keepLoaded);
+   std::vector<Frame::SignalCenter> buildCellUniverse3WindowCenters(
+       int frameIndex,
+       const std::vector<cv::Mat> &currentFrame);
    int rollingPreprocessWindowSize() const;
    size_t countNonTrashCellsInFrame(int frameIndex) const;
    double effectiveN2V2ContrastGamma() const;

@@ -2029,9 +2029,15 @@ std::vector<cv::Mat> ImageHandler::loadFrame(const std::string &imageFile,
     return preprocessLoadedFrame(normalizedSlices, imageFile, config, logSink);
 }
 
-PathVec ImageHandler::getImageFilePaths(const std::string &input, int firstFrame, int lastFrame, BaseConfig &config)
+PathVec ImageHandler::getImageFilePaths(const std::string &input,
+                                        int firstFrame,
+                                        int lastFrame,
+                                        BaseConfig &config,
+                                        bool allowMissingTail,
+                                        int requiredLastFrame)
 {
     PathVec imagePaths;
+    const int requiredEnd = (requiredLastFrame >= 0) ? requiredLastFrame : lastFrame;
 
     if (input.find('%') != std::string::npos)
     {
@@ -2045,6 +2051,13 @@ PathVec ImageHandler::getImageFilePaths(const std::string &input, int firstFrame
             {
                 imagePaths.push_back(file);
                 continue;
+            }
+
+            if (allowMissingTail && requiredEnd >= 0 && i > requiredEnd)
+            {
+                std::cout << "[INFO] optional lookahead input file not found; "
+                          << "stopping future context at \"" << file << "\"" << '\n';
+                break;
             }
 
             std::cerr << "Input file not found \"" << file << "\"" << '\n';
@@ -2086,8 +2099,16 @@ PathVec ImageHandler::getImageFilePaths(const std::string &input, int firstFrame
         }
 
         const int start = firstFrame;
-        const int end = (lastFrame < 0) ? static_cast<int>(allFiles.size()) - 1
-                                        : std::min(lastFrame, static_cast<int>(allFiles.size()) - 1);
+        const int availableEnd = static_cast<int>(allFiles.size()) - 1;
+        const int requiredDirectoryEnd =
+            (requiredEnd >= 0) ? requiredEnd : ((lastFrame < 0) ? availableEnd : lastFrame);
+        if (requiredDirectoryEnd > availableEnd)
+        {
+            throw std::runtime_error("lastFrame is out of range for directory input");
+        }
+
+        const int end = (lastFrame < 0) ? availableEnd
+                                        : std::min(lastFrame, availableEnd);
 
         if (start >= static_cast<int>(allFiles.size()))
         {

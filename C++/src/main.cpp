@@ -115,6 +115,43 @@ void applyRuntimeOverrides(BaseConfig &config)
               << std::endl;
 }
 
+int computeFutureContextLookahead(const BaseConfig &config)
+{
+    int lookahead = 0;
+    const bool needsPreparedWindow =
+        config.simulation.prepare_analyze_one_frame ||
+        config.simulation.celluniverse3_enabled ||
+        (config.cellLumen.enabled && config.cellLumen.fusionEnabled);
+
+    if (!needsPreparedWindow || config.simulation.quit_after_preprocessing) {
+        return 0;
+    }
+
+    if (config.simulation.celluniverse3_enabled) {
+        lookahead = std::max(lookahead,
+                             std::max(1, config.simulation.celluniverse3_window_radius));
+    }
+
+    if (config.simulation.celluniverse2_enabled &&
+        config.prob.pca_bridge_future_window_enabled &&
+        config.prob.pca_bridge_future_window_size > 1) {
+        lookahead = std::max(
+            lookahead,
+            std::clamp(config.prob.pca_bridge_future_window_size, 2, 5) - 1);
+    }
+
+    if (config.cellLumen.enabled &&
+        config.cellLumen.fusionEnabled &&
+        config.cellLumen.fusionSplitPriorWindowEnabled &&
+        config.cellLumen.fusionSplitPriorWindowSize > 1) {
+        lookahead = std::max(
+            lookahead,
+            std::clamp(config.cellLumen.fusionSplitPriorWindowSize, 2, 5) - 1);
+    }
+
+    return lookahead;
+}
+
 Args initArgs(int argc, char *argv[]) {
     // parse args here
     Args args;
@@ -286,8 +323,37 @@ int main(int argc, char *argv[])
         Ellipsoid::cellConfig = *config.cell;
     }
 
-    // load file paths
-    PathVec imageFilePaths = ImageHandler::getImageFilePaths(args.input, args.firstFrame, args.lastFrame, config);
+    // Load selected frames plus optional future context. The selected range
+    // still controls optimize/export/checkpoint behavior; extra lookahead
+    // frames only feed rolling window evidence if they exist.
+    const int futureContextLookahead = computeFutureContextLookahead(config);
+    const int loadLastFrame =
+        (args.lastFrame >= 0 && futureContextLookahead > 0)
+            ? args.lastFrame + futureContextLookahead
+            : args.lastFrame;
+    PathVec imageFilePaths = ImageHandler::getImageFilePaths(
+        args.input,
+        args.firstFrame,
+        loadLastFrame,
+        config,
+        futureContextLookahead > 0,
+        args.lastFrame);
+    int selectedFrameCount = static_cast<int>(imageFilePaths.size());
+    if (args.lastFrame >= args.firstFrame && args.lastFrame >= 0) {
+        selectedFrameCount = args.lastFrame - args.firstFrame + 1;
+    }
+    selectedFrameCount =
+        std::min(selectedFrameCount, static_cast<int>(imageFilePaths.size()));
+    if (futureContextLookahead > 0) {
+        std::cout << "[INFO] future context lookahead enabled: requested="
+                  << args.firstFrame << ".." << args.lastFrame
+                  << " load_last=" << loadLastFrame
+                  << " selected_count=" << selectedFrameCount
+                  << " loaded_count=" << imageFilePaths.size()
+                  << " context_count="
+                  << (static_cast<int>(imageFilePaths.size()) - selectedFrameCount)
+                  << '\n';
+    }
 
     // load cells
     std::string firstFrameFile;
@@ -299,7 +365,9 @@ int main(int argc, char *argv[])
     }
 
     if (config.simulation.quit_after_preprocessing) {
-        CellUniverse preprocessOnlyLineage({}, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
+        CellUniverse preprocessOnlyLineage({}, imageFilePaths, config, args.output,
+                                           args.firstFrame, args.continueFrom,
+                                           selectedFrameCount);
         preprocessOnlyLineage.preprocessAllFramesAlignedToMinimumBackground(false);
         std::cout << "[DEBUG] quit_after_preprocessing=true; exiting after preprocessing/load phase." << std::endl;
         return 0;
@@ -311,7 +379,9 @@ int main(int argc, char *argv[])
                                                                         config.simulation.z_scaling, firstFrameFile,
                                                                         config.simulation.initial_z_space);
     // create lineage
-    CellUniverse lineage = CellUniverse(cells, imageFilePaths, config, args.output, args.firstFrame, args.continueFrom);
+    CellUniverse lineage = CellUniverse(cells, imageFilePaths, config,
+                                        args.output, args.firstFrame,
+                                        args.continueFrom, selectedFrameCount);
     const bool prepareAnalyzeOneFrame =
         (config.simulation.prepare_analyze_one_frame ||
          config.simulation.celluniverse3_enabled ||

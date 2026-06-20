@@ -29,7 +29,8 @@ public:
                  BaseConfig &config,
                  std::string outputPath,
                  int firstFrame = 0,
-                 int continueFrom = -1);
+                 int continueFrom = -1,
+                 int selectedFrameCount = -1);
 
     void optimize(int frameIndex);
     void saveImages(int frameIndex, const std::string &stage = "");
@@ -92,6 +93,7 @@ private:
 
    // M2 state: per-frame paths retained for lazy load and initial-cells map.
    PathVec imagePaths;
+   size_t selectedFrameCount = 0;
    std::map<std::string, std::vector<Ellipsoid>> initialCells;
    float edgeBrightnessAlignmentTarget = 0.0f;
    bool edgeBrightnessAlignmentTargetInitialized = false;

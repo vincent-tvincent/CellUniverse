@@ -3798,10 +3798,23 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
                            BaseConfig &config,
                            std::string outputPath,
                            int firstFrame,
-                           int continueFrom)
+                           int continueFrom,
+                           int selectedFrameCount)
 : config(config), outputPath(outputPath), firstFrame(firstFrame),
-  imagePaths(imagePaths), initialCells(initialCells), continueFrom(continueFrom)
+  imagePaths(imagePaths),
+  selectedFrameCount(selectedFrameCount > 0
+                         ? std::min(static_cast<size_t>(selectedFrameCount), imagePaths.size())
+                         : imagePaths.size()),
+  initialCells(initialCells), continueFrom(continueFrom)
 {
+    std::cout << "[Frame Range] selected_count=" << this->selectedFrameCount
+              << " loaded_count=" << imagePaths.size()
+              << " lookahead_context_count="
+              << (imagePaths.size() > this->selectedFrameCount
+                      ? imagePaths.size() - this->selectedFrameCount
+                      : 0)
+              << '\n';
+
     std::cout << "[Frame Intensity Scale] enabled="
               << config.simulation.frame_intensity_normalization_enabled
               << " low_percentile="
@@ -3880,7 +3893,7 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
     perFrameAdaptiveBackground.assign(imagePaths.size(), 0.0f);
     perFrameMeanBrightness.assign(imagePaths.size(), 0.0f);
 
-    for (size_t i = 0; i < frames.size(); ++i) {
+    for (size_t i = 0; i < std::min(frames.size(), this->selectedFrameCount); ++i) {
         const size_t nonTrashCount = countNonTrashCellsInFrame(static_cast<int>(i));
         if (nonTrashCount > 0) {
             initialNonTrashCellCount = static_cast<int>(nonTrashCount);
@@ -11298,12 +11311,23 @@ void CellUniverse::optimize(int frameIndex)
         bool valid = false;
         cv::Point3f oCenter{0.0f, 0.0f, 0.0f};
         cv::Point3f dCenter{0.0f, 0.0f, 0.0f};
+        cv::Point3f oPeakA{0.0f, 0.0f, 0.0f};
+        cv::Point3f oPeakB{0.0f, 0.0f, 0.0f};
         float oWeight = 0.0f;
         float dWeight = 0.0f;
+        float oPeakAWeight = 0.0f;
+        float oPeakBWeight = 0.0f;
+        float oPeakSeparation = 0.0f;
+        float oPeakMidpointDistanceUnits = 0.0f;
+        float oPeakAxisLateralDistanceUnits = 0.0f;
         float maxUWeight = 0.0f;
+        int priorBoxes = 0;
         int overlapBoxes = 0;
         int unionBoxes = 0;
         int futureOnlyBoxes = 0;
+        int oPeakABoxes = 0;
+        int oPeakBBoxes = 0;
+        bool overlapTwoCenterForcedSplit = false;
         float parentMaxR = 1.0f;
         BoundingBox3D bbox;
     };
@@ -11338,6 +11362,11 @@ void CellUniverse::optimize(int frameIndex)
 
             cv::Point3f oAccum(0.0f, 0.0f, 0.0f);
             cv::Point3f dAccum(0.0f, 0.0f, 0.0f);
+            struct WeightedMapPoint {
+                cv::Point3f center{0.0f, 0.0f, 0.0f};
+                float weight = 0.0f;
+            };
+            std::vector<WeightedMapPoint> overlapPoints;
             for (const auto &box : map.boxes) {
                 if (!pointInsideBbox(box.center, summary.bbox)) {
                     continue;
@@ -11347,6 +11376,9 @@ void CellUniverse::optimize(int frameIndex)
                 const bool inD = box.futureHot && !box.priorHot;
                 if (!inU) continue;
                 ++summary.unionBoxes;
+                if (box.priorHot) {
+                    ++summary.priorBoxes;
+                }
                 const float uWeight = std::max(
                     0.0f,
                     box.priorSum + box.futureSum +
@@ -11360,6 +11392,9 @@ void CellUniverse::optimize(int frameIndex)
                             0.5f * std::min(box.priorMax, box.futureMax));
                     oAccum += weight * box.center;
                     summary.oWeight += weight;
+                    if (weight > 0.0f) {
+                        overlapPoints.push_back({box.center, weight});
+                    }
                 }
                 if (inD) {
                     ++summary.futureOnlyBoxes;
@@ -11378,6 +11413,126 @@ void CellUniverse::optimize(int frameIndex)
             }
             if (summary.dWeight > 1e-6f) {
                 summary.dCenter = dAccum * (1.0f / summary.dWeight);
+            }
+            if (config.simulation.celluniverse3_window_map_overlap_forced_split_enabled &&
+                summary.priorBoxes >= config.simulation.celluniverse3_window_map_overlap_forced_min_prior_boxes &&
+                summary.overlapBoxes >= config.simulation.celluniverse3_window_map_overlap_forced_min_overlap_boxes &&
+                static_cast<int>(overlapPoints.size()) >=
+                    std::max(2, config.simulation.celluniverse3_window_map_overlap_forced_min_cluster_boxes)) {
+                size_t seedAIdx = 0;
+                for (size_t i = 1; i < overlapPoints.size(); ++i) {
+                    if (overlapPoints[i].weight > overlapPoints[seedAIdx].weight) {
+                        seedAIdx = i;
+                    }
+                }
+                size_t seedBIdx = seedAIdx;
+                float bestSeedScore = -1.0f;
+                for (size_t i = 0; i < overlapPoints.size(); ++i) {
+                    if (i == seedAIdx) continue;
+                    const float dist = static_cast<float>(
+                        cv::norm(overlapPoints[i].center -
+                                 overlapPoints[seedAIdx].center));
+                    const float score = dist * std::sqrt(
+                        std::max(0.0f, overlapPoints[i].weight));
+                    if (score > bestSeedScore) {
+                        bestSeedScore = score;
+                        seedBIdx = i;
+                    }
+                }
+                cv::Point3f peakA = overlapPoints[seedAIdx].center;
+                cv::Point3f peakB = overlapPoints[seedBIdx].center;
+                float peakAWeight = 0.0f;
+                float peakBWeight = 0.0f;
+                int peakABoxes = 0;
+                int peakBBoxes = 0;
+                for (int iter = 0; iter < 6; ++iter) {
+                    cv::Point3f accumA(0.0f, 0.0f, 0.0f);
+                    cv::Point3f accumB(0.0f, 0.0f, 0.0f);
+                    peakAWeight = 0.0f;
+                    peakBWeight = 0.0f;
+                    peakABoxes = 0;
+                    peakBBoxes = 0;
+                    for (const auto &pt : overlapPoints) {
+                        const float distA =
+                            static_cast<float>(cv::norm(pt.center - peakA));
+                        const float distB =
+                            static_cast<float>(cv::norm(pt.center - peakB));
+                        if (distA <= distB) {
+                            accumA += pt.weight * pt.center;
+                            peakAWeight += pt.weight;
+                            ++peakABoxes;
+                        } else {
+                            accumB += pt.weight * pt.center;
+                            peakBWeight += pt.weight;
+                            ++peakBBoxes;
+                        }
+                    }
+                    if (peakAWeight > 1e-6f) {
+                        peakA = accumA * (1.0f / peakAWeight);
+                    }
+                    if (peakBWeight > 1e-6f) {
+                        peakB = accumB * (1.0f / peakBWeight);
+                    }
+                }
+                summary.oPeakA = peakA;
+                summary.oPeakB = peakB;
+                summary.oPeakAWeight = peakAWeight;
+                summary.oPeakBWeight = peakBWeight;
+                summary.oPeakABoxes = peakABoxes;
+                summary.oPeakBBoxes = peakBBoxes;
+                summary.oPeakSeparation =
+                    static_cast<float>(cv::norm(summary.oPeakB - summary.oPeakA));
+                const cv::Point3f overlapAxisRaw =
+                    summary.oPeakB - summary.oPeakA;
+                const cv::Point3f overlapAxis =
+                    (summary.oPeakSeparation > 1e-6f)
+                        ? overlapAxisRaw * (1.0f / summary.oPeakSeparation)
+                        : cv::Point3f(0.0f, 0.0f, 0.0f);
+                const cv::Point3f overlapMidpoint =
+                    0.5f * (summary.oPeakA + summary.oPeakB);
+                summary.oPeakMidpointDistanceUnits =
+                    static_cast<float>(
+                        cv::norm(overlapMidpoint - snapshot.position)) /
+                    std::max(1.0f, summary.parentMaxR);
+                const cv::Point3f parentOffset =
+                    snapshot.position - summary.oPeakA;
+                const cv::Point3f projectedParent =
+                    summary.oPeakA + parentOffset.dot(overlapAxis) * overlapAxis;
+                summary.oPeakAxisLateralDistanceUnits =
+                    static_cast<float>(
+                        cv::norm(snapshot.position - projectedParent)) /
+                    std::max(1.0f, summary.parentMaxR);
+
+                const float minSep =
+                    config.simulation
+                        .celluniverse3_window_map_overlap_forced_min_sep_scale *
+                    summary.parentMaxR;
+                const float maxSep =
+                    config.simulation
+                        .celluniverse3_window_map_overlap_forced_max_sep_scale *
+                    summary.parentMaxR;
+                const int minClusterBoxes =
+                    config.simulation
+                        .celluniverse3_window_map_overlap_forced_min_cluster_boxes;
+                const float minClusterWeight =
+                    config.simulation
+                        .celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction *
+                    summary.oWeight;
+                const float maxMidpointUnits =
+                    config.simulation
+                        .celluniverse3_window_map_overlap_forced_max_midpoint_scale;
+                const float maxAxisLateralUnits =
+                    config.simulation
+                        .celluniverse3_window_map_overlap_forced_max_axis_lateral_scale;
+                summary.overlapTwoCenterForcedSplit =
+                    summary.oPeakSeparation >= minSep &&
+                    summary.oPeakSeparation <= maxSep &&
+                    summary.oPeakABoxes >= minClusterBoxes &&
+                    summary.oPeakBBoxes >= minClusterBoxes &&
+                    summary.oPeakAWeight >= minClusterWeight &&
+                    summary.oPeakBWeight >= minClusterWeight &&
+                    summary.oPeakMidpointDistanceUnits <= maxMidpointUnits &&
+                    summary.oPeakAxisLateralDistanceUnits <= maxAxisLateralUnits;
             }
             summary.valid = true;
             return summary;
@@ -11539,6 +11694,13 @@ void CellUniverse::optimize(int frameIndex)
                       << " D=" << summary.futureOnlyBoxes
                       << " oSupport=" << proposal.cellUniverse3MapOSupport
                       << " dSupport=" << proposal.cellUniverse3MapDSupport
+                      << " forcedOverlap="
+                      << (summary.overlapTwoCenterForcedSplit ? 1 : 0)
+                      << " oPeakSep=" << summary.oPeakSeparation
+                      << " oPeakMidpointUnits="
+                      << summary.oPeakMidpointDistanceUnits
+                      << " oPeakAxisLateralUnits="
+                      << summary.oPeakAxisLateralDistanceUnits
                       << " uSupportD1="
                       << proposal.cellUniverse3MapUSupportD1
                       << " uSupportD2="
@@ -11575,12 +11737,69 @@ void CellUniverse::optimize(int frameIndex)
                 summary.overlapBoxes <
                     config.simulation
                         .celluniverse3_window_map_min_overlap_boxes ||
-                summary.futureOnlyBoxes <
-                    config.simulation
-                        .celluniverse3_window_map_min_future_only_boxes ||
                 summary.oWeight <= 1e-6f ||
-                summary.dWeight <= 1e-6f) {
+                (!summary.overlapTwoCenterForcedSplit &&
+                 (summary.futureOnlyBoxes <
+                      config.simulation
+                          .celluniverse3_window_map_min_future_only_boxes ||
+                  summary.dWeight <= 1e-6f))) {
                 return false;
+            }
+            if (summary.overlapTwoCenterForcedSplit) {
+                cv::Point3f axis = summary.oPeakB - summary.oPeakA;
+                const float sep = static_cast<float>(cv::norm(axis));
+                if (sep <= 1e-6f) {
+                    return false;
+                }
+                axis *= (1.0f / sep);
+                proposal = BridgeSplitProposal{};
+                proposal.d1Pos = summary.oPeakA;
+                proposal.d2Pos = summary.oPeakB;
+                proposal.elongation = parent.shapeElongation();
+                proposal.parentShapeElongation = parent.shapeElongation();
+                proposal.elongatedParentRescued = true;
+                proposal.leftPixelCount = std::max(1, summary.oPeakABoxes);
+                proposal.rightPixelCount = std::max(1, summary.oPeakBBoxes);
+                proposal.gapStartBin = -8;
+                proposal.gapEndBin = -8;
+                proposal.centerSnapApplied = true;
+                proposal.centerSnapScore = 0.0f;
+                proposal.cellUniverse3MapProposal = true;
+                proposal.cellUniverse3MapOverlapCenterProposal = true;
+                attachCellUniverse3WindowMapSupport(
+                    "celluniverse3_window_overlap_centers",
+                    parent,
+                    snapshot,
+                    proposal);
+                proposal.cellUniverse3MapPriorConfident =
+                    proposal.cellUniverse3MapPriorConfident &&
+                    summary.overlapTwoCenterForcedSplit;
+                if (!proposal.cellUniverse3MapPriorConfident) {
+                    return false;
+                }
+                std::cout << "[CellUniverse3 Window Map Overlap Forced Proposal] frame "
+                          << displayFrame
+                          << " parent=" << parent.getName()
+                          << " parentShape=" << parent.shapeElongation()
+                          << " priorBoxes=" << summary.priorBoxes
+                          << " O=" << summary.overlapBoxes
+                          << " U=" << summary.unionBoxes
+                          << " D=" << summary.futureOnlyBoxes
+                          << " sep=" << sep
+                          << " midpointUnits="
+                          << summary.oPeakMidpointDistanceUnits
+                          << " axisLateralUnits="
+                          << summary.oPeakAxisLateralDistanceUnits
+                          << " oPeakAWeight=" << summary.oPeakAWeight
+                          << " oPeakBWeight=" << summary.oPeakBWeight
+                          << " oPeakABoxes=" << summary.oPeakABoxes
+                          << " oPeakBBoxes=" << summary.oPeakBBoxes
+                          << " d1=(" << proposal.d1Pos.x << ","
+                          << proposal.d1Pos.y << "," << proposal.d1Pos.z << ")"
+                          << " d2=(" << proposal.d2Pos.x << ","
+                          << proposal.d2Pos.y << "," << proposal.d2Pos.z << ")"
+                          << std::endl;
+                return true;
             }
             cv::Point3f axis = summary.dCenter - summary.oCenter;
             float axisNorm = static_cast<float>(cv::norm(axis));
@@ -13101,6 +13320,16 @@ void CellUniverse::optimize(int frameIndex)
 			          proposal.parentShapeElongation >=
                           config.prob
                               .pca_bridge_low_balance_future_immediate_min_shape));
+            const bool cellUniverse3OverlapAxisFutureSupport =
+                source == "pca_bridge_cut" &&
+                proposal.cellUniverse3MapOverlapCenterProposal &&
+                proposal.cellUniverse3MapPriorConfident &&
+                cleanFutureDaughterSupport &&
+                daughterSep >= minBioSep &&
+                proposal.windowBothDaughtersSupported >=
+                    std::max(1, activeMinFutureBoth) &&
+                proposal.windowMissingDaughterCount <= activeMaxFutureMissing &&
+                proposal.windowParentPersists <= maxParentPersists;
             const bool highShapeCurrentSnapLowBalancePcaBridgeSupport =
                 source == "pca_bridge_cut" &&
                 cleanCenterSnap &&
@@ -13170,6 +13399,8 @@ void CellUniverse::optimize(int frameIndex)
                 (cellUniverse3DelayedMissingCleanFutureSupport ||
                  cellUniverse3DelayedMissingSparseRescue)
                     ? 0.0f
+                    : (cellUniverse3OverlapAxisFutureSupport
+                    ? 0.0f
                     : (rodTipAxisPlaceProbeFutureSupported
                     ? 0.0f
 	                    : (strongAsymmetricSignalCenterFutureProposal
@@ -13199,13 +13430,15 @@ void CellUniverse::optimize(int frameIndex)
 		                    : (lowBalanceCleanPcaBridgeFutureSupport
 		                    ? config.prob.pca_bridge_low_balance_support_min_parent_balance
 		                    : (cleanFutureDaughterSupport ? relaxedFutureBalance
-		                                                  : minParentBalance))))))))))));
+		                                                  : minParentBalance)))))))))))));
             if (proposal.parentDistanceBalance < activeParentBalance) {
                 std::ostringstream detail;
                 detail << "activeParentBalance=" << activeParentBalance
                        << " normalParentBalance=" << minParentBalance
                        << " futureBalanceRescue="
                        << (cleanFutureDaughterSupport ? 1 : 0)
+                       << " cellUniverse3OverlapAxisFutureSupport="
+                       << (cellUniverse3OverlapAxisFutureSupport ? 1 : 0)
 	                       << " lowBalanceCleanPcaBridgeFutureSupport="
 	                       << (lowBalanceCleanPcaBridgeFutureSupport ? 1 : 0)
 	                       << " highShapeCurrentSnapLowBalancePcaBridgeSupport="
@@ -13463,7 +13696,8 @@ void CellUniverse::optimize(int frameIndex)
 	                source == "pca_bridge_cut" &&
 	                (lowBalanceCleanPcaBridgeFutureSupport ||
 	                 highShapeCurrentSnapLowBalancePcaBridgeSupport ||
-                     lowBalanceCurrentFallbackPcaBridgeSupport);
+                     lowBalanceCurrentFallbackPcaBridgeSupport ||
+                     cellUniverse3OverlapAxisFutureSupport);
 	            const bool pcaBridgeNeighborClaimTooUnbalanced =
 	                source == "pca_bridge_cut" &&
 	                ownedByContinuation &&
@@ -19048,7 +19282,7 @@ void CellUniverse::copyCellsForward(size_t to)
 
 unsigned int CellUniverse::length()
 {
-    return frames.size();
+    return static_cast<unsigned int>(std::min(selectedFrameCount, frames.size()));
 }
 
 const std::vector<Ellipsoid> &CellUniverse::getCells(int frameIndex) const

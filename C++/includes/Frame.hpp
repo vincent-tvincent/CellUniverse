@@ -114,6 +114,7 @@ struct BridgeSplitProposal
     // from the windowed max/sum P/F/O/U/D guide before split validation and
     // consumed as soft geometry priors inside trySplitCellPhased.
     bool cellUniverse3MapProposal = false;
+    bool cellUniverse3MapOverlapCenterProposal = false;
     bool cellUniverse3MapPriorEvaluated = false;
     bool cellUniverse3MapPriorConfident = false;
     int cellUniverse3MapOverlapBoxes = 0;

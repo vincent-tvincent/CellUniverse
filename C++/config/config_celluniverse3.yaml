@@ -42,8 +42,25 @@ simulation:
   celluniverse3_window_map_center_penalty_fraction: 0.006
   celluniverse3_window_map_axis_penalty_fraction: 0.012
   celluniverse3_window_map_region_penalty_fraction: 0.020
+  celluniverse3_window_map_overlap_forced_split_enabled: true
+  celluniverse3_window_map_overlap_forced_min_prior_boxes: 2
+  celluniverse3_window_map_overlap_forced_min_overlap_boxes: 4
+  celluniverse3_window_map_overlap_forced_min_cluster_boxes: 1
+  celluniverse3_window_map_overlap_forced_min_sep_scale: 0.55
+  celluniverse3_window_map_overlap_forced_max_sep_scale: 2.75
+  celluniverse3_window_map_overlap_forced_max_midpoint_scale: 1.20
+  celluniverse3_window_map_overlap_forced_max_axis_lateral_scale: 0.45
+  celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction: 0.12
 
 prob:
+  # CellUniverse3's O/U/D window-map proposal already supplies split evidence,
+  # so keep the future-window gate at the softer C++ defaults instead of the
+  # stricter CellUniverse2 inherited tuning.
+  pca_bridge_future_window_min_both_daughter_support: 1
+  pca_bridge_future_window_max_missing_daughters: 2
+  # Frame-19 fluo signal-center split has clean future support but newborn
+  # sibling masks overlap by ~0.178 before the next PCA separation pass.
+  split_max_daughter_overlap_fraction: 0.18
   pca_bridge_future_window_min_parent_shape_for_cost_rescue: 2.15
   pca_bridge_weak_future_current_fallback_enabled: true
   pca_bridge_weak_future_current_fallback_min_parent_shape: 2.05

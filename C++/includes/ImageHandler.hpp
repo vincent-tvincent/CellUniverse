@@ -24,7 +24,12 @@ public:
     static std::vector<cv::Mat> loadFrame(const std::string &imageFile,
                                           BaseConfig &config,
                                           std::ostream *logSink = nullptr);
-    static PathVec getImageFilePaths(const std::string &input, int firstFrame, int lastFrame, BaseConfig &config);
+    static PathVec getImageFilePaths(const std::string &input,
+                                     int firstFrame,
+                                     int lastFrame,
+                                     BaseConfig &config,
+                                     bool allowMissingTail = false,
+                                     int requiredLastFrame = -1);
     static void applyDatasetRuntimeProfile(const std::string &input, BaseConfig &config);
 
 private:

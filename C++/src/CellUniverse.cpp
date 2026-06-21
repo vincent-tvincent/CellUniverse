@@ -242,7 +242,8 @@ static bool forceSplitSevereRodByName(Frame &frame,
                                       const SimulationConfig &simulationConfig,
                                       const EllipsoidConfig *cellConfig,
                                       const ProbabilityConfig &prob,
-                                      int displayFrame)
+                                      int displayFrame,
+                                      float minShapeOverride = -1.0f)
 {
     auto it = std::find_if(frame.cells.begin(), frame.cells.end(),
                            [&](const Ellipsoid &cell) {
@@ -275,7 +276,11 @@ static bool forceSplitSevereRodByName(Frame &frame,
     const float midR = std::max(1e-3f, radii[midIdx]);
     const float shortR = std::max(1e-3f, radii[shortIdx]);
     const float shape = longR / shortR;
-    if (shape < std::max(1.0f, prob.post_pca_force_rod_split_min_shape)) {
+    const float activeMinShape =
+        minShapeOverride > 0.0f
+            ? std::max(1.0f, minShapeOverride)
+            : std::max(1.0f, prob.post_pca_force_rod_split_min_shape);
+    if (shape < activeMinShape) {
         return false;
     }
     const RodNeighborInteraction neighborInteraction =
@@ -8405,6 +8410,7 @@ void CellUniverse::optimize(int frameIndex)
     // normal split-attempt path. Keep that evidence so later rod cleanup is not
     // limited to splitBlacklist-only failures.
     std::set<std::string> rejectedDeterministicSplitProposals;
+    std::set<std::string> cellUniverse3FailedSignalCenterSplitEvidence;
     std::set<std::string> cellUniverse3PrimaryWindowMapSplitEvidence;
     auto cellUniverse2SplitCoolingDown = [&](const std::string &cellName) {
         if (!cellUniverse2Mode) return false;
@@ -20493,6 +20499,44 @@ void CellUniverse::optimize(int frameIndex)
                 return;
             }
 
+            const bool failedCellUniverse3FutureSignalSplit =
+                config.simulation.celluniverse3_enabled &&
+                scheduleReason == "signal_center_split" &&
+                bridgeForCell != nullptr &&
+                bridgeForCell->windowBothDaughtersSupported >=
+                    std::max(
+                        1,
+                        config.prob
+                            .celluniverse3_signal_center_future_position_lock_min_future_both) &&
+                bridgeForCell->windowMissingDaughterCount <=
+                    std::max(
+                        0,
+                        config.prob
+                            .celluniverse3_signal_center_future_position_lock_max_missing) &&
+                bridgeForCell->windowParentPersists == 0 &&
+                bridgeForCell->windowBestMatchedMinBrightness >=
+                    config.prob
+                        .celluniverse3_signal_center_future_position_lock_min_future_brightness;
+            if (failedCellUniverse3FutureSignalSplit) {
+                cellUniverse3FailedSignalCenterSplitEvidence.insert(cellName);
+                std::cout
+                    << "[CellUniverse3 Failed Signal Split Evidence] frame "
+                    << displayFrame
+                    << " cell=" << cellName
+                    << " source=" << scheduleReason
+                    << " futureBoth="
+                    << bridgeForCell->windowBothDaughtersSupported
+                    << " futureMissing="
+                    << bridgeForCell->windowMissingDaughterCount
+                    << " futureBrightness="
+                    << bridgeForCell->windowBestMatchedMinBrightness
+                    << " parentShape="
+                    << bridgeForCell->parentShapeElongation
+                    << " parentBalance="
+                    << bridgeForCell->parentDistanceBalance
+                    << std::endl;
+            }
+
             const bool allowBridgeRetryAfterSignalReject =
                 config.simulation.celluniverse2_enabled &&
                 scheduleReason == "signal_center_split" &&
@@ -21248,6 +21292,17 @@ void CellUniverse::optimize(int frameIndex)
         }
     }
 
+    std::unordered_map<std::string, Ellipsoid> preDangerousFitCellsByName;
+    if (cellUniverse3Mode &&
+        config.prob.celluniverse3_post_pca_rod_salvage_restore_prefit_enabled) {
+        preDangerousFitCellsByName.reserve(frame.cells.size());
+        for (const auto &cell : frame.cells) {
+            if (!cell.isTrash()) {
+                preDangerousFitCellsByName[cell.getName()] = cell;
+            }
+        }
+    }
+
     {
         ScopedStageTimer pcaTimer(displayFrame, "final_pca_shape");
         runPcaShapeFit();
@@ -21803,10 +21858,120 @@ void CellUniverse::optimize(int frameIndex)
                                      .celluniverse3_window_map_primary_asymmetric_min_axis_alignment) &&
                     proposal.parentDistanceBalance >=
                         windowMapPostPcaMinParentBalance;
+                const float postPcaCurrentElongation =
+                    frame.cells[cellIdx].shapeElongation();
+                const float postPcaElongationJump =
+                    postPcaCurrentElongation /
+                    std::max(1.0f, postPcaSnapshotElongation);
+                const float severeRodRescueSnapLimit =
+                    std::max(
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_max_snap_abs),
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_max_snap_radius_scale) *
+                            std::max(1e-3f, postPcaLongR));
+                const bool severeRodRescueTunnelOk =
+                    !config.prob
+                         .celluniverse3_post_pca_severe_rod_low_shape_rescue_require_tunnel ||
+                    (proposal.cellUniverse3MapD1InsideTunnel &&
+                     proposal.cellUniverse3MapD2InsideTunnel);
+                const bool severeRodLowShapeRescue =
+                    config.prob
+                        .celluniverse3_post_pca_severe_rod_low_shape_rescue_enabled &&
+                    postPcaCurrentElongation >=
+                        std::max(
+                            1.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_current_shape) &&
+                    postPcaElongationJump >=
+                        std::max(
+                            1.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_elongation_jump) &&
+                    proposal.centerSnapApplied &&
+                    !proposal.immediateFutureCenterBacked &&
+                    !proposal.centerSnapUsedAlignedPairFallback &&
+                    proposal.centerSnapMaxSeedDistance <=
+                        severeRodRescueSnapLimit &&
+                    proposal.windowBothDaughtersSupported >=
+                        std::max(
+                            1,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_future_both) &&
+                    proposal.windowMissingDaughterCount <=
+                        std::max(
+                            0,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_max_missing) &&
+                    proposal.windowParentPersists == 0 &&
+                    proposal.windowBestMatchedMinBrightness >=
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_future_brightness) &&
+                    proposal.parentDistanceBalance >=
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_parent_balance) &&
+                    proposal.cellUniverse3MapUSupportD1 >=
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_u_support) &&
+                    proposal.cellUniverse3MapUSupportD2 >=
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_min_u_support) &&
+                    proposal.cellUniverse3MapRegionPenalty <=
+                        std::max(
+                            0.0f,
+                            config.prob
+                                .celluniverse3_post_pca_severe_rod_low_shape_rescue_max_region_penalty) &&
+                    severeRodRescueTunnelOk;
+                if (severeRodLowShapeRescue) {
+                    std::cout << "[Post PCA Bridge Split Rescue] frame "
+                              << displayFrame
+                              << " parent=" << parentName
+                              << " reason=celluniverse3_severe_rod_low_shape"
+                              << " snapshotElong="
+                              << postPcaSnapshotElongation
+                              << " currentElong="
+                              << postPcaCurrentElongation
+                              << " elongationJump="
+                              << postPcaElongationJump
+                              << " futureBoth="
+                              << proposal.windowBothDaughtersSupported
+                              << " futureMissing="
+                              << proposal.windowMissingDaughterCount
+                              << " futureBestMinBrightness="
+                              << proposal.windowBestMatchedMinBrightness
+                              << " parentDistBalance="
+                              << proposal.parentDistanceBalance
+                              << " mapUSupportD1="
+                              << proposal.cellUniverse3MapUSupportD1
+                              << " mapUSupportD2="
+                              << proposal.cellUniverse3MapUSupportD2
+                              << " mapAxisAlignment="
+                              << proposal.cellUniverse3MapAxisAlignment
+                              << " mapRegionPenalty="
+                              << proposal.cellUniverse3MapRegionPenalty
+                              << " centerSnapMaxSeedDistance="
+                              << proposal.centerSnapMaxSeedDistance
+                              << " snapLimit="
+                              << severeRodRescueSnapLimit
+                              << std::endl;
+                }
                 const bool cleanPostPcaFutureSupport =
                     cleanPostPcaFutureCenterSupport ||
                     cellUniverse3WindowMapPostPcaTimingSupport ||
-                    cellUniverse3WindowMapPostPcaAsymmetricTimingSupport;
+                    cellUniverse3WindowMapPostPcaAsymmetricTimingSupport ||
+                    severeRodLowShapeRescue;
                 if (!cleanPostPcaFutureSupport) {
                     ++postFitRejectedProposal;
                     rejectedDeterministicSplitProposals.insert(parentName);
@@ -21996,8 +22161,69 @@ void CellUniverse::optimize(int frameIndex)
                                        "post_pca_force_rod_split");
         std::vector<std::string> forcedRodCandidates;
         std::unordered_map<std::string, float> forcedRodShapeByName;
+        std::unordered_map<std::string, float> forcedRodMinShapeOverrideByName;
         const float minForceShape =
             std::max(1.0f, config.prob.post_pca_force_rod_split_min_shape);
+        auto rodSalvageLongMidRatio = [](const Ellipsoid &cell) {
+            std::array<float, 3> radii{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            std::sort(radii.begin(), radii.end(), std::greater<float>());
+            return radii[1] > 1e-6f ? radii[0] / radii[1] : 1.0f;
+        };
+        auto isDangerousPostPcaRodProbe = [&](const Ellipsoid &cell,
+                                              float *outCurrentLongMid = nullptr,
+                                              float *outPreLongMid = nullptr,
+                                              float *outElongJump = nullptr) {
+            if (!cellUniverse3Mode || cell.isTrash() ||
+                !config.prob.celluniverse3_post_pca_rod_salvage_restore_prefit_enabled) {
+                return false;
+            }
+            auto preIt = preDangerousFitCellsByName.find(cell.getName());
+            if (preIt == preDangerousFitCellsByName.end()) {
+                return false;
+            }
+            const float currentLongMid = rodSalvageLongMidRatio(cell);
+            const float preLongMid = rodSalvageLongMidRatio(preIt->second);
+            const float currentElong = cell.shapeElongation();
+            const float preElong = std::max(1.0f, preIt->second.shapeElongation());
+            const float elongJump = currentElong / preElong;
+            if (outCurrentLongMid) *outCurrentLongMid = currentLongMid;
+            if (outPreLongMid) *outPreLongMid = preLongMid;
+            if (outElongJump) *outElongJump = elongJump;
+
+            const float minLongMid = std::max(
+                1.0f,
+                config.prob.celluniverse3_post_pca_rod_salvage_min_long_mid_ratio);
+            const float minElongJump = std::max(
+                1.0f,
+                config.prob.celluniverse3_post_pca_rod_salvage_min_elongation_jump);
+            return currentLongMid >= minLongMid &&
+                   (elongJump >= minElongJump ||
+                    currentLongMid > preLongMid + 0.05f);
+        };
+        auto isPriorEvidenceRodSalvageProbe =
+            [&](const Ellipsoid &cell,
+                bool hasPriorSplitEvidence,
+                float *outLongMid = nullptr) {
+                if (!cellUniverse3Mode || cell.isTrash() ||
+                    !config.prob
+                         .celluniverse3_post_pca_rod_salvage_prior_evidence_enabled ||
+                    !hasPriorSplitEvidence) {
+                    return false;
+                }
+                const float currentLongMid = rodSalvageLongMidRatio(cell);
+                if (outLongMid) *outLongMid = currentLongMid;
+                const float minShape = std::max(
+                    1.0f,
+                    config.prob
+                        .celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape);
+                const float minLongMid = std::max(
+                    1.0f,
+                    config.prob
+                        .celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio);
+                return cell.shapeElongation() >= minShape &&
+                       currentLongMid >= minLongMid;
+            };
         for (const auto &cell : frame.cells) {
             if (cell.isTrash()) {
                 continue;
@@ -22049,10 +22275,20 @@ void CellUniverse::optimize(int frameIndex)
                 cellUniverse3Mode &&
                 cellUniverse3PrimaryWindowMapSplitEvidence.count(
                     cell.getName()) > 0;
+            const bool hasCellUniverse3MissedSplitMemory =
+                cellUniverse3Mode &&
+                cellUniverse3MissedSplitMemoryByCell.count(cell.getName()) >
+                    0;
+            const bool hasCellUniverse3FailedSignalEvidence =
+                cellUniverse3Mode &&
+                cellUniverse3FailedSignalCenterSplitEvidence.count(
+                    cell.getName()) > 0;
             const bool hasPriorSplitEvidence =
                 splitBlacklist.count(cell.getName()) > 0 ||
                 rejectedDeterministicSplitProposals.count(cell.getName()) > 0 ||
-                hasCellUniverse3PrimaryEvidence;
+                hasCellUniverse3PrimaryEvidence ||
+                hasCellUniverse3MissedSplitMemory ||
+                hasCellUniverse3FailedSignalEvidence;
             if (config.prob.post_pca_force_rod_split_require_prior_attempt &&
                 !hasPriorSplitEvidence) {
                 std::cout << "[Post PCA Force Rod Split Skip] frame "
@@ -22064,11 +22300,27 @@ void CellUniverse::optimize(int frameIndex)
                           << std::endl;
                 continue;
             }
+            float dangerousRodLongMid = 0.0f;
+            float dangerousRodPreLongMid = 0.0f;
+            float dangerousRodElongJump = 0.0f;
+            const bool dangerousPostPcaRodProbe =
+                isDangerousPostPcaRodProbe(cell,
+                                           &dangerousRodLongMid,
+                                           &dangerousRodPreLongMid,
+                                           &dangerousRodElongJump);
+            float priorEvidenceRodLongMid = 0.0f;
+            const bool priorEvidenceRodSalvageProbe =
+                isPriorEvidenceRodSalvageProbe(cell,
+                                               hasPriorSplitEvidence,
+                                               &priorEvidenceRodLongMid);
             if (cellUniverse3Mode &&
                 config.prob
                     .celluniverse3_post_pca_force_rod_require_window_map_primary_support &&
                 cellUniverse3PrimaryWindowMapSplitEvidence.count(
-                    cell.getName()) == 0) {
+                    cell.getName()) == 0 &&
+                !dangerousPostPcaRodProbe &&
+                !priorEvidenceRodSalvageProbe &&
+                !hasCellUniverse3FailedSignalEvidence) {
                 std::cout << "[Post PCA Force Rod Split Skip] frame "
                           << displayFrame
                           << " cell=" << cell.getName()
@@ -22078,9 +22330,62 @@ void CellUniverse::optimize(int frameIndex)
                           << std::endl;
                 continue;
             }
-            if (cell.shapeElongation() >= minForceShape) {
+            if (dangerousPostPcaRodProbe &&
+                cellUniverse3PrimaryWindowMapSplitEvidence.count(cell.getName()) == 0) {
+                std::cout << "[Post PCA Rod Salvage Candidate] frame "
+                          << displayFrame
+                          << " cell=" << cell.getName()
+                          << " reason=dangerous_post_pca_rod_without_window_map_support"
+                          << " shape=" << cell.shapeElongation()
+                          << " longMid=" << dangerousRodLongMid
+                          << " preLongMid=" << dangerousRodPreLongMid
+                          << " elongJump=" << dangerousRodElongJump
+                          << std::endl;
+            }
+            if (hasCellUniverse3FailedSignalEvidence &&
+                cellUniverse3PrimaryWindowMapSplitEvidence.count(
+                    cell.getName()) == 0) {
+                std::cout << "[Post PCA Rod Salvage Candidate] frame "
+                          << displayFrame
+                          << " cell=" << cell.getName()
+                          << " reason=failed_signal_center_split_without_window_map_support"
+                          << " shape=" << cell.shapeElongation()
+                          << " splitBlacklist="
+                          << (splitBlacklist.count(cell.getName()) > 0)
+                          << " deterministicReject="
+                          << (rejectedDeterministicSplitProposals.count(
+                                  cell.getName()) > 0)
+                          << " missedMemory="
+                          << hasCellUniverse3MissedSplitMemory
+                          << std::endl;
+            }
+            if (priorEvidenceRodSalvageProbe &&
+                cellUniverse3PrimaryWindowMapSplitEvidence.count(cell.getName()) == 0) {
+                std::cout << "[Post PCA Rod Salvage Candidate] frame "
+                          << displayFrame
+                          << " cell=" << cell.getName()
+                          << " reason=prior_split_evidence_moderate_rod_without_window_map_support"
+                          << " shape=" << cell.shapeElongation()
+                          << " longMid=" << priorEvidenceRodLongMid
+                          << " splitBlacklist="
+                          << (splitBlacklist.count(cell.getName()) > 0)
+                          << " deterministicReject="
+                          << (rejectedDeterministicSplitProposals.count(
+                                  cell.getName()) > 0)
+                          << " missedMemory="
+                          << hasCellUniverse3MissedSplitMemory
+                          << std::endl;
+            }
+            if (cell.shapeElongation() >= minForceShape ||
+                dangerousPostPcaRodProbe ||
+                priorEvidenceRodSalvageProbe) {
                 forcedRodCandidates.push_back(cell.getName());
                 forcedRodShapeByName[cell.getName()] = cell.shapeElongation();
+                if (dangerousPostPcaRodProbe ||
+                    priorEvidenceRodSalvageProbe) {
+                    forcedRodMinShapeOverrideByName[cell.getName()] =
+                        cell.shapeElongation();
+                }
             }
         }
         std::sort(forcedRodCandidates.begin(),
@@ -22116,6 +22421,65 @@ void CellUniverse::optimize(int frameIndex)
                 0.0f,
                 config.prob.post_pca_force_rod_split_cluster_radius_scale);
         int forcedAccepted = 0;
+        int forcedRestored = 0;
+        auto restoreFailedRodProbe = [&](const std::string &name) {
+            if (!cellUniverse3Mode ||
+                !config.prob.celluniverse3_post_pca_rod_salvage_restore_prefit_enabled) {
+                return false;
+            }
+            auto preIt = preDangerousFitCellsByName.find(name);
+            if (preIt == preDangerousFitCellsByName.end()) {
+                return false;
+            }
+            auto currentIt = std::find_if(
+                frame.cells.begin(),
+                frame.cells.end(),
+                [&](const Ellipsoid &cell) { return cell.getName() == name; });
+            if (currentIt == frame.cells.end() || currentIt->isTrash()) {
+                return false;
+            }
+
+            float currentLongMid = 0.0f;
+            float preLongMid = 0.0f;
+            float elongJump = 0.0f;
+            const bool rodLikeDangerFit =
+                isDangerousPostPcaRodProbe(*currentIt,
+                                           &currentLongMid,
+                                           &preLongMid,
+                                           &elongJump);
+            const float currentElong = currentIt->shapeElongation();
+            const float preElong = std::max(1.0f, preIt->second.shapeElongation());
+            const float minLongMid = std::max(
+                1.0f,
+                config.prob.celluniverse3_post_pca_rod_salvage_min_long_mid_ratio);
+            const float minElongJump = std::max(
+                1.0f,
+                config.prob.celluniverse3_post_pca_rod_salvage_min_elongation_jump);
+            if (!rodLikeDangerFit) {
+                return false;
+            }
+
+            *currentIt = preIt->second;
+            ++forcedRestored;
+            frame.regenerateSynthFrame();
+            if (voronoiMapNeeded) {
+                frame.rebuildVoronoiMap();
+            }
+            std::cout << "[Post PCA Rod Salvage Restore] frame "
+                      << displayFrame
+                      << " cell=" << name
+                      << " reason=forced_rod_split_rejected_restore_prefit"
+                      << " currentElong=" << currentElong
+                      << " preElong=" << preElong
+                      << " elongJump=" << elongJump
+                      << " currentLongMid=" << currentLongMid
+                      << " preLongMid=" << preLongMid
+                      << " minLongMid=" << minLongMid
+                      << " minElongJump=" << minElongJump
+                      << " action=restore_pre_pca_parent"
+                      << std::endl;
+            return true;
+        };
         for (const std::string &parentName : forcedRodCandidates) {
             if (maxForced > 0 && forcedAccepted >= maxForced) {
                 break;
@@ -22176,10 +22540,18 @@ void CellUniverse::optimize(int frameIndex)
                       << displayFrame
                       << " cell=" << parentName
                       << std::endl;
+            float forcedRodMinShapeOverride = -1.0f;
+            const auto overrideIt =
+                forcedRodMinShapeOverrideByName.find(parentName);
+            if (overrideIt != forcedRodMinShapeOverrideByName.end()) {
+                forcedRodMinShapeOverride = overrideIt->second;
+            }
             if (!forceSplitSevereRodByName(
                     frame, parentName, config.simulation, config.cell.get(),
                     config.prob,
-                    displayFrame)) {
+                    displayFrame,
+                    forcedRodMinShapeOverride)) {
+                restoreFailedRodProbe(parentName);
                 continue;
             }
             acceptedForcedRodRegions.push_back(
@@ -22212,9 +22584,110 @@ void CellUniverse::optimize(int frameIndex)
                   << displayFrame
                   << " candidates=" << forcedRodCandidates.size()
                   << " accepted=" << forcedAccepted
+                  << " restored=" << forcedRestored
                   << " minShape=" << minForceShape
                   << " maxPerFrame=" << maxForced
                   << std::endl;
+    }
+
+    if (config.cell && config.cell->pcaShapeRatioBoundEnabled) {
+        const float maxLongMidRatio =
+            std::max(1.0f, config.cell->pcaShapeMaxLongMidRatio);
+        const float maxMidShortRatio =
+            std::max(1.0f, config.cell->pcaShapeMaxMidShortRatio);
+        const float maxLongShortRatio =
+            std::max(1.0f, config.cell->pcaShapeMaxLongShortRatio);
+        const bool useLongMid =
+            config.cell->pcaShapeMaxLongMidRatio > 1.0f;
+        const bool useMidShort =
+            config.cell->pcaShapeMaxMidShortRatio > 1.0f;
+        const bool useLongShort =
+            config.cell->pcaShapeMaxLongShortRatio > 1.0f;
+        auto sortedRadiusIndices = [](const std::array<float, 3> &r) {
+            std::array<int, 3> idx{0, 1, 2};
+            std::sort(idx.begin(), idx.end(),
+                      [&](int a, int b) { return r[a] > r[b]; });
+            return idx;
+        };
+        auto ratioOrOne = [](float high, float low) {
+            return low > 1e-6f ? high / low : 1.0f;
+        };
+        int ratioClamped = 0;
+        for (auto &cell : frame.cells) {
+            std::array<float, 3> radii{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            const std::array<float, 3> original = radii;
+            const auto originalIdx = sortedRadiusIndices(original);
+            const float oldLongMid =
+                ratioOrOne(original[originalIdx[0]], original[originalIdx[1]]);
+            const float oldMidShort =
+                ratioOrOne(original[originalIdx[1]], original[originalIdx[2]]);
+            const float oldLongShort =
+                ratioOrOne(original[originalIdx[0]], original[originalIdx[2]]);
+
+            for (int pass = 0; pass < 3; ++pass) {
+                auto idx = sortedRadiusIndices(radii);
+                if (useLongMid &&
+                    radii[idx[0]] > radii[idx[1]] * maxLongMidRatio) {
+                    radii[idx[0]] = radii[idx[1]] * maxLongMidRatio;
+                }
+                idx = sortedRadiusIndices(radii);
+                if (useMidShort &&
+                    radii[idx[1]] > radii[idx[2]] * maxMidShortRatio) {
+                    radii[idx[1]] = radii[idx[2]] * maxMidShortRatio;
+                }
+                idx = sortedRadiusIndices(radii);
+                if (useLongShort &&
+                    radii[idx[0]] > radii[idx[2]] * maxLongShortRatio) {
+                    radii[idx[0]] = radii[idx[2]] * maxLongShortRatio;
+                }
+            }
+
+            const bool changed =
+                std::abs(radii[0] - original[0]) > 1e-4f ||
+                std::abs(radii[1] - original[1]) > 1e-4f ||
+                std::abs(radii[2] - original[2]) > 1e-4f;
+            if (!changed) {
+                continue;
+            }
+            cell.setRadii(radii[0], radii[1], radii[2]);
+            const std::array<float, 3> updated{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            const auto updatedIdx = sortedRadiusIndices(updated);
+            ++ratioClamped;
+            std::cout << "[PCA Shape Ratio Bound] frame " << displayFrame
+                      << " cell=" << cell.getName()
+                      << " oldR=(" << original[0] << "," << original[1]
+                      << "," << original[2] << ")"
+                      << " newR=(" << updated[0] << "," << updated[1]
+                      << "," << updated[2] << ")"
+                      << " oldLongMid=" << oldLongMid
+                      << " oldMidShort=" << oldMidShort
+                      << " oldLongShort=" << oldLongShort
+                      << " newLongMid="
+                      << ratioOrOne(updated[updatedIdx[0]],
+                                    updated[updatedIdx[1]])
+                      << " newMidShort="
+                      << ratioOrOne(updated[updatedIdx[1]],
+                                    updated[updatedIdx[2]])
+                      << " newLongShort="
+                      << ratioOrOne(updated[updatedIdx[0]],
+                                    updated[updatedIdx[2]])
+                      << " maxLongMid=" << maxLongMidRatio
+                      << " maxMidShort=" << maxMidShortRatio
+                      << " maxLongShort=" << maxLongShortRatio
+                      << std::endl;
+        }
+        if (ratioClamped > 0) {
+            std::cout << "[PCA Shape Ratio Bound Summary] frame "
+                      << displayFrame
+                      << " clamped=" << ratioClamped
+                      << " maxLongMid=" << maxLongMidRatio
+                      << " maxMidShort=" << maxMidShortRatio
+                      << " maxLongShort=" << maxLongShortRatio
+                      << std::endl;
+            frame.regenerateSynthFrame();
+        }
     }
 
     // End of frame: build PreviousFrameSnapshot for each cell, combining the

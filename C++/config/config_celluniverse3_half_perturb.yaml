@@ -45,7 +45,7 @@ simulation:
   # allowed_region = dilate(Wmax > threshold), probability follows
   # (epsilon + normalized(Wsum)) ^ gamma.
   celluniverse3_window_guided_position_enabled: true
-  celluniverse3_window_guided_iterations_per_cell: 50
+  celluniverse3_window_guided_iterations_per_cell: 25  # half-count speed experiment
   celluniverse3_window_guided_dilate_xy: 0
   celluniverse3_window_guided_sample_radius_scale: 1.0
   celluniverse3_window_guided_min_probability: 0.0001

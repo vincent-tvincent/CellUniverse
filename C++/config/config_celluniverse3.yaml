@@ -11,8 +11,14 @@ base_config: config_celluniverse2_tuning.yaml
 # evidence comes from the map algebra below.
 simulation:
   celluniverse3_enabled: true
-  celluniverse3_window_radius: 3
+  celluniverse3_window_radius: 15
+  celluniverse3_window_overlap_radius: 2
   celluniverse3_window_background_percentile: 95.0
+  celluniverse3_window_dual_background_enabled: false
+  celluniverse3_window_background_export_debug: false
+  celluniverse3_window_background_ellipsoid_region_enabled: false
+  celluniverse3_window_background_ellipsoid_margin_scale: 1.25
+  celluniverse3_window_hot_background_percentile: 35.0
   celluniverse3_window_hot_percentile: 90.0
   celluniverse3_window_min_signal: 0.012
   celluniverse3_window_sum_gamma: 0.85
@@ -21,21 +27,49 @@ simulation:
   celluniverse3_window_recursive_bright_fraction: 0.55
   celluniverse3_window_max_recursive_depth: 2
   celluniverse3_window_export_debug: false
+  export_perturb_cell_center_debug_images: false
   celluniverse3_window_merge_centers: false
+  # Keep CellUniverse3's 15-frame window maps, but discard prepared TIFF stacks
+  # after map construction unless they are still near enough for immediate
+  # future validation.
+  celluniverse3_frame_cache_prune_enabled: true
+  celluniverse3_frame_cache_keep_future: 15
+  celluniverse3_frame_cache_min_available_gb: 8.0
+  celluniverse3_frame_cache_pressure_keep_future: 6
+  # Exact disk-backed prepared-frame cache for CellUniverse3 only. This lets
+  # pruned frames reload from the run output folder instead of re-running
+  # preprocessing and signal-map construction.
+  celluniverse3_prepared_frame_disk_cache_enabled: true
+  celluniverse3_prepared_frame_disk_cache_signal_map_enabled: false
   # Movement guidance from the same future local Wmax/Wsum maps:
   # allowed_region = dilate(Wmax > threshold), probability follows
   # (epsilon + normalized(Wsum)) ^ gamma.
   celluniverse3_window_guided_position_enabled: true
   celluniverse3_window_guided_iterations_per_cell: 50
-  celluniverse3_window_guided_dilate_xy: 1
+  celluniverse3_window_guided_dilate_xy: 0
   celluniverse3_window_guided_sample_radius_scale: 1.0
   celluniverse3_window_guided_min_probability: 0.0001
+  celluniverse3_window_guided_use_overlap_tunnel: true
+  celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled: true
+  celluniverse3_pre_pca_placement_probe_crowded_trigger_units: 1.20
+  celluniverse3_pre_pca_placement_probe_crowded_max_move_units: 0.75
   celluniverse3_window_map_split_prior_enabled: true
   celluniverse3_window_map_proposal_enabled: true
+  celluniverse3_window_map_direct_od_proposal_enabled: false
+  celluniverse3_window_map_motion_compensation_enabled: true
+  celluniverse3_window_map_motion_residual_match_scale: 0.35
+  celluniverse3_window_map_motion_residual_match_box_scale: 1.25
+  celluniverse3_window_map_motion_min_residual_weight_fraction: 0.08
+  celluniverse3_window_map_motion_center_bridge_max_ratio: 1.25
+  celluniverse3_window_map_motion_max_axis_alignment: 0.94
   celluniverse3_window_map_proposal_min_parent_shape: 1.35
   celluniverse3_window_map_proposal_min_sep_scale: 0.45
   celluniverse3_window_map_proposal_max_sep_scale: 2.75
   celluniverse3_window_map_min_u_support: 0.05
+  celluniverse3_window_map_require_split_inside_tunnel: true
+  celluniverse3_window_map_tunnel_center_neighbor_boxes: 1
+  celluniverse3_window_map_snap_split_to_tunnel: true
+  celluniverse3_window_map_tunnel_snap_max_distance_scale: 0.75
   celluniverse3_window_map_min_overlap_boxes: 1
   celluniverse3_window_map_min_future_only_boxes: 1
   celluniverse3_window_map_max_axis_angle_degrees: 75.0
@@ -47,17 +81,105 @@ simulation:
   celluniverse3_window_map_overlap_forced_min_overlap_boxes: 4
   celluniverse3_window_map_overlap_forced_min_cluster_boxes: 1
   celluniverse3_window_map_overlap_forced_min_sep_scale: 0.55
-  celluniverse3_window_map_overlap_forced_max_sep_scale: 2.75
-  celluniverse3_window_map_overlap_forced_max_midpoint_scale: 1.20
-  celluniverse3_window_map_overlap_forced_max_axis_lateral_scale: 0.45
+  celluniverse3_window_map_overlap_forced_max_sep_scale: 3.25
+  celluniverse3_window_map_overlap_forced_max_midpoint_scale: 2.50
+  celluniverse3_window_map_overlap_forced_max_axis_lateral_scale: 1.75
   celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction: 0.12
+  celluniverse3_window_map_overlap_forced_axis_scan_enabled: true
+  celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale: 0.35
+  celluniverse3_window_map_overlap_forced_axis_scan_step_scale: 0.12
+  celluniverse3_window_map_overlap_forced_axis_scan_min_step: 2.0
+  celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale: 3.25
+  celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees: 12.0
+  celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight: 0.45
+  celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction: 0.65
+  celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale: 0.80
+  celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale: 0.10
+  celluniverse3_window_map_overlap_forced_axis_scan_min_center_step: 2.0
+  celluniverse3_window_map_overlap_forced_axis_scan_motion_weight: 0.30
+  celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight: 0.55
+  celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight: 0.45
+  celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled: true
+  celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale: 2.5
+  celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels: 20
+  celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment: 0.55
+  celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale: 0.90
+  celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight: 0.35
+  # CellUniverse3-only post-PCA edge correction. It samples thin cylinders
+  # along each half-axis and nudges symmetric radii toward strong bright-to-dark
+  # edges, damping wrong PCA elongation without changing the PCA orientation.
+  celluniverse3_edge_axis_fit_enabled: true
+  celluniverse3_edge_axis_fit_iterations: 1
+  celluniverse3_edge_axis_fit_min_shape: 1.80
+  celluniverse3_edge_axis_fit_search_band_fraction: 0.35
+  celluniverse3_edge_axis_fit_cylinder_radius_scale: 0.12
+  celluniverse3_edge_axis_fit_min_cylinder_radius: 2.0
+  celluniverse3_edge_axis_fit_samples_per_half_axis: 9
+  celluniverse3_edge_axis_fit_min_falling_gradient: 0.01
+  celluniverse3_edge_axis_fit_min_inner_outer_contrast: 0.015
+  celluniverse3_edge_axis_fit_radius_step_fraction: 0.35
+  celluniverse3_edge_axis_fit_max_radius_change_fraction: 0.20
+  celluniverse3_edge_axis_fit_rod_conflict_enabled: true
+  celluniverse3_edge_axis_fit_rod_conflict_min_shape: 1.80
+  celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio: 0.25
+  celluniverse3_edge_axis_fit_rod_conflict_step_fraction: 1.00
+  celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction: 0.40
+  # When rod shrink removes false cell volume, keep the remaining cell
+  # brightness tied to the central signal core and release the removed
+  # brightness mass into the frame background.
+  celluniverse3_edge_axis_fit_core_brightness_enabled: true
+  celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction: 0.08
+  celluniverse3_edge_axis_fit_core_brightness_radius_scale: 0.35
+  celluniverse3_edge_axis_fit_core_brightness_top_fraction: 0.60
+  celluniverse3_edge_axis_fit_core_brightness_blend: 0.65
+  celluniverse3_edge_axis_fit_core_brightness_max_change_fraction: 0.60
+  celluniverse3_edge_axis_fit_core_brightness_extra_pca: true
+  celluniverse3_edge_axis_fit_melt_released_brightness_enabled: true
+  celluniverse3_edge_axis_fit_melt_min_shell_fraction: 0.08
+  celluniverse3_edge_axis_fit_melt_max_background_delta: 0.02
+
+cell:
+  # CellUniverse3 relies more on deterministic PCA/window placement than on
+  # full random perturbation, so give guided perturbations a tiny brightness
+  # search without letting brightness hide bad geometry.
+  brightness:
+    increase_prob: 0.05
+    decrease_prob: 0.05
+    mu: 0.0
+    sigma: 0.015
+  brightnessProbabilityStep: 0.01
+  # In the 25->30 smoke run after axis-scan placement, trash_2 reached
+  # brightness 0.183156 by frame 28; that is already a melted/background-like
+  # trash state for CellUniverse3. Require a mature, repeated dim state so
+  # early transient dimness does not delete a valid trash object.
+  trashRemovalEnabled: true
+  trashRemovalBrightnessThreshold: 0.20
+  trashRemovalConsecutiveDimFrames: 3
+  trashRemovalMinFrameAge: 5
 
 prob:
+  # Reject signal-center split pairs that are not aligned with the parent's
+  # current division axis. Frame-18 fluo false split cell_00 had axisAlign=0.47;
+  # accepted signal-center splits observed so far are >= 0.83.
+  signal_center_split_min_axis_alignment: 0.80
+  # Allow a small combined-volume tolerance for valid rod-tip splits after PCA
+  # refit. Frame-18 cell_10 measured 1.340657 against the default 1.30 cap.
+  bio_combined_volume_max_fraction: 1.36
+  # Frame-18 cell_10 is a valid rod-tip split whose larger daughter measured
+  # 0.714955 of the parent volume after PCA. Keep this as a tight CellUniverse3
+  # override instead of using the broad historical 0.90 rescue cap.
+  bio_max_single_daughter_volume_fraction: 0.73
+  # CellUniverse3 sees very flat dividing cells; allow the shortest axis to be
+  # much smaller than the other axes before rejecting bridge proposals as
+  # "triaxial" shape artifacts.
+  pca_bridge_min_long_mid_ratio: 1.00
+  pca_bridge_max_mid_short_ratio: 3.20
   # CellUniverse3's O/U/D window-map proposal already supplies split evidence,
   # so keep the future-window gate at the softer C++ defaults instead of the
   # stricter CellUniverse2 inherited tuning.
   pca_bridge_future_window_min_both_daughter_support: 1
   pca_bridge_future_window_max_missing_daughters: 2
+  pca_bridge_future_window_parent_balance_rescue_min: 0.19
   # Frame-19 fluo signal-center split has clean future support but newborn
   # sibling masks overlap by ~0.178 before the next PCA separation pass.
   split_max_daughter_overlap_fraction: 0.18
@@ -68,6 +190,15 @@ prob:
   pca_bridge_weak_future_current_fallback_min_future_brightness: 0.025
   pca_bridge_weak_future_current_fallback_max_snap_radius_scale: 0.80
   pca_bridge_weak_future_current_fallback_max_missing_daughters: 2
+  # Newborn daughters can carry a dark bridge-like valley for a few frames.
+  # In CellUniverse3, require the prior/future window map to confirm another
+  # divergence before allowing post-PCA bridge re-splits in that early window.
+  celluniverse3_pca_bridge_recent_daughter_requires_window_map: true
+  celluniverse3_pca_bridge_recent_daughter_cooldown_frames: 4
+  # Future/window-supported PCA bridges can be dim in the current frame before
+  # the daughter signal separates. Keep this soft, but only after future support.
+  split_density_future_soft_min_fraction: 0.40
+  bio_daughter_density_soft_penalty_fraction: 0.05
   celluniverse3_window_soft_penalty_cost_rescue_enabled: true
   celluniverse3_window_soft_penalty_cost_rescue_min_parent_shape: 2.05
   celluniverse3_window_soft_penalty_cost_rescue_min_parent_balance: 0.20
@@ -80,8 +211,52 @@ prob:
   celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale: 0.35
   celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright: 0.75
   celluniverse3_window_soft_penalty_cost_rescue_max_gap_density: 0.24
+  celluniverse3_window_union_soft_penalty_cost_rescue_enabled: true
+  celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support: 0.45
+  celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty: 0.0
+  celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction: 0.05
+  celluniverse3_window_map_primary_dense_bridge_rescue_enabled: true
+  celluniverse3_window_map_primary_dense_bridge_max_drift_scale: 0.50
+  celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright: 0.80
+  celluniverse3_window_map_primary_dense_bridge_max_gap_density: 0.30
+  # Support and cost-rescue gates use the window map as the main prior when
+  # per-frame future bright centers are unstable.
+  celluniverse3_window_map_primary_support_min_u_support: 0.60
+  celluniverse3_window_map_primary_support_max_region_penalty: 0.05
+  celluniverse3_window_map_primary_support_min_axis_alignment: 0.70
+  celluniverse3_window_map_primary_support_min_parent_balance: 0.17
+  celluniverse3_window_map_primary_asymmetric_support_enabled: true
+  celluniverse3_window_map_primary_asymmetric_min_strong_u_support: 0.60
+  celluniverse3_window_map_primary_asymmetric_min_weak_u_support: 0.25
+  celluniverse3_window_map_primary_asymmetric_min_total_u_support: 0.85
+  celluniverse3_window_map_primary_asymmetric_min_axis_alignment: 0.90
+  celluniverse3_single_frame_future_center_requires_window_map_support: true
+  celluniverse3_single_frame_future_center_max_future_both: 1
+  celluniverse3_require_window_map_split_for_pca_bridge: true
+  celluniverse3_window_map_candidate_gate_enabled: true
+  celluniverse3_window_map_candidate_max_midpoint_shift_scale: 0.45
+  celluniverse3_window_map_candidate_min_sep_fraction: 0.70
+  celluniverse3_window_map_candidate_min_axis_alignment: 0.80
+  celluniverse3_window_map_neighbor_bridge_bypass_enabled: true
+  celluniverse3_window_map_neighbor_bridge_min_future_brightness: 0.12
+  celluniverse3_window_map_neighbor_bridge_min_parent_shape: 1.35
+  celluniverse3_window_map_neighbor_bridge_max_parent_shape: 1.95
+  celluniverse3_window_map_overlap_position_lock_enabled: true
+  celluniverse3_window_map_primary_cost_rescue_enabled: true
+  celluniverse3_window_map_primary_cost_rescue_min_u_support: 0.60
+  celluniverse3_window_map_primary_cost_rescue_max_region_penalty: 0.05
+  celluniverse3_window_map_primary_cost_rescue_min_axis_alignment: 0.90
+  celluniverse3_window_map_primary_cost_rescue_min_parent_balance: 0.20
+  celluniverse3_window_map_primary_cost_rescue_max_cost_fraction: 0.10
+  celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs: 0.0
+  celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction: 0.10
+  celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale: 0.65
+  celluniverse3_window_map_primary_cost_rescue_max_drift_scale: 0.50
+  celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright: 1.25
+  celluniverse3_window_map_primary_cost_rescue_max_gap_density: 0.30
+  celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment: 0.35
   celluniverse3_signal_center_future_position_lock_enabled: true
-  celluniverse3_signal_center_future_position_lock_min_future_both: 1
+  celluniverse3_signal_center_future_position_lock_min_future_both: 2
   celluniverse3_signal_center_future_position_lock_max_missing: 0
   celluniverse3_signal_center_future_position_lock_min_future_brightness: 0.18
   celluniverse3_signal_center_future_position_lock_min_parent_shape: 1.45
@@ -90,6 +265,13 @@ prob:
   celluniverse3_signal_center_future_position_lock_min_sep_fraction: 1.0
   celluniverse3_signal_center_future_position_lock_min_sep_ratio: 1.0
   celluniverse3_signal_center_future_position_lock_min_axis_alignment: 0.60
+  celluniverse3_injected_split_center_slide_enabled: true
+  celluniverse3_injected_split_center_slide_range_scale: 0.45
+  celluniverse3_injected_split_center_slide_step_scale: 0.15
+  celluniverse3_injected_split_center_slide_min_step: 3.0
+  celluniverse3_injected_split_evidence_midpoints_enabled: true
+  celluniverse3_injected_split_evidence_midpoint_max_shift_scale: 1.25
+  celluniverse3_injected_split_evidence_pair_max_sep_scale: 2.75
   celluniverse3_clean_future_bridge_position_lock_enabled: true
   celluniverse3_clean_future_bridge_position_lock_min_future_both: 2
   celluniverse3_clean_future_bridge_position_lock_max_missing: 0
@@ -116,7 +298,7 @@ prob:
   celluniverse3_signal_center_future_cost_rescue_max_image_diff_abs: 22000
   celluniverse3_signal_center_future_cost_rescue_max_overlap_diff_abs: 90000
   celluniverse3_signal_center_future_cost_rescue_min_axis_length_scale: 0.75
-  celluniverse3_signal_center_future_cost_rescue_max_drift_scale: 0.05
+  celluniverse3_signal_center_future_cost_rescue_max_drift_scale: 0.28
   celluniverse3_signal_center_future_cost_rescue_max_valley_from_bright: 0.90
   celluniverse3_signal_center_future_cost_rescue_max_gap_density: 0.45
   celluniverse3_signal_center_future_cost_rescue_positive_cost_min_parent_shape: 2.15
@@ -128,6 +310,16 @@ prob:
   signal_center_severe_future_claim_min_parent_balance: 0.55
   signal_center_severe_future_claim_min_future_both: 2
   signal_center_severe_future_claim_max_missing: 0
+  celluniverse3_tunnel_neighbor_claim_bypass_enabled: true
+  celluniverse3_tunnel_neighbor_claim_min_parent_shape: 1.65
+  celluniverse3_tunnel_neighbor_claim_min_future_brightness: 0.18
+  celluniverse3_tunnel_neighbor_claim_min_parent_balance: 0.30
+  celluniverse3_tunnel_neighbor_claim_min_future_both: 2
+  celluniverse3_tunnel_neighbor_claim_max_missing: 0
+  celluniverse3_tunnel_neighbor_claim_min_sep_fraction: 1.0
+  celluniverse3_tunnel_neighbor_claim_min_blocker_radius_units: 1.05
+  celluniverse3_tunnel_neighbor_claim_require_separate_tunnel: true
+  celluniverse3_tunnel_neighbor_claim_support_radius_scale: 0.65
   celluniverse3_severe_signal_center_overlap_rescue_enabled: true
   celluniverse3_severe_signal_center_overlap_a_in_b_max: 0.15
   celluniverse3_severe_signal_center_overlap_b_in_a_max: 0.20
@@ -218,13 +410,13 @@ prob:
   celluniverse3_delayed_missing_daughter_sparse_rescue_min_parent_shape: 2.0
   celluniverse3_delayed_missing_daughter_sparse_rescue_min_sep_scale: 0.95
   celluniverse3_delayed_missing_daughter_sparse_rescue_min_future_brightness: 0.035
-  celluniverse3_delayed_missing_daughter_sparse_rescue_min_future_both: 1
+  celluniverse3_delayed_missing_daughter_sparse_rescue_min_future_both: 2
   celluniverse3_delayed_missing_daughter_sparse_rescue_max_missing: 2
   celluniverse3_delayed_missing_daughter_dense_flat_rescue_enabled: true
   celluniverse3_delayed_missing_daughter_dense_flat_max_valley_from_bright: 1.20
   celluniverse3_delayed_missing_daughter_dense_flat_max_gap_density: 0.26
   celluniverse3_delayed_missing_daughter_dense_flat_min_future_brightness: 0.035
-  celluniverse3_delayed_missing_daughter_dense_flat_min_future_both: 1
+  celluniverse3_delayed_missing_daughter_dense_flat_min_future_both: 2
   celluniverse3_delayed_missing_daughter_dense_flat_max_missing: 2
   celluniverse3_delayed_missing_daughter_cost_rescue_enabled: true
   celluniverse3_delayed_missing_daughter_cost_rescue_max_image_diff_abs: 8000
@@ -233,7 +425,7 @@ prob:
   celluniverse3_delayed_missing_daughter_cost_rescue_max_valley_from_bright: 1.20
   celluniverse3_delayed_missing_daughter_cost_rescue_max_gap_density: 0.26
   celluniverse3_delayed_missing_daughter_cost_rescue_min_future_brightness: 0.035
-  celluniverse3_delayed_missing_daughter_cost_rescue_min_future_both: 1
+  celluniverse3_delayed_missing_daughter_cost_rescue_min_future_both: 2
   celluniverse3_delayed_missing_daughter_cost_rescue_max_missing: 2
   celluniverse3_delayed_missing_daughter_cost_rescue_max_drift_abs: 1.0
   celluniverse3_delayed_missing_daughter_cost_rescue_max_drift_scale: 0.05
@@ -245,20 +437,19 @@ prob:
   celluniverse3_orphan_window_center_rescue_min_nearest_cell_distance: 55.0
   celluniverse3_orphan_window_center_rescue_radius: 25.0
   celluniverse3_orphan_window_center_rescue_brightness: 0.50
-  # Keep CellUniverse3 split decisions on the window/PCA proposal paths first.
-  # The broad post-PCA rod fallback can over-split by accepting local cost
-  # improvements without future-window support.
-  post_pca_force_rod_split_enabled: false
+  # Keep the post-PCA rod fallback narrow: only severe rods that already
+  # produced split evidence may use it, so stable regions do not trigger it.
+  post_pca_force_rod_split_enabled: true
   post_pca_force_rod_split_min_shape: 2.15
   post_pca_force_rod_split_separation_scale: 1.15
   post_pca_force_rod_split_daughter_radius_scale: 1.0
-  post_pca_force_rod_split_max_per_frame: 12
+  post_pca_force_rod_split_max_per_frame: 4
   post_pca_force_rod_split_include_attempted: true
   post_pca_force_rod_split_require_prior_attempt: false
   post_pca_force_rod_split_require_nonsibling_neighbor: false
   post_pca_force_rod_split_neighbor_norm_limit: 0.95
   post_pca_force_rod_split_neighbor_exempt_min_shape: 2.00
-  post_pca_force_rod_split_min_seed_brightness: 0.02
+  post_pca_force_rod_split_min_seed_brightness: 0.05
   post_pca_force_rod_split_require_cost_improvement: true
   post_pca_force_rod_split_max_positive_cost: 0.0
   post_pca_force_rod_split_min_cost_improvement_fraction: 0.001
@@ -266,3 +457,6 @@ prob:
   post_pca_force_rod_split_bright_near_miss_rescue_enabled: false
   post_pca_force_rod_split_asymmetric_candidates_enabled: true
   post_pca_force_rod_split_asymmetric_tip_scale: 1.0
+  post_pca_force_rod_split_cluster_suppression_enabled: true
+  post_pca_force_rod_split_cluster_radius_scale: 0.75
+  celluniverse3_post_pca_force_rod_require_window_map_primary_support: true

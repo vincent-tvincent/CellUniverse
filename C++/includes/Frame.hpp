@@ -124,6 +124,21 @@ struct BridgeSplitProposal
     float cellUniverse3MapDSupport = 0.0f;
     float cellUniverse3MapUSupportD1 = 0.0f;
     float cellUniverse3MapUSupportD2 = 0.0f;
+    bool cellUniverse3MapD1InsideTunnel = false;
+    bool cellUniverse3MapD2InsideTunnel = false;
+    bool cellUniverse3MapTunnelSnapApplied = false;
+    float cellUniverse3MapTunnelSnapD1Distance = 0.0f;
+    float cellUniverse3MapTunnelSnapD2Distance = 0.0f;
+    bool cellUniverse3MapTunnelConstraintAvailable = false;
+    BoundingBox3D cellUniverse3MapTunnelBbox;
+    int cellUniverse3MapTunnelGridX = 0;
+    int cellUniverse3MapTunnelGridY = 0;
+    int cellUniverse3MapTunnelGridZ = 0;
+    int cellUniverse3MapTunnelBoxSizeX = 1;
+    int cellUniverse3MapTunnelBoxSizeY = 1;
+    int cellUniverse3MapTunnelBoxSizeZ = 1;
+    int cellUniverse3MapTunnelNeighborBoxes = 0;
+    std::vector<int> cellUniverse3MapTunnelFlatIndices;
     float cellUniverse3MapAxisAlignment = 0.0f;
     float cellUniverse3MapCenterDistanceUnits = 0.0f;
     float cellUniverse3MapCenterPenalty = 0.0f;
@@ -370,6 +385,30 @@ public:
         cv::Point3f &outD2,
         int *outKeptPixels = nullptr) const;
 
+    // Read-only PCA check for an externally proposed daughter seed pair.
+    // Gathers bright pixels around the pair, Voronoi-filters them using the
+    // supplied claim sets, runs the same weighted PCA split helper used by
+    // imageGroundExpectedDaughters, and returns the PCA-refined daughter
+    // centroids. This lets higher-level deterministic split proposals test
+    // "does the real signal cloud agree with this axis/placement?" without
+    // mutating Frame::cells or duplicating PCA math outside Frame.cpp.
+    bool evaluateSplitSeedPairByPca(
+        size_t cellIndex,
+        const PreviousFrameSnapshot &snapshot,
+        const ClaimSet &otherCellsClaimSets,
+        const cv::Point3f &seedD1,
+        const cv::Point3f &seedD2,
+        float gatherRadiusScale,
+        int minPixels,
+        float minAxisAlignment,
+        float maxSeedDistanceScale,
+        cv::Point3f &outD1,
+        cv::Point3f &outD2,
+        float *outAxisAlignment = nullptr,
+        float *outMaxSeedDistance = nullptr,
+        int *outKeptPixels = nullptr,
+        float *outMeanWeight = nullptr) const;
+
     // Calibrate a cell's POSITION (radii + rotation unchanged) by trying
     // the weighted-mean centroid of Voronoi-filtered bright pixels as a
     // candidate position. The centroid of bright pixels inside a dividing
@@ -428,6 +467,9 @@ public:
         // deterministic cell-index order after the parallel region.
         std::ostream *logSink = nullptr);
 
+    bool refineCellShapeViaEdgeSticks(size_t cellIndex,
+                                      std::ostream *logSink = nullptr);
+
     std::vector<cv::Mat> getSynthFrame();
     const std::vector<cv::Mat>& getRealFrame() const { return _realFrame; }
 
@@ -442,6 +484,8 @@ public:
         _realFrame.shrink_to_fit();
         _synthFrame.clear();
         _synthFrame.shrink_to_fit();
+        _backgroundFrame.clear();
+        _backgroundFrame.shrink_to_fit();
         _signalProbability.clear();
         _signalProbability.shrink_to_fit();
         _signalMap.clear();
@@ -450,7 +494,11 @@ public:
         _currentCostPerSlice.shrink_to_fit();
     }
     void setBackgroundColor(float backgroundColor) { _backgroundValue = backgroundColor; }
+    void addBackgroundOffset(float backgroundDelta);
     float getBackgroundValue() const { return _backgroundValue; }
+    void setBackgroundFrame(std::vector<cv::Mat> backgroundFrame);
+    void clearBackgroundFrame() { _backgroundFrame.clear(); }
+    bool hasBackgroundFrame() const { return !_backgroundFrame.empty(); }
     // Signal centers for signal-guided perturbation (yp ffc1917). Populated
     // during frame preparation/preload after preprocessing is loaded.
     void setSignalCenters(std::vector<SignalCenter> centers) { _signalCenters = std::move(centers); }
@@ -531,6 +579,7 @@ private:
     std::string imageName;
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
+    std::vector<cv::Mat> _backgroundFrame;
     // Signal centers (yp ffc1917) — bright clusters in the real image that
     // signal-guided perturbation snaps cells onto.
     std::vector<SignalCenter> _signalCenters;
@@ -592,6 +641,7 @@ private:
     // Voronoi territory during perturbation cost computation.
     float _voronoiBleedWeight = 0.0f;
     cv::Size getImageShape();
+    cv::Mat makeSynthBackgroundSlice(cv::Size shape, int sliceIndex) const;
 
     // Rebuild _currentCostPerSlice and _currentCost from scratch by walking
     // every slice of _synthFrame vs _realFrame. Used after a full render

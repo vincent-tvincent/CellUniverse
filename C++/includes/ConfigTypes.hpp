@@ -80,7 +80,13 @@ public:
     bool celluniverse2_enabled = false;
     bool celluniverse3_enabled = false;
     int celluniverse3_window_radius = 3;
+    int celluniverse3_window_overlap_radius = 2;
     float celluniverse3_window_background_percentile = 95.0f;
+    bool celluniverse3_window_dual_background_enabled = false;
+    bool celluniverse3_window_background_export_debug = false;
+    bool celluniverse3_window_background_ellipsoid_region_enabled = false;
+    float celluniverse3_window_background_ellipsoid_margin_scale = 1.25f;
+    float celluniverse3_window_hot_background_percentile = 35.0f;
     float celluniverse3_window_hot_percentile = 92.0f;
     float celluniverse3_window_min_signal = 0.02f;
     float celluniverse3_window_sum_gamma = 1.0f;
@@ -90,17 +96,36 @@ public:
     int celluniverse3_window_max_recursive_depth = 2;
     bool celluniverse3_window_export_debug = false;
     bool celluniverse3_window_merge_centers = false;
+    bool celluniverse3_frame_cache_prune_enabled = false;
+    int celluniverse3_frame_cache_keep_future = 2;
+    float celluniverse3_frame_cache_min_available_gb = 0.0f;
+    int celluniverse3_frame_cache_pressure_keep_future = 0;
+    bool celluniverse3_prepared_frame_disk_cache_enabled = false;
+    bool celluniverse3_prepared_frame_disk_cache_signal_map_enabled = false;
+    std::string celluniverse3_prepared_frame_disk_cache_dir;
     bool celluniverse3_window_guided_position_enabled = true;
     int celluniverse3_window_guided_iterations_per_cell = 50;
     int celluniverse3_window_guided_dilate_xy = 1;
     float celluniverse3_window_guided_sample_radius_scale = 1.0f;
     float celluniverse3_window_guided_min_probability = 1.0e-4f;
+    bool celluniverse3_window_guided_use_overlap_tunnel = true;
     bool celluniverse3_window_map_split_prior_enabled = true;
     bool celluniverse3_window_map_proposal_enabled = true;
+    bool celluniverse3_window_map_direct_od_proposal_enabled = false;
+    bool celluniverse3_window_map_motion_compensation_enabled = true;
+    float celluniverse3_window_map_motion_residual_match_scale = 0.35f;
+    float celluniverse3_window_map_motion_residual_match_box_scale = 1.25f;
+    float celluniverse3_window_map_motion_min_residual_weight_fraction = 0.08f;
+    float celluniverse3_window_map_motion_center_bridge_max_ratio = 1.25f;
+    float celluniverse3_window_map_motion_max_axis_alignment = 0.94f;
     float celluniverse3_window_map_proposal_min_parent_shape = 1.35f;
     float celluniverse3_window_map_proposal_min_sep_scale = 0.45f;
     float celluniverse3_window_map_proposal_max_sep_scale = 2.75f;
     float celluniverse3_window_map_min_u_support = 0.05f;
+    bool celluniverse3_window_map_require_split_inside_tunnel = true;
+    int celluniverse3_window_map_tunnel_center_neighbor_boxes = 1;
+    bool celluniverse3_window_map_snap_split_to_tunnel = true;
+    float celluniverse3_window_map_tunnel_snap_max_distance_scale = 0.75f;
     int celluniverse3_window_map_min_overlap_boxes = 1;
     int celluniverse3_window_map_min_future_only_boxes = 1;
     float celluniverse3_window_map_max_axis_angle_degrees = 75.0f;
@@ -116,6 +141,52 @@ public:
     float celluniverse3_window_map_overlap_forced_max_midpoint_scale = 1.00f;
     float celluniverse3_window_map_overlap_forced_max_axis_lateral_scale = 0.45f;
     float celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction = 0.12f;
+    bool celluniverse3_window_map_overlap_forced_axis_scan_enabled = true;
+    float celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale = 0.35f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_step_scale = 0.12f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_min_step = 2.0f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale = 2.75f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees = 12.0f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight = 0.45f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction = 0.65f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale = 0.65f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale = 0.12f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_min_center_step = 2.0f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_motion_weight = 0.25f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight = 0.45f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight = 0.35f;
+    bool celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled = true;
+    float celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale = 2.5f;
+    int celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels = 20;
+    float celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment = 0.55f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale = 0.90f;
+    float celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight = 0.35f;
+    bool celluniverse3_edge_axis_fit_enabled = false;
+    int celluniverse3_edge_axis_fit_iterations = 1;
+    float celluniverse3_edge_axis_fit_min_shape = 1.20f;
+    float celluniverse3_edge_axis_fit_search_band_fraction = 0.35f;
+    float celluniverse3_edge_axis_fit_cylinder_radius_scale = 0.12f;
+    float celluniverse3_edge_axis_fit_min_cylinder_radius = 2.0f;
+    int celluniverse3_edge_axis_fit_samples_per_half_axis = 9;
+    float celluniverse3_edge_axis_fit_min_falling_gradient = 0.01f;
+    float celluniverse3_edge_axis_fit_min_inner_outer_contrast = 0.015f;
+    float celluniverse3_edge_axis_fit_radius_step_fraction = 0.35f;
+    float celluniverse3_edge_axis_fit_max_radius_change_fraction = 0.20f;
+    bool celluniverse3_edge_axis_fit_rod_conflict_enabled = true;
+    float celluniverse3_edge_axis_fit_rod_conflict_min_shape = 1.80f;
+    float celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio = 0.25f;
+    float celluniverse3_edge_axis_fit_rod_conflict_step_fraction = 1.00f;
+    float celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction = 0.40f;
+    bool celluniverse3_edge_axis_fit_core_brightness_enabled = false;
+    float celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction = 0.08f;
+    float celluniverse3_edge_axis_fit_core_brightness_radius_scale = 0.35f;
+    float celluniverse3_edge_axis_fit_core_brightness_top_fraction = 0.60f;
+    float celluniverse3_edge_axis_fit_core_brightness_blend = 1.00f;
+    float celluniverse3_edge_axis_fit_core_brightness_max_change_fraction = 0.60f;
+    bool celluniverse3_edge_axis_fit_core_brightness_extra_pca = true;
+    bool celluniverse3_edge_axis_fit_melt_released_brightness_enabled = false;
+    float celluniverse3_edge_axis_fit_melt_min_shell_fraction = 0.08f;
+    float celluniverse3_edge_axis_fit_melt_max_background_delta = 0.02f;
     bool celluniverse2_conditional_perturb_enabled = false;
     int celluniverse2_conditional_perturb_iterations_per_cell = 8;
     float celluniverse2_conditional_perturb_radius_ratio = 0.45f;
@@ -272,6 +343,9 @@ public:
     float celluniverse2_pre_pca_placement_probe_random_extra_mean_gain = 0.08f;
     float celluniverse2_pre_pca_placement_probe_random_max_move_units = 0.35f;
     float celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale = 0.45f;
+    bool celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled = true;
+    float celluniverse3_pre_pca_placement_probe_crowded_trigger_units = 1.20f;
+    float celluniverse3_pre_pca_placement_probe_crowded_max_move_units = 0.75f;
     bool celluniverse2_crowded_pca_shift_cap_enabled = true;
     float celluniverse2_crowded_pca_shift_cap_neighbor_scale = 2.20f;
     float celluniverse2_crowded_pca_shift_cap_min_fraction = 0.18f;
@@ -553,7 +627,13 @@ public:
         if (node["celluniverse2_enabled"]) celluniverse2_enabled = node["celluniverse2_enabled"].as<bool>();
         if (node["celluniverse3_enabled"]) celluniverse3_enabled = node["celluniverse3_enabled"].as<bool>();
         if (node["celluniverse3_window_radius"]) celluniverse3_window_radius = node["celluniverse3_window_radius"].as<int>();
+        if (node["celluniverse3_window_overlap_radius"]) celluniverse3_window_overlap_radius = node["celluniverse3_window_overlap_radius"].as<int>();
         if (node["celluniverse3_window_background_percentile"]) celluniverse3_window_background_percentile = node["celluniverse3_window_background_percentile"].as<float>();
+        if (node["celluniverse3_window_dual_background_enabled"]) celluniverse3_window_dual_background_enabled = node["celluniverse3_window_dual_background_enabled"].as<bool>();
+        if (node["celluniverse3_window_background_export_debug"]) celluniverse3_window_background_export_debug = node["celluniverse3_window_background_export_debug"].as<bool>();
+        if (node["celluniverse3_window_background_ellipsoid_region_enabled"]) celluniverse3_window_background_ellipsoid_region_enabled = node["celluniverse3_window_background_ellipsoid_region_enabled"].as<bool>();
+        if (node["celluniverse3_window_background_ellipsoid_margin_scale"]) celluniverse3_window_background_ellipsoid_margin_scale = node["celluniverse3_window_background_ellipsoid_margin_scale"].as<float>();
+        if (node["celluniverse3_window_hot_background_percentile"]) celluniverse3_window_hot_background_percentile = node["celluniverse3_window_hot_background_percentile"].as<float>();
         if (node["celluniverse3_window_hot_percentile"]) celluniverse3_window_hot_percentile = node["celluniverse3_window_hot_percentile"].as<float>();
         if (node["celluniverse3_window_min_signal"]) celluniverse3_window_min_signal = node["celluniverse3_window_min_signal"].as<float>();
         if (node["celluniverse3_window_sum_gamma"]) celluniverse3_window_sum_gamma = node["celluniverse3_window_sum_gamma"].as<float>();
@@ -563,17 +643,36 @@ public:
         if (node["celluniverse3_window_max_recursive_depth"]) celluniverse3_window_max_recursive_depth = node["celluniverse3_window_max_recursive_depth"].as<int>();
         if (node["celluniverse3_window_export_debug"]) celluniverse3_window_export_debug = node["celluniverse3_window_export_debug"].as<bool>();
         if (node["celluniverse3_window_merge_centers"]) celluniverse3_window_merge_centers = node["celluniverse3_window_merge_centers"].as<bool>();
+        if (node["celluniverse3_frame_cache_prune_enabled"]) celluniverse3_frame_cache_prune_enabled = node["celluniverse3_frame_cache_prune_enabled"].as<bool>();
+        if (node["celluniverse3_frame_cache_keep_future"]) celluniverse3_frame_cache_keep_future = node["celluniverse3_frame_cache_keep_future"].as<int>();
+        if (node["celluniverse3_frame_cache_min_available_gb"]) celluniverse3_frame_cache_min_available_gb = node["celluniverse3_frame_cache_min_available_gb"].as<float>();
+        if (node["celluniverse3_frame_cache_pressure_keep_future"]) celluniverse3_frame_cache_pressure_keep_future = node["celluniverse3_frame_cache_pressure_keep_future"].as<int>();
+        if (node["celluniverse3_prepared_frame_disk_cache_enabled"]) celluniverse3_prepared_frame_disk_cache_enabled = node["celluniverse3_prepared_frame_disk_cache_enabled"].as<bool>();
+        if (node["celluniverse3_prepared_frame_disk_cache_signal_map_enabled"]) celluniverse3_prepared_frame_disk_cache_signal_map_enabled = node["celluniverse3_prepared_frame_disk_cache_signal_map_enabled"].as<bool>();
+        if (node["celluniverse3_prepared_frame_disk_cache_dir"]) celluniverse3_prepared_frame_disk_cache_dir = node["celluniverse3_prepared_frame_disk_cache_dir"].as<std::string>();
         if (node["celluniverse3_window_guided_position_enabled"]) celluniverse3_window_guided_position_enabled = node["celluniverse3_window_guided_position_enabled"].as<bool>();
         if (node["celluniverse3_window_guided_iterations_per_cell"]) celluniverse3_window_guided_iterations_per_cell = node["celluniverse3_window_guided_iterations_per_cell"].as<int>();
         if (node["celluniverse3_window_guided_dilate_xy"]) celluniverse3_window_guided_dilate_xy = node["celluniverse3_window_guided_dilate_xy"].as<int>();
         if (node["celluniverse3_window_guided_sample_radius_scale"]) celluniverse3_window_guided_sample_radius_scale = node["celluniverse3_window_guided_sample_radius_scale"].as<float>();
         if (node["celluniverse3_window_guided_min_probability"]) celluniverse3_window_guided_min_probability = node["celluniverse3_window_guided_min_probability"].as<float>();
+        if (node["celluniverse3_window_guided_use_overlap_tunnel"]) celluniverse3_window_guided_use_overlap_tunnel = node["celluniverse3_window_guided_use_overlap_tunnel"].as<bool>();
         if (node["celluniverse3_window_map_split_prior_enabled"]) celluniverse3_window_map_split_prior_enabled = node["celluniverse3_window_map_split_prior_enabled"].as<bool>();
         if (node["celluniverse3_window_map_proposal_enabled"]) celluniverse3_window_map_proposal_enabled = node["celluniverse3_window_map_proposal_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_direct_od_proposal_enabled"]) celluniverse3_window_map_direct_od_proposal_enabled = node["celluniverse3_window_map_direct_od_proposal_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_motion_compensation_enabled"]) celluniverse3_window_map_motion_compensation_enabled = node["celluniverse3_window_map_motion_compensation_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_motion_residual_match_scale"]) celluniverse3_window_map_motion_residual_match_scale = node["celluniverse3_window_map_motion_residual_match_scale"].as<float>();
+        if (node["celluniverse3_window_map_motion_residual_match_box_scale"]) celluniverse3_window_map_motion_residual_match_box_scale = node["celluniverse3_window_map_motion_residual_match_box_scale"].as<float>();
+        if (node["celluniverse3_window_map_motion_min_residual_weight_fraction"]) celluniverse3_window_map_motion_min_residual_weight_fraction = node["celluniverse3_window_map_motion_min_residual_weight_fraction"].as<float>();
+        if (node["celluniverse3_window_map_motion_center_bridge_max_ratio"]) celluniverse3_window_map_motion_center_bridge_max_ratio = node["celluniverse3_window_map_motion_center_bridge_max_ratio"].as<float>();
+        if (node["celluniverse3_window_map_motion_max_axis_alignment"]) celluniverse3_window_map_motion_max_axis_alignment = node["celluniverse3_window_map_motion_max_axis_alignment"].as<float>();
         if (node["celluniverse3_window_map_proposal_min_parent_shape"]) celluniverse3_window_map_proposal_min_parent_shape = node["celluniverse3_window_map_proposal_min_parent_shape"].as<float>();
         if (node["celluniverse3_window_map_proposal_min_sep_scale"]) celluniverse3_window_map_proposal_min_sep_scale = node["celluniverse3_window_map_proposal_min_sep_scale"].as<float>();
         if (node["celluniverse3_window_map_proposal_max_sep_scale"]) celluniverse3_window_map_proposal_max_sep_scale = node["celluniverse3_window_map_proposal_max_sep_scale"].as<float>();
         if (node["celluniverse3_window_map_min_u_support"]) celluniverse3_window_map_min_u_support = node["celluniverse3_window_map_min_u_support"].as<float>();
+        if (node["celluniverse3_window_map_require_split_inside_tunnel"]) celluniverse3_window_map_require_split_inside_tunnel = node["celluniverse3_window_map_require_split_inside_tunnel"].as<bool>();
+        if (node["celluniverse3_window_map_tunnel_center_neighbor_boxes"]) celluniverse3_window_map_tunnel_center_neighbor_boxes = node["celluniverse3_window_map_tunnel_center_neighbor_boxes"].as<int>();
+        if (node["celluniverse3_window_map_snap_split_to_tunnel"]) celluniverse3_window_map_snap_split_to_tunnel = node["celluniverse3_window_map_snap_split_to_tunnel"].as<bool>();
+        if (node["celluniverse3_window_map_tunnel_snap_max_distance_scale"]) celluniverse3_window_map_tunnel_snap_max_distance_scale = node["celluniverse3_window_map_tunnel_snap_max_distance_scale"].as<float>();
         if (node["celluniverse3_window_map_min_overlap_boxes"]) celluniverse3_window_map_min_overlap_boxes = node["celluniverse3_window_map_min_overlap_boxes"].as<int>();
         if (node["celluniverse3_window_map_min_future_only_boxes"]) celluniverse3_window_map_min_future_only_boxes = node["celluniverse3_window_map_min_future_only_boxes"].as<int>();
         if (node["celluniverse3_window_map_max_axis_angle_degrees"]) celluniverse3_window_map_max_axis_angle_degrees = node["celluniverse3_window_map_max_axis_angle_degrees"].as<float>();
@@ -589,6 +688,52 @@ public:
         if (node["celluniverse3_window_map_overlap_forced_max_midpoint_scale"]) celluniverse3_window_map_overlap_forced_max_midpoint_scale = node["celluniverse3_window_map_overlap_forced_max_midpoint_scale"].as<float>();
         if (node["celluniverse3_window_map_overlap_forced_max_axis_lateral_scale"]) celluniverse3_window_map_overlap_forced_max_axis_lateral_scale = node["celluniverse3_window_map_overlap_forced_max_axis_lateral_scale"].as<float>();
         if (node["celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction"]) celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction = node["celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_enabled"]) celluniverse3_window_map_overlap_forced_axis_scan_enabled = node["celluniverse3_window_map_overlap_forced_axis_scan_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_step_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_step_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_step_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_min_step"]) celluniverse3_window_map_overlap_forced_axis_scan_min_step = node["celluniverse3_window_map_overlap_forced_axis_scan_min_step"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees"]) celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees = node["celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight"]) celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight = node["celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction"]) celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction = node["celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_min_center_step"]) celluniverse3_window_map_overlap_forced_axis_scan_min_center_step = node["celluniverse3_window_map_overlap_forced_axis_scan_min_center_step"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_motion_weight"]) celluniverse3_window_map_overlap_forced_axis_scan_motion_weight = node["celluniverse3_window_map_overlap_forced_axis_scan_motion_weight"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight"]) celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight = node["celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight"]) celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight = node["celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled"]) celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled = node["celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels"]) celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels = node["celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels"].as<int>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment"]) celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment = node["celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale"]) celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale = node["celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale"].as<float>();
+        if (node["celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight"]) celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight = node["celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_enabled"]) celluniverse3_edge_axis_fit_enabled = node["celluniverse3_edge_axis_fit_enabled"].as<bool>();
+        if (node["celluniverse3_edge_axis_fit_iterations"]) celluniverse3_edge_axis_fit_iterations = node["celluniverse3_edge_axis_fit_iterations"].as<int>();
+        if (node["celluniverse3_edge_axis_fit_min_shape"]) celluniverse3_edge_axis_fit_min_shape = node["celluniverse3_edge_axis_fit_min_shape"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_search_band_fraction"]) celluniverse3_edge_axis_fit_search_band_fraction = node["celluniverse3_edge_axis_fit_search_band_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_cylinder_radius_scale"]) celluniverse3_edge_axis_fit_cylinder_radius_scale = node["celluniverse3_edge_axis_fit_cylinder_radius_scale"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_min_cylinder_radius"]) celluniverse3_edge_axis_fit_min_cylinder_radius = node["celluniverse3_edge_axis_fit_min_cylinder_radius"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_samples_per_half_axis"]) celluniverse3_edge_axis_fit_samples_per_half_axis = node["celluniverse3_edge_axis_fit_samples_per_half_axis"].as<int>();
+        if (node["celluniverse3_edge_axis_fit_min_falling_gradient"]) celluniverse3_edge_axis_fit_min_falling_gradient = node["celluniverse3_edge_axis_fit_min_falling_gradient"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_min_inner_outer_contrast"]) celluniverse3_edge_axis_fit_min_inner_outer_contrast = node["celluniverse3_edge_axis_fit_min_inner_outer_contrast"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_radius_step_fraction"]) celluniverse3_edge_axis_fit_radius_step_fraction = node["celluniverse3_edge_axis_fit_radius_step_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_max_radius_change_fraction"]) celluniverse3_edge_axis_fit_max_radius_change_fraction = node["celluniverse3_edge_axis_fit_max_radius_change_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_rod_conflict_enabled"]) celluniverse3_edge_axis_fit_rod_conflict_enabled = node["celluniverse3_edge_axis_fit_rod_conflict_enabled"].as<bool>();
+        if (node["celluniverse3_edge_axis_fit_rod_conflict_min_shape"]) celluniverse3_edge_axis_fit_rod_conflict_min_shape = node["celluniverse3_edge_axis_fit_rod_conflict_min_shape"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio"]) celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio = node["celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_rod_conflict_step_fraction"]) celluniverse3_edge_axis_fit_rod_conflict_step_fraction = node["celluniverse3_edge_axis_fit_rod_conflict_step_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction"]) celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction = node["celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_enabled"]) celluniverse3_edge_axis_fit_core_brightness_enabled = node["celluniverse3_edge_axis_fit_core_brightness_enabled"].as<bool>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction"]) celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction = node["celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_radius_scale"]) celluniverse3_edge_axis_fit_core_brightness_radius_scale = node["celluniverse3_edge_axis_fit_core_brightness_radius_scale"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_top_fraction"]) celluniverse3_edge_axis_fit_core_brightness_top_fraction = node["celluniverse3_edge_axis_fit_core_brightness_top_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_blend"]) celluniverse3_edge_axis_fit_core_brightness_blend = node["celluniverse3_edge_axis_fit_core_brightness_blend"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_max_change_fraction"]) celluniverse3_edge_axis_fit_core_brightness_max_change_fraction = node["celluniverse3_edge_axis_fit_core_brightness_max_change_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_core_brightness_extra_pca"]) celluniverse3_edge_axis_fit_core_brightness_extra_pca = node["celluniverse3_edge_axis_fit_core_brightness_extra_pca"].as<bool>();
+        if (node["celluniverse3_edge_axis_fit_melt_released_brightness_enabled"]) celluniverse3_edge_axis_fit_melt_released_brightness_enabled = node["celluniverse3_edge_axis_fit_melt_released_brightness_enabled"].as<bool>();
+        if (node["celluniverse3_edge_axis_fit_melt_min_shell_fraction"]) celluniverse3_edge_axis_fit_melt_min_shell_fraction = node["celluniverse3_edge_axis_fit_melt_min_shell_fraction"].as<float>();
+        if (node["celluniverse3_edge_axis_fit_melt_max_background_delta"]) celluniverse3_edge_axis_fit_melt_max_background_delta = node["celluniverse3_edge_axis_fit_melt_max_background_delta"].as<float>();
         if (node["celluniverse2_conditional_perturb_enabled"]) celluniverse2_conditional_perturb_enabled = node["celluniverse2_conditional_perturb_enabled"].as<bool>();
         if (node["celluniverse2_conditional_perturb_iterations_per_cell"]) celluniverse2_conditional_perturb_iterations_per_cell = node["celluniverse2_conditional_perturb_iterations_per_cell"].as<int>();
         if (node["celluniverse2_conditional_perturb_radius_ratio"]) celluniverse2_conditional_perturb_radius_ratio = node["celluniverse2_conditional_perturb_radius_ratio"].as<float>();
@@ -740,6 +885,9 @@ public:
         if (node["celluniverse2_pre_pca_placement_probe_random_extra_mean_gain"]) celluniverse2_pre_pca_placement_probe_random_extra_mean_gain = node["celluniverse2_pre_pca_placement_probe_random_extra_mean_gain"].as<float>();
         if (node["celluniverse2_pre_pca_placement_probe_random_max_move_units"]) celluniverse2_pre_pca_placement_probe_random_max_move_units = node["celluniverse2_pre_pca_placement_probe_random_max_move_units"].as<float>();
         if (node["celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale"]) celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale = node["celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale"].as<float>();
+        if (node["celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled"]) celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled = node["celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled"].as<bool>();
+        if (node["celluniverse3_pre_pca_placement_probe_crowded_trigger_units"]) celluniverse3_pre_pca_placement_probe_crowded_trigger_units = node["celluniverse3_pre_pca_placement_probe_crowded_trigger_units"].as<float>();
+        if (node["celluniverse3_pre_pca_placement_probe_crowded_max_move_units"]) celluniverse3_pre_pca_placement_probe_crowded_max_move_units = node["celluniverse3_pre_pca_placement_probe_crowded_max_move_units"].as<float>();
         if (node["celluniverse2_crowded_pca_shift_cap_enabled"]) celluniverse2_crowded_pca_shift_cap_enabled = node["celluniverse2_crowded_pca_shift_cap_enabled"].as<bool>();
         if (node["celluniverse2_crowded_pca_shift_cap_neighbor_scale"]) celluniverse2_crowded_pca_shift_cap_neighbor_scale = node["celluniverse2_crowded_pca_shift_cap_neighbor_scale"].as<float>();
         if (node["celluniverse2_crowded_pca_shift_cap_min_fraction"]) celluniverse2_crowded_pca_shift_cap_min_fraction = node["celluniverse2_crowded_pca_shift_cap_min_fraction"].as<float>();
@@ -788,9 +936,25 @@ public:
         }
         validatePreprocessingConfig();
         light_preprocess_gamma = std::max(0.01f, light_preprocess_gamma);
-        celluniverse3_window_radius = std::clamp(celluniverse3_window_radius, 1, 7);
+        celluniverse3_window_radius = std::clamp(celluniverse3_window_radius, 1, 15);
+        celluniverse3_window_overlap_radius =
+            std::clamp(celluniverse3_window_overlap_radius, 0, celluniverse3_window_radius);
+        celluniverse3_window_map_motion_residual_match_scale =
+            std::max(0.0f, celluniverse3_window_map_motion_residual_match_scale);
+        celluniverse3_window_map_motion_residual_match_box_scale =
+            std::max(0.0f, celluniverse3_window_map_motion_residual_match_box_scale);
+        celluniverse3_window_map_motion_min_residual_weight_fraction =
+            std::clamp(celluniverse3_window_map_motion_min_residual_weight_fraction, 0.0f, 1.0f);
+        celluniverse3_window_map_motion_center_bridge_max_ratio =
+            std::max(0.0f, celluniverse3_window_map_motion_center_bridge_max_ratio);
+        celluniverse3_window_map_motion_max_axis_alignment =
+            std::clamp(celluniverse3_window_map_motion_max_axis_alignment, 0.0f, 1.0f);
         celluniverse3_window_background_percentile =
             std::clamp(celluniverse3_window_background_percentile, 0.0f, 100.0f);
+        celluniverse3_window_background_ellipsoid_margin_scale =
+            std::clamp(celluniverse3_window_background_ellipsoid_margin_scale, 0.1f, 10.0f);
+        celluniverse3_window_hot_background_percentile =
+            std::clamp(celluniverse3_window_hot_background_percentile, 0.0f, 100.0f);
         celluniverse3_window_hot_percentile =
             std::clamp(celluniverse3_window_hot_percentile, 0.0f, 100.0f);
         celluniverse3_window_min_signal = std::max(0.0f, celluniverse3_window_min_signal);
@@ -819,6 +983,10 @@ public:
                      celluniverse3_window_map_proposal_max_sep_scale);
         celluniverse3_window_map_min_u_support =
             std::max(0.0f, celluniverse3_window_map_min_u_support);
+        celluniverse3_window_map_tunnel_center_neighbor_boxes =
+            std::clamp(celluniverse3_window_map_tunnel_center_neighbor_boxes, 0, 2);
+        celluniverse3_window_map_tunnel_snap_max_distance_scale =
+            std::max(0.0f, celluniverse3_window_map_tunnel_snap_max_distance_scale);
         celluniverse3_window_map_min_overlap_boxes =
             std::max(0, celluniverse3_window_map_min_overlap_boxes);
         celluniverse3_window_map_min_future_only_boxes =
@@ -849,6 +1017,88 @@ public:
         celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction =
             std::clamp(celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction,
                        0.0f, 1.0f);
+        celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_step_scale =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_step_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_min_step =
+            std::max(0.25f, celluniverse3_window_map_overlap_forced_axis_scan_min_step);
+        celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale =
+            std::max(celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale,
+                     celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees =
+            std::clamp(celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees,
+                       0.0f, 45.0f);
+        celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight);
+        celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction =
+            std::clamp(celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction,
+                       0.0f, 1.0f);
+        celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_min_center_step =
+            std::max(0.25f, celluniverse3_window_map_overlap_forced_axis_scan_min_center_step);
+        celluniverse3_window_map_overlap_forced_axis_scan_motion_weight =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_motion_weight);
+        celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight);
+        celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight);
+        celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels =
+            std::max(1, celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels);
+        celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment =
+            std::clamp(celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment,
+                       0.0f, 1.0f);
+        celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale);
+        celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight =
+            std::max(0.0f, celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight);
+        celluniverse3_edge_axis_fit_iterations =
+            std::max(0, celluniverse3_edge_axis_fit_iterations);
+        celluniverse3_edge_axis_fit_min_shape =
+            std::max(1.0f, celluniverse3_edge_axis_fit_min_shape);
+        celluniverse3_edge_axis_fit_search_band_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_search_band_fraction, 0.05f, 1.0f);
+        celluniverse3_edge_axis_fit_cylinder_radius_scale =
+            std::max(0.0f, celluniverse3_edge_axis_fit_cylinder_radius_scale);
+        celluniverse3_edge_axis_fit_min_cylinder_radius =
+            std::max(0.25f, celluniverse3_edge_axis_fit_min_cylinder_radius);
+        celluniverse3_edge_axis_fit_samples_per_half_axis =
+            std::max(3, celluniverse3_edge_axis_fit_samples_per_half_axis);
+        celluniverse3_edge_axis_fit_min_falling_gradient =
+            std::max(0.0f, celluniverse3_edge_axis_fit_min_falling_gradient);
+        celluniverse3_edge_axis_fit_min_inner_outer_contrast =
+            std::max(0.0f, celluniverse3_edge_axis_fit_min_inner_outer_contrast);
+        celluniverse3_edge_axis_fit_radius_step_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_radius_step_fraction, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_max_radius_change_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_max_radius_change_fraction, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_rod_conflict_min_shape =
+            std::max(1.0f, celluniverse3_edge_axis_fit_rod_conflict_min_shape);
+        celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio =
+            std::clamp(celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_rod_conflict_step_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_rod_conflict_step_fraction, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_core_brightness_radius_scale =
+            std::clamp(celluniverse3_edge_axis_fit_core_brightness_radius_scale, 0.05f, 1.0f);
+        celluniverse3_edge_axis_fit_core_brightness_top_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_core_brightness_top_fraction, 0.05f, 1.0f);
+        celluniverse3_edge_axis_fit_core_brightness_blend =
+            std::clamp(celluniverse3_edge_axis_fit_core_brightness_blend, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_core_brightness_max_change_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_core_brightness_max_change_fraction, 0.0f, 2.0f);
+        celluniverse3_edge_axis_fit_melt_min_shell_fraction =
+            std::clamp(celluniverse3_edge_axis_fit_melt_min_shell_fraction, 0.0f, 1.0f);
+        celluniverse3_edge_axis_fit_melt_max_background_delta =
+            std::clamp(celluniverse3_edge_axis_fit_melt_max_background_delta, 0.0f, 1.0f);
     }
     void printConfig() const {
         std::cout << "Simulation Config\n";
@@ -858,7 +1108,13 @@ public:
         std::cout << "celluniverse2_enabled: " << celluniverse2_enabled << '\n';
         std::cout << "celluniverse3_enabled: " << celluniverse3_enabled << '\n';
         std::cout << "celluniverse3_window_radius: " << celluniverse3_window_radius << '\n';
+        std::cout << "celluniverse3_window_overlap_radius: " << celluniverse3_window_overlap_radius << '\n';
         std::cout << "celluniverse3_window_background_percentile: " << celluniverse3_window_background_percentile << '\n';
+        std::cout << "celluniverse3_window_dual_background_enabled: " << celluniverse3_window_dual_background_enabled << '\n';
+        std::cout << "celluniverse3_window_background_export_debug: " << celluniverse3_window_background_export_debug << '\n';
+        std::cout << "celluniverse3_window_background_ellipsoid_region_enabled: " << celluniverse3_window_background_ellipsoid_region_enabled << '\n';
+        std::cout << "celluniverse3_window_background_ellipsoid_margin_scale: " << celluniverse3_window_background_ellipsoid_margin_scale << '\n';
+        std::cout << "celluniverse3_window_hot_background_percentile: " << celluniverse3_window_hot_background_percentile << '\n';
         std::cout << "celluniverse3_window_hot_percentile: " << celluniverse3_window_hot_percentile << '\n';
         std::cout << "celluniverse3_window_min_signal: " << celluniverse3_window_min_signal << '\n';
         std::cout << "celluniverse3_window_sum_gamma: " << celluniverse3_window_sum_gamma << '\n';
@@ -868,17 +1124,36 @@ public:
         std::cout << "celluniverse3_window_max_recursive_depth: " << celluniverse3_window_max_recursive_depth << '\n';
         std::cout << "celluniverse3_window_export_debug: " << celluniverse3_window_export_debug << '\n';
         std::cout << "celluniverse3_window_merge_centers: " << celluniverse3_window_merge_centers << '\n';
+        std::cout << "celluniverse3_frame_cache_prune_enabled: " << celluniverse3_frame_cache_prune_enabled << '\n';
+        std::cout << "celluniverse3_frame_cache_keep_future: " << celluniverse3_frame_cache_keep_future << '\n';
+        std::cout << "celluniverse3_frame_cache_min_available_gb: " << celluniverse3_frame_cache_min_available_gb << '\n';
+        std::cout << "celluniverse3_frame_cache_pressure_keep_future: " << celluniverse3_frame_cache_pressure_keep_future << '\n';
+        std::cout << "celluniverse3_prepared_frame_disk_cache_enabled: " << celluniverse3_prepared_frame_disk_cache_enabled << '\n';
+        std::cout << "celluniverse3_prepared_frame_disk_cache_signal_map_enabled: " << celluniverse3_prepared_frame_disk_cache_signal_map_enabled << '\n';
+        std::cout << "celluniverse3_prepared_frame_disk_cache_dir: " << celluniverse3_prepared_frame_disk_cache_dir << '\n';
         std::cout << "celluniverse3_window_guided_position_enabled: " << celluniverse3_window_guided_position_enabled << '\n';
         std::cout << "celluniverse3_window_guided_iterations_per_cell: " << celluniverse3_window_guided_iterations_per_cell << '\n';
         std::cout << "celluniverse3_window_guided_dilate_xy: " << celluniverse3_window_guided_dilate_xy << '\n';
         std::cout << "celluniverse3_window_guided_sample_radius_scale: " << celluniverse3_window_guided_sample_radius_scale << '\n';
         std::cout << "celluniverse3_window_guided_min_probability: " << celluniverse3_window_guided_min_probability << '\n';
+        std::cout << "celluniverse3_window_guided_use_overlap_tunnel: " << celluniverse3_window_guided_use_overlap_tunnel << '\n';
         std::cout << "celluniverse3_window_map_split_prior_enabled: " << celluniverse3_window_map_split_prior_enabled << '\n';
         std::cout << "celluniverse3_window_map_proposal_enabled: " << celluniverse3_window_map_proposal_enabled << '\n';
+        std::cout << "celluniverse3_window_map_direct_od_proposal_enabled: " << celluniverse3_window_map_direct_od_proposal_enabled << '\n';
+        std::cout << "celluniverse3_window_map_motion_compensation_enabled: " << celluniverse3_window_map_motion_compensation_enabled << '\n';
+        std::cout << "celluniverse3_window_map_motion_residual_match_scale: " << celluniverse3_window_map_motion_residual_match_scale << '\n';
+        std::cout << "celluniverse3_window_map_motion_residual_match_box_scale: " << celluniverse3_window_map_motion_residual_match_box_scale << '\n';
+        std::cout << "celluniverse3_window_map_motion_min_residual_weight_fraction: " << celluniverse3_window_map_motion_min_residual_weight_fraction << '\n';
+        std::cout << "celluniverse3_window_map_motion_center_bridge_max_ratio: " << celluniverse3_window_map_motion_center_bridge_max_ratio << '\n';
+        std::cout << "celluniverse3_window_map_motion_max_axis_alignment: " << celluniverse3_window_map_motion_max_axis_alignment << '\n';
         std::cout << "celluniverse3_window_map_proposal_min_parent_shape: " << celluniverse3_window_map_proposal_min_parent_shape << '\n';
         std::cout << "celluniverse3_window_map_proposal_min_sep_scale: " << celluniverse3_window_map_proposal_min_sep_scale << '\n';
         std::cout << "celluniverse3_window_map_proposal_max_sep_scale: " << celluniverse3_window_map_proposal_max_sep_scale << '\n';
         std::cout << "celluniverse3_window_map_min_u_support: " << celluniverse3_window_map_min_u_support << '\n';
+        std::cout << "celluniverse3_window_map_require_split_inside_tunnel: " << celluniverse3_window_map_require_split_inside_tunnel << '\n';
+        std::cout << "celluniverse3_window_map_tunnel_center_neighbor_boxes: " << celluniverse3_window_map_tunnel_center_neighbor_boxes << '\n';
+        std::cout << "celluniverse3_window_map_snap_split_to_tunnel: " << celluniverse3_window_map_snap_split_to_tunnel << '\n';
+        std::cout << "celluniverse3_window_map_tunnel_snap_max_distance_scale: " << celluniverse3_window_map_tunnel_snap_max_distance_scale << '\n';
         std::cout << "celluniverse3_window_map_min_overlap_boxes: " << celluniverse3_window_map_min_overlap_boxes << '\n';
         std::cout << "celluniverse3_window_map_min_future_only_boxes: " << celluniverse3_window_map_min_future_only_boxes << '\n';
         std::cout << "celluniverse3_window_map_max_axis_angle_degrees: " << celluniverse3_window_map_max_axis_angle_degrees << '\n';
@@ -894,6 +1169,52 @@ public:
         std::cout << "celluniverse3_window_map_overlap_forced_max_midpoint_scale: " << celluniverse3_window_map_overlap_forced_max_midpoint_scale << '\n';
         std::cout << "celluniverse3_window_map_overlap_forced_max_axis_lateral_scale: " << celluniverse3_window_map_overlap_forced_max_axis_lateral_scale << '\n';
         std::cout << "celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction: " << celluniverse3_window_map_overlap_forced_min_cluster_weight_fraction << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_enabled: " << celluniverse3_window_map_overlap_forced_axis_scan_enabled << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_initial_sep_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_step_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_step_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_min_step: " << celluniverse3_window_map_overlap_forced_axis_scan_min_step << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_max_sep_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees: " << celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight: " << celluniverse3_window_map_overlap_forced_axis_scan_brightness_weight << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction: " << celluniverse3_window_map_overlap_forced_axis_scan_brightness_drop_fraction << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_center_slide_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_min_center_step: " << celluniverse3_window_map_overlap_forced_axis_scan_min_center_step << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_motion_weight: " << celluniverse3_window_map_overlap_forced_axis_scan_motion_weight << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight: " << celluniverse3_window_map_overlap_forced_axis_scan_divergence_weight << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight: " << celluniverse3_window_map_overlap_forced_axis_scan_future_only_weight << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled: " << celluniverse3_window_map_overlap_forced_axis_scan_pca_enabled << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_pca_gather_radius_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels: " << celluniverse3_window_map_overlap_forced_axis_scan_pca_min_pixels << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment: " << celluniverse3_window_map_overlap_forced_axis_scan_pca_min_axis_alignment << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale: " << celluniverse3_window_map_overlap_forced_axis_scan_pca_max_seed_distance_scale << '\n';
+        std::cout << "celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight: " << celluniverse3_window_map_overlap_forced_axis_scan_pca_score_weight << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_enabled: " << celluniverse3_edge_axis_fit_enabled << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_iterations: " << celluniverse3_edge_axis_fit_iterations << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_min_shape: " << celluniverse3_edge_axis_fit_min_shape << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_search_band_fraction: " << celluniverse3_edge_axis_fit_search_band_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_cylinder_radius_scale: " << celluniverse3_edge_axis_fit_cylinder_radius_scale << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_min_cylinder_radius: " << celluniverse3_edge_axis_fit_min_cylinder_radius << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_samples_per_half_axis: " << celluniverse3_edge_axis_fit_samples_per_half_axis << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_min_falling_gradient: " << celluniverse3_edge_axis_fit_min_falling_gradient << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_min_inner_outer_contrast: " << celluniverse3_edge_axis_fit_min_inner_outer_contrast << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_radius_step_fraction: " << celluniverse3_edge_axis_fit_radius_step_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_max_radius_change_fraction: " << celluniverse3_edge_axis_fit_max_radius_change_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_rod_conflict_enabled: " << celluniverse3_edge_axis_fit_rod_conflict_enabled << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_rod_conflict_min_shape: " << celluniverse3_edge_axis_fit_rod_conflict_min_shape << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio: " << celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_rod_conflict_step_fraction: " << celluniverse3_edge_axis_fit_rod_conflict_step_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction: " << celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_enabled: " << celluniverse3_edge_axis_fit_core_brightness_enabled << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction: " << celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_radius_scale: " << celluniverse3_edge_axis_fit_core_brightness_radius_scale << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_top_fraction: " << celluniverse3_edge_axis_fit_core_brightness_top_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_blend: " << celluniverse3_edge_axis_fit_core_brightness_blend << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_max_change_fraction: " << celluniverse3_edge_axis_fit_core_brightness_max_change_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_core_brightness_extra_pca: " << celluniverse3_edge_axis_fit_core_brightness_extra_pca << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_melt_released_brightness_enabled: " << celluniverse3_edge_axis_fit_melt_released_brightness_enabled << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_melt_min_shell_fraction: " << celluniverse3_edge_axis_fit_melt_min_shell_fraction << '\n';
+        std::cout << "celluniverse3_edge_axis_fit_melt_max_background_delta: " << celluniverse3_edge_axis_fit_melt_max_background_delta << '\n';
         std::cout << "celluniverse2_conditional_perturb_enabled: " << celluniverse2_conditional_perturb_enabled << '\n';
         std::cout << "celluniverse2_conditional_perturb_iterations_per_cell: " << celluniverse2_conditional_perturb_iterations_per_cell << '\n';
         std::cout << "celluniverse2_conditional_perturb_radius_ratio: " << celluniverse2_conditional_perturb_radius_ratio << '\n';
@@ -1039,6 +1360,9 @@ public:
         std::cout << "celluniverse2_pre_pca_placement_probe_random_extra_mean_gain: " << celluniverse2_pre_pca_placement_probe_random_extra_mean_gain << '\n';
         std::cout << "celluniverse2_pre_pca_placement_probe_random_max_move_units: " << celluniverse2_pre_pca_placement_probe_random_max_move_units << '\n';
         std::cout << "celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale: " << celluniverse2_pre_pca_placement_probe_random_nearest_signal_scale << '\n';
+        std::cout << "celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled: " << celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled << '\n';
+        std::cout << "celluniverse3_pre_pca_placement_probe_crowded_trigger_units: " << celluniverse3_pre_pca_placement_probe_crowded_trigger_units << '\n';
+        std::cout << "celluniverse3_pre_pca_placement_probe_crowded_max_move_units: " << celluniverse3_pre_pca_placement_probe_crowded_max_move_units << '\n';
         std::cout << "celluniverse2_crowded_pca_shift_cap_enabled: " << celluniverse2_crowded_pca_shift_cap_enabled << '\n';
         std::cout << "celluniverse2_crowded_pca_shift_cap_neighbor_scale: " << celluniverse2_crowded_pca_shift_cap_neighbor_scale << '\n';
         std::cout << "celluniverse2_crowded_pca_shift_cap_min_fraction: " << celluniverse2_crowded_pca_shift_cap_min_fraction << '\n';
@@ -1407,6 +1731,10 @@ public:
     float celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale = 0.35f;
     float celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright = 0.75f;
     float celluniverse3_window_soft_penalty_cost_rescue_max_gap_density = 0.24f;
+    bool celluniverse3_window_union_soft_penalty_cost_rescue_enabled = false;
+    float celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support = 0.45f;
+    float celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty = 0.0f;
+    float celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction = 0.05f;
     bool celluniverse3_signal_center_future_position_lock_enabled = false;
     int celluniverse3_signal_center_future_position_lock_min_future_both = 1;
     int celluniverse3_signal_center_future_position_lock_max_missing = 0;
@@ -1417,6 +1745,13 @@ public:
     float celluniverse3_signal_center_future_position_lock_min_sep_fraction = 1.0f;
     float celluniverse3_signal_center_future_position_lock_min_sep_ratio = 1.0f;
     float celluniverse3_signal_center_future_position_lock_min_axis_alignment = 0.60f;
+    bool celluniverse3_injected_split_center_slide_enabled = false;
+    float celluniverse3_injected_split_center_slide_range_scale = 0.45f;
+    float celluniverse3_injected_split_center_slide_step_scale = 0.15f;
+    float celluniverse3_injected_split_center_slide_min_step = 3.0f;
+    bool celluniverse3_injected_split_evidence_midpoints_enabled = false;
+    float celluniverse3_injected_split_evidence_midpoint_max_shift_scale = 1.25f;
+    float celluniverse3_injected_split_evidence_pair_max_sep_scale = 2.75f;
     bool celluniverse3_clean_future_bridge_position_lock_enabled = false;
     int celluniverse3_clean_future_bridge_position_lock_min_future_both = 2;
     int celluniverse3_clean_future_bridge_position_lock_max_missing = 0;
@@ -1737,6 +2072,8 @@ public:
     float celluniverse2_recent_daughter_lock_shape = 2.0f;
     int celluniverse2_recent_daughter_position_lock_frames = 0;
     int celluniverse2_split_daughter_resplit_cooldown_frames = 3;
+    bool celluniverse3_pca_bridge_recent_daughter_requires_window_map = false;
+    int celluniverse3_pca_bridge_recent_daughter_cooldown_frames = 0;
     float post_pca_bridge_severe_new_rod_min_shape = 2.20f;
     float post_pca_bridge_severe_new_rod_min_elongation_jump = 1.35f;
     bool post_pca_force_rod_split_enabled = false;
@@ -1759,6 +2096,9 @@ public:
     float post_pca_force_rod_split_bright_near_miss_min_seed_brightness = 0.0f;
     bool post_pca_force_rod_split_asymmetric_candidates_enabled = false;
     float post_pca_force_rod_split_asymmetric_tip_scale = 1.0f;
+    bool post_pca_force_rod_split_cluster_suppression_enabled = false;
+    float post_pca_force_rod_split_cluster_radius_scale = 0.75f;
+    bool celluniverse3_post_pca_force_rod_require_window_map_primary_support = true;
     float pca_bridge_low_long_mid_flat_rescue_min_mid_short_ratio = 1.75f;
     float pca_bridge_low_long_mid_flat_rescue_min_elongation = 1.80f;
     float pca_bridge_collapsed_post_pca_min_elongation_jump = 1.35f;
@@ -1782,6 +2122,16 @@ public:
     float signal_center_borderline_future_min_parent_balance = 0.18f;
     float signal_center_future_claim_min_brightness = 0.20f;
     float signal_center_future_claim_min_parent_balance = 0.35f;
+    bool celluniverse3_tunnel_neighbor_claim_bypass_enabled = false;
+    float celluniverse3_tunnel_neighbor_claim_min_parent_shape = 1.65f;
+    float celluniverse3_tunnel_neighbor_claim_min_future_brightness = 0.18f;
+    float celluniverse3_tunnel_neighbor_claim_min_parent_balance = 0.30f;
+    int celluniverse3_tunnel_neighbor_claim_min_future_both = 2;
+    int celluniverse3_tunnel_neighbor_claim_max_missing = 0;
+    float celluniverse3_tunnel_neighbor_claim_min_sep_fraction = 1.0f;
+    float celluniverse3_tunnel_neighbor_claim_min_blocker_radius_units = 1.05f;
+    bool celluniverse3_tunnel_neighbor_claim_require_separate_tunnel = true;
+    float celluniverse3_tunnel_neighbor_claim_support_radius_scale = 0.65f;
     bool signal_center_severe_future_claim_enabled = false;
     float signal_center_severe_future_claim_min_parent_shape = 2.30f;
     float signal_center_severe_future_claim_min_brightness = 0.06f;
@@ -1837,6 +2187,44 @@ public:
     float split_dense_drifting_bridge_min_valley_from_bright = 0.45f;
     float split_dense_drifting_bridge_seed_drift_fraction = 0.45f;
     float split_dense_drifting_bridge_future_brightness_floor = 0.10f;
+    bool celluniverse3_window_map_primary_dense_bridge_rescue_enabled = false;
+    float celluniverse3_window_map_primary_dense_bridge_max_drift_scale = 0.50f;
+    float celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright = 0.80f;
+    float celluniverse3_window_map_primary_dense_bridge_max_gap_density = 0.30f;
+    float celluniverse3_window_map_primary_support_min_u_support = 0.60f;
+    float celluniverse3_window_map_primary_support_max_region_penalty = 0.05f;
+    float celluniverse3_window_map_primary_support_min_axis_alignment = 0.75f;
+    float celluniverse3_window_map_primary_support_min_parent_balance = 0.20f;
+    bool celluniverse3_window_map_primary_asymmetric_support_enabled = true;
+    float celluniverse3_window_map_primary_asymmetric_min_strong_u_support = 0.60f;
+    float celluniverse3_window_map_primary_asymmetric_min_weak_u_support = 0.25f;
+    float celluniverse3_window_map_primary_asymmetric_min_total_u_support = 0.85f;
+    float celluniverse3_window_map_primary_asymmetric_min_axis_alignment = 0.95f;
+    bool celluniverse3_single_frame_future_center_requires_window_map_support = true;
+    int celluniverse3_single_frame_future_center_max_future_both = 1;
+    bool celluniverse3_require_window_map_split_for_pca_bridge = true;
+    bool celluniverse3_window_map_candidate_gate_enabled = true;
+    float celluniverse3_window_map_candidate_max_midpoint_shift_scale = 0.45f;
+    float celluniverse3_window_map_candidate_min_sep_fraction = 0.70f;
+    float celluniverse3_window_map_candidate_min_axis_alignment = 0.80f;
+    bool celluniverse3_window_map_neighbor_bridge_bypass_enabled = false;
+    float celluniverse3_window_map_neighbor_bridge_min_future_brightness = 0.12f;
+    float celluniverse3_window_map_neighbor_bridge_min_parent_shape = 1.35f;
+    float celluniverse3_window_map_neighbor_bridge_max_parent_shape = 1.95f;
+    bool celluniverse3_window_map_overlap_position_lock_enabled = true;
+    bool celluniverse3_window_map_primary_cost_rescue_enabled = false;
+    float celluniverse3_window_map_primary_cost_rescue_min_u_support = 0.70f;
+    float celluniverse3_window_map_primary_cost_rescue_max_region_penalty = 0.05f;
+    float celluniverse3_window_map_primary_cost_rescue_min_axis_alignment = 0.95f;
+    float celluniverse3_window_map_primary_cost_rescue_min_parent_balance = 0.20f;
+    float celluniverse3_window_map_primary_cost_rescue_max_cost_fraction = 0.10f;
+    float celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs = 0.0f;
+    float celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction = 0.10f;
+    float celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale = 0.70f;
+    float celluniverse3_window_map_primary_cost_rescue_max_drift_scale = 0.50f;
+    float celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright = 1.25f;
+    float celluniverse3_window_map_primary_cost_rescue_max_gap_density = 0.30f;
+    float celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment = 0.35f;
     bool split_weak_pca_bridge_strict_no_valley_enabled = true;
     float split_weak_pca_bridge_strict_no_valley_max_parent_shape = 1.60f;
     float split_weak_pca_bridge_strict_no_valley_min_valley_from_bright = 0.90f;
@@ -2830,6 +3218,10 @@ public:
         if (node["celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale"]) celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale = node["celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale"].as<float>();
         if (node["celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright"]) celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright = node["celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright"].as<float>();
         if (node["celluniverse3_window_soft_penalty_cost_rescue_max_gap_density"]) celluniverse3_window_soft_penalty_cost_rescue_max_gap_density = node["celluniverse3_window_soft_penalty_cost_rescue_max_gap_density"].as<float>();
+        if (node["celluniverse3_window_union_soft_penalty_cost_rescue_enabled"]) celluniverse3_window_union_soft_penalty_cost_rescue_enabled = node["celluniverse3_window_union_soft_penalty_cost_rescue_enabled"].as<bool>();
+        if (node["celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support"]) celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support = node["celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support"].as<float>();
+        if (node["celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty"]) celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty = node["celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty"].as<float>();
+        if (node["celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction"]) celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction = node["celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction"].as<float>();
         if (node["celluniverse3_signal_center_future_position_lock_enabled"]) celluniverse3_signal_center_future_position_lock_enabled = node["celluniverse3_signal_center_future_position_lock_enabled"].as<bool>();
         if (node["celluniverse3_signal_center_future_position_lock_min_future_both"]) celluniverse3_signal_center_future_position_lock_min_future_both = node["celluniverse3_signal_center_future_position_lock_min_future_both"].as<int>();
         if (node["celluniverse3_signal_center_future_position_lock_max_missing"]) celluniverse3_signal_center_future_position_lock_max_missing = node["celluniverse3_signal_center_future_position_lock_max_missing"].as<int>();
@@ -2840,6 +3232,13 @@ public:
         if (node["celluniverse3_signal_center_future_position_lock_min_sep_fraction"]) celluniverse3_signal_center_future_position_lock_min_sep_fraction = node["celluniverse3_signal_center_future_position_lock_min_sep_fraction"].as<float>();
         if (node["celluniverse3_signal_center_future_position_lock_min_sep_ratio"]) celluniverse3_signal_center_future_position_lock_min_sep_ratio = node["celluniverse3_signal_center_future_position_lock_min_sep_ratio"].as<float>();
         if (node["celluniverse3_signal_center_future_position_lock_min_axis_alignment"]) celluniverse3_signal_center_future_position_lock_min_axis_alignment = node["celluniverse3_signal_center_future_position_lock_min_axis_alignment"].as<float>();
+        if (node["celluniverse3_injected_split_center_slide_enabled"]) celluniverse3_injected_split_center_slide_enabled = node["celluniverse3_injected_split_center_slide_enabled"].as<bool>();
+        if (node["celluniverse3_injected_split_center_slide_range_scale"]) celluniverse3_injected_split_center_slide_range_scale = node["celluniverse3_injected_split_center_slide_range_scale"].as<float>();
+        if (node["celluniverse3_injected_split_center_slide_step_scale"]) celluniverse3_injected_split_center_slide_step_scale = node["celluniverse3_injected_split_center_slide_step_scale"].as<float>();
+        if (node["celluniverse3_injected_split_center_slide_min_step"]) celluniverse3_injected_split_center_slide_min_step = node["celluniverse3_injected_split_center_slide_min_step"].as<float>();
+        if (node["celluniverse3_injected_split_evidence_midpoints_enabled"]) celluniverse3_injected_split_evidence_midpoints_enabled = node["celluniverse3_injected_split_evidence_midpoints_enabled"].as<bool>();
+        if (node["celluniverse3_injected_split_evidence_midpoint_max_shift_scale"]) celluniverse3_injected_split_evidence_midpoint_max_shift_scale = node["celluniverse3_injected_split_evidence_midpoint_max_shift_scale"].as<float>();
+        if (node["celluniverse3_injected_split_evidence_pair_max_sep_scale"]) celluniverse3_injected_split_evidence_pair_max_sep_scale = node["celluniverse3_injected_split_evidence_pair_max_sep_scale"].as<float>();
         if (node["celluniverse3_clean_future_bridge_position_lock_enabled"]) celluniverse3_clean_future_bridge_position_lock_enabled = node["celluniverse3_clean_future_bridge_position_lock_enabled"].as<bool>();
         if (node["celluniverse3_clean_future_bridge_position_lock_min_future_both"]) celluniverse3_clean_future_bridge_position_lock_min_future_both = node["celluniverse3_clean_future_bridge_position_lock_min_future_both"].as<int>();
         if (node["celluniverse3_clean_future_bridge_position_lock_max_missing"]) celluniverse3_clean_future_bridge_position_lock_max_missing = node["celluniverse3_clean_future_bridge_position_lock_max_missing"].as<int>();
@@ -3036,6 +3435,44 @@ public:
         if (node["split_dense_drifting_bridge_min_valley_from_bright"]) split_dense_drifting_bridge_min_valley_from_bright = node["split_dense_drifting_bridge_min_valley_from_bright"].as<float>();
         if (node["split_dense_drifting_bridge_seed_drift_fraction"]) split_dense_drifting_bridge_seed_drift_fraction = node["split_dense_drifting_bridge_seed_drift_fraction"].as<float>();
         if (node["split_dense_drifting_bridge_future_brightness_floor"]) split_dense_drifting_bridge_future_brightness_floor = node["split_dense_drifting_bridge_future_brightness_floor"].as<float>();
+        if (node["celluniverse3_window_map_primary_dense_bridge_rescue_enabled"]) celluniverse3_window_map_primary_dense_bridge_rescue_enabled = node["celluniverse3_window_map_primary_dense_bridge_rescue_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_primary_dense_bridge_max_drift_scale"]) celluniverse3_window_map_primary_dense_bridge_max_drift_scale = node["celluniverse3_window_map_primary_dense_bridge_max_drift_scale"].as<float>();
+        if (node["celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright"]) celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright = node["celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright"].as<float>();
+        if (node["celluniverse3_window_map_primary_dense_bridge_max_gap_density"]) celluniverse3_window_map_primary_dense_bridge_max_gap_density = node["celluniverse3_window_map_primary_dense_bridge_max_gap_density"].as<float>();
+        if (node["celluniverse3_window_map_primary_support_min_u_support"]) celluniverse3_window_map_primary_support_min_u_support = node["celluniverse3_window_map_primary_support_min_u_support"].as<float>();
+        if (node["celluniverse3_window_map_primary_support_max_region_penalty"]) celluniverse3_window_map_primary_support_max_region_penalty = node["celluniverse3_window_map_primary_support_max_region_penalty"].as<float>();
+        if (node["celluniverse3_window_map_primary_support_min_axis_alignment"]) celluniverse3_window_map_primary_support_min_axis_alignment = node["celluniverse3_window_map_primary_support_min_axis_alignment"].as<float>();
+        if (node["celluniverse3_window_map_primary_support_min_parent_balance"]) celluniverse3_window_map_primary_support_min_parent_balance = node["celluniverse3_window_map_primary_support_min_parent_balance"].as<float>();
+        if (node["celluniverse3_window_map_primary_asymmetric_support_enabled"]) celluniverse3_window_map_primary_asymmetric_support_enabled = node["celluniverse3_window_map_primary_asymmetric_support_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_primary_asymmetric_min_strong_u_support"]) celluniverse3_window_map_primary_asymmetric_min_strong_u_support = node["celluniverse3_window_map_primary_asymmetric_min_strong_u_support"].as<float>();
+        if (node["celluniverse3_window_map_primary_asymmetric_min_weak_u_support"]) celluniverse3_window_map_primary_asymmetric_min_weak_u_support = node["celluniverse3_window_map_primary_asymmetric_min_weak_u_support"].as<float>();
+        if (node["celluniverse3_window_map_primary_asymmetric_min_total_u_support"]) celluniverse3_window_map_primary_asymmetric_min_total_u_support = node["celluniverse3_window_map_primary_asymmetric_min_total_u_support"].as<float>();
+        if (node["celluniverse3_window_map_primary_asymmetric_min_axis_alignment"]) celluniverse3_window_map_primary_asymmetric_min_axis_alignment = node["celluniverse3_window_map_primary_asymmetric_min_axis_alignment"].as<float>();
+        if (node["celluniverse3_single_frame_future_center_requires_window_map_support"]) celluniverse3_single_frame_future_center_requires_window_map_support = node["celluniverse3_single_frame_future_center_requires_window_map_support"].as<bool>();
+        if (node["celluniverse3_single_frame_future_center_max_future_both"]) celluniverse3_single_frame_future_center_max_future_both = node["celluniverse3_single_frame_future_center_max_future_both"].as<int>();
+        if (node["celluniverse3_require_window_map_split_for_pca_bridge"]) celluniverse3_require_window_map_split_for_pca_bridge = node["celluniverse3_require_window_map_split_for_pca_bridge"].as<bool>();
+        if (node["celluniverse3_window_map_candidate_gate_enabled"]) celluniverse3_window_map_candidate_gate_enabled = node["celluniverse3_window_map_candidate_gate_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_candidate_max_midpoint_shift_scale"]) celluniverse3_window_map_candidate_max_midpoint_shift_scale = node["celluniverse3_window_map_candidate_max_midpoint_shift_scale"].as<float>();
+        if (node["celluniverse3_window_map_candidate_min_sep_fraction"]) celluniverse3_window_map_candidate_min_sep_fraction = node["celluniverse3_window_map_candidate_min_sep_fraction"].as<float>();
+        if (node["celluniverse3_window_map_candidate_min_axis_alignment"]) celluniverse3_window_map_candidate_min_axis_alignment = node["celluniverse3_window_map_candidate_min_axis_alignment"].as<float>();
+        if (node["celluniverse3_window_map_neighbor_bridge_bypass_enabled"]) celluniverse3_window_map_neighbor_bridge_bypass_enabled = node["celluniverse3_window_map_neighbor_bridge_bypass_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_neighbor_bridge_min_future_brightness"]) celluniverse3_window_map_neighbor_bridge_min_future_brightness = node["celluniverse3_window_map_neighbor_bridge_min_future_brightness"].as<float>();
+        if (node["celluniverse3_window_map_neighbor_bridge_min_parent_shape"]) celluniverse3_window_map_neighbor_bridge_min_parent_shape = node["celluniverse3_window_map_neighbor_bridge_min_parent_shape"].as<float>();
+        if (node["celluniverse3_window_map_neighbor_bridge_max_parent_shape"]) celluniverse3_window_map_neighbor_bridge_max_parent_shape = node["celluniverse3_window_map_neighbor_bridge_max_parent_shape"].as<float>();
+        if (node["celluniverse3_window_map_overlap_position_lock_enabled"]) celluniverse3_window_map_overlap_position_lock_enabled = node["celluniverse3_window_map_overlap_position_lock_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_enabled"]) celluniverse3_window_map_primary_cost_rescue_enabled = node["celluniverse3_window_map_primary_cost_rescue_enabled"].as<bool>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_min_u_support"]) celluniverse3_window_map_primary_cost_rescue_min_u_support = node["celluniverse3_window_map_primary_cost_rescue_min_u_support"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_region_penalty"]) celluniverse3_window_map_primary_cost_rescue_max_region_penalty = node["celluniverse3_window_map_primary_cost_rescue_max_region_penalty"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_min_axis_alignment"]) celluniverse3_window_map_primary_cost_rescue_min_axis_alignment = node["celluniverse3_window_map_primary_cost_rescue_min_axis_alignment"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_min_parent_balance"]) celluniverse3_window_map_primary_cost_rescue_min_parent_balance = node["celluniverse3_window_map_primary_cost_rescue_min_parent_balance"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_cost_fraction"]) celluniverse3_window_map_primary_cost_rescue_max_cost_fraction = node["celluniverse3_window_map_primary_cost_rescue_max_cost_fraction"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs"]) celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs = node["celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction"]) celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction = node["celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale"]) celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale = node["celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_drift_scale"]) celluniverse3_window_map_primary_cost_rescue_max_drift_scale = node["celluniverse3_window_map_primary_cost_rescue_max_drift_scale"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright"]) celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright = node["celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright"].as<float>();
+        if (node["celluniverse3_window_map_primary_cost_rescue_max_gap_density"]) celluniverse3_window_map_primary_cost_rescue_max_gap_density = node["celluniverse3_window_map_primary_cost_rescue_max_gap_density"].as<float>();
+        if (node["celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment"]) celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment = node["celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment"].as<float>();
         if (node["split_weak_pca_bridge_strict_no_valley_enabled"]) split_weak_pca_bridge_strict_no_valley_enabled = node["split_weak_pca_bridge_strict_no_valley_enabled"].as<bool>();
         if (node["split_weak_pca_bridge_strict_no_valley_max_parent_shape"]) split_weak_pca_bridge_strict_no_valley_max_parent_shape = node["split_weak_pca_bridge_strict_no_valley_max_parent_shape"].as<float>();
         if (node["split_weak_pca_bridge_strict_no_valley_min_valley_from_bright"]) split_weak_pca_bridge_strict_no_valley_min_valley_from_bright = node["split_weak_pca_bridge_strict_no_valley_min_valley_from_bright"].as<float>();
@@ -3075,6 +3512,9 @@ public:
         if (node["post_pca_force_rod_split_bright_near_miss_min_seed_brightness"]) post_pca_force_rod_split_bright_near_miss_min_seed_brightness = node["post_pca_force_rod_split_bright_near_miss_min_seed_brightness"].as<float>();
         if (node["post_pca_force_rod_split_asymmetric_candidates_enabled"]) post_pca_force_rod_split_asymmetric_candidates_enabled = node["post_pca_force_rod_split_asymmetric_candidates_enabled"].as<bool>();
         if (node["post_pca_force_rod_split_asymmetric_tip_scale"]) post_pca_force_rod_split_asymmetric_tip_scale = node["post_pca_force_rod_split_asymmetric_tip_scale"].as<float>();
+        if (node["post_pca_force_rod_split_cluster_suppression_enabled"]) post_pca_force_rod_split_cluster_suppression_enabled = node["post_pca_force_rod_split_cluster_suppression_enabled"].as<bool>();
+        if (node["post_pca_force_rod_split_cluster_radius_scale"]) post_pca_force_rod_split_cluster_radius_scale = node["post_pca_force_rod_split_cluster_radius_scale"].as<float>();
+        if (node["celluniverse3_post_pca_force_rod_require_window_map_primary_support"]) celluniverse3_post_pca_force_rod_require_window_map_primary_support = node["celluniverse3_post_pca_force_rod_require_window_map_primary_support"].as<bool>();
         if (node["split_future_midpoint_near_miss_min_brightness"]) split_future_midpoint_near_miss_min_brightness = node["split_future_midpoint_near_miss_min_brightness"].as<float>();
         if (node["split_future_midpoint_near_miss_limit_scale"]) split_future_midpoint_near_miss_limit_scale = node["split_future_midpoint_near_miss_limit_scale"].as<float>();
         if (node["split_future_pca_bridge_near_sep_min_brightness"]) split_future_pca_bridge_near_sep_min_brightness = node["split_future_pca_bridge_near_sep_min_brightness"].as<float>();
@@ -3581,6 +4021,8 @@ public:
         READ_PROB_FLOAT(celluniverse2_recent_daughter_lock_shape);
         READ_PROB_INT(celluniverse2_recent_daughter_position_lock_frames);
         READ_PROB_INT(celluniverse2_split_daughter_resplit_cooldown_frames);
+        if (node["celluniverse3_pca_bridge_recent_daughter_requires_window_map"]) celluniverse3_pca_bridge_recent_daughter_requires_window_map = node["celluniverse3_pca_bridge_recent_daughter_requires_window_map"].as<bool>();
+        READ_PROB_INT(celluniverse3_pca_bridge_recent_daughter_cooldown_frames);
         READ_PROB_FLOAT(post_pca_bridge_severe_new_rod_min_shape);
         READ_PROB_FLOAT(post_pca_bridge_severe_new_rod_min_elongation_jump);
         READ_PROB_FLOAT(pca_bridge_low_long_mid_flat_rescue_min_mid_short_ratio);
@@ -3606,6 +4048,16 @@ public:
         READ_PROB_FLOAT(signal_center_borderline_future_min_parent_balance);
         READ_PROB_FLOAT(signal_center_future_claim_min_brightness);
         READ_PROB_FLOAT(signal_center_future_claim_min_parent_balance);
+        if (node["celluniverse3_tunnel_neighbor_claim_bypass_enabled"]) celluniverse3_tunnel_neighbor_claim_bypass_enabled = node["celluniverse3_tunnel_neighbor_claim_bypass_enabled"].as<bool>();
+        READ_PROB_FLOAT(celluniverse3_tunnel_neighbor_claim_min_parent_shape);
+        READ_PROB_FLOAT(celluniverse3_tunnel_neighbor_claim_min_future_brightness);
+        READ_PROB_FLOAT(celluniverse3_tunnel_neighbor_claim_min_parent_balance);
+        READ_PROB_INT(celluniverse3_tunnel_neighbor_claim_min_future_both);
+        READ_PROB_INT(celluniverse3_tunnel_neighbor_claim_max_missing);
+        READ_PROB_FLOAT(celluniverse3_tunnel_neighbor_claim_min_sep_fraction);
+        READ_PROB_FLOAT(celluniverse3_tunnel_neighbor_claim_min_blocker_radius_units);
+        if (node["celluniverse3_tunnel_neighbor_claim_require_separate_tunnel"]) celluniverse3_tunnel_neighbor_claim_require_separate_tunnel = node["celluniverse3_tunnel_neighbor_claim_require_separate_tunnel"].as<bool>();
+        READ_PROB_FLOAT(celluniverse3_tunnel_neighbor_claim_support_radius_scale);
         if (node["signal_center_severe_future_claim_enabled"]) signal_center_severe_future_claim_enabled = node["signal_center_severe_future_claim_enabled"].as<bool>();
         READ_PROB_FLOAT(signal_center_severe_future_claim_min_parent_shape);
         READ_PROB_FLOAT(signal_center_severe_future_claim_min_brightness);
@@ -4115,6 +4567,10 @@ public:
         std::cout << "celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale: " << celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale << '\n';
         std::cout << "celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright: " << celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright << '\n';
         std::cout << "celluniverse3_window_soft_penalty_cost_rescue_max_gap_density: " << celluniverse3_window_soft_penalty_cost_rescue_max_gap_density << '\n';
+        std::cout << "celluniverse3_window_union_soft_penalty_cost_rescue_enabled: " << celluniverse3_window_union_soft_penalty_cost_rescue_enabled << '\n';
+        std::cout << "celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support: " << celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support << '\n';
+        std::cout << "celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty: " << celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty << '\n';
+        std::cout << "celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction: " << celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction << '\n';
         std::cout << "celluniverse3_signal_center_future_position_lock_enabled: " << celluniverse3_signal_center_future_position_lock_enabled << '\n';
         std::cout << "celluniverse3_signal_center_future_position_lock_min_future_both: " << celluniverse3_signal_center_future_position_lock_min_future_both << '\n';
         std::cout << "celluniverse3_signal_center_future_position_lock_max_missing: " << celluniverse3_signal_center_future_position_lock_max_missing << '\n';
@@ -4125,6 +4581,13 @@ public:
         std::cout << "celluniverse3_signal_center_future_position_lock_min_sep_fraction: " << celluniverse3_signal_center_future_position_lock_min_sep_fraction << '\n';
         std::cout << "celluniverse3_signal_center_future_position_lock_min_sep_ratio: " << celluniverse3_signal_center_future_position_lock_min_sep_ratio << '\n';
         std::cout << "celluniverse3_signal_center_future_position_lock_min_axis_alignment: " << celluniverse3_signal_center_future_position_lock_min_axis_alignment << '\n';
+        std::cout << "celluniverse3_injected_split_center_slide_enabled: " << celluniverse3_injected_split_center_slide_enabled << '\n';
+        std::cout << "celluniverse3_injected_split_center_slide_range_scale: " << celluniverse3_injected_split_center_slide_range_scale << '\n';
+        std::cout << "celluniverse3_injected_split_center_slide_step_scale: " << celluniverse3_injected_split_center_slide_step_scale << '\n';
+        std::cout << "celluniverse3_injected_split_center_slide_min_step: " << celluniverse3_injected_split_center_slide_min_step << '\n';
+        std::cout << "celluniverse3_injected_split_evidence_midpoints_enabled: " << celluniverse3_injected_split_evidence_midpoints_enabled << '\n';
+        std::cout << "celluniverse3_injected_split_evidence_midpoint_max_shift_scale: " << celluniverse3_injected_split_evidence_midpoint_max_shift_scale << '\n';
+        std::cout << "celluniverse3_injected_split_evidence_pair_max_sep_scale: " << celluniverse3_injected_split_evidence_pair_max_sep_scale << '\n';
         std::cout << "celluniverse3_clean_future_bridge_position_lock_enabled: " << celluniverse3_clean_future_bridge_position_lock_enabled << '\n';
         std::cout << "celluniverse3_clean_future_bridge_position_lock_min_future_both: " << celluniverse3_clean_future_bridge_position_lock_min_future_both << '\n';
         std::cout << "celluniverse3_clean_future_bridge_position_lock_max_missing: " << celluniverse3_clean_future_bridge_position_lock_max_missing << '\n';
@@ -4258,6 +4721,44 @@ public:
         std::cout << "celluniverse3_orphan_window_center_rescue_radius: " << celluniverse3_orphan_window_center_rescue_radius << '\n';
         std::cout << "celluniverse3_orphan_window_center_rescue_brightness: " << celluniverse3_orphan_window_center_rescue_brightness << '\n';
         std::cout << "pca_bridge_future_window_refit_halfspace_min_fraction: " << pca_bridge_future_window_refit_halfspace_min_fraction << '\n';
+        std::cout << "celluniverse3_window_map_primary_dense_bridge_rescue_enabled: " << celluniverse3_window_map_primary_dense_bridge_rescue_enabled << '\n';
+        std::cout << "celluniverse3_window_map_primary_dense_bridge_max_drift_scale: " << celluniverse3_window_map_primary_dense_bridge_max_drift_scale << '\n';
+        std::cout << "celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright: " << celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright << '\n';
+        std::cout << "celluniverse3_window_map_primary_dense_bridge_max_gap_density: " << celluniverse3_window_map_primary_dense_bridge_max_gap_density << '\n';
+        std::cout << "celluniverse3_window_map_primary_support_min_u_support: " << celluniverse3_window_map_primary_support_min_u_support << '\n';
+        std::cout << "celluniverse3_window_map_primary_support_max_region_penalty: " << celluniverse3_window_map_primary_support_max_region_penalty << '\n';
+        std::cout << "celluniverse3_window_map_primary_support_min_axis_alignment: " << celluniverse3_window_map_primary_support_min_axis_alignment << '\n';
+        std::cout << "celluniverse3_window_map_primary_support_min_parent_balance: " << celluniverse3_window_map_primary_support_min_parent_balance << '\n';
+        std::cout << "celluniverse3_window_map_primary_asymmetric_support_enabled: " << celluniverse3_window_map_primary_asymmetric_support_enabled << '\n';
+        std::cout << "celluniverse3_window_map_primary_asymmetric_min_strong_u_support: " << celluniverse3_window_map_primary_asymmetric_min_strong_u_support << '\n';
+        std::cout << "celluniverse3_window_map_primary_asymmetric_min_weak_u_support: " << celluniverse3_window_map_primary_asymmetric_min_weak_u_support << '\n';
+        std::cout << "celluniverse3_window_map_primary_asymmetric_min_total_u_support: " << celluniverse3_window_map_primary_asymmetric_min_total_u_support << '\n';
+        std::cout << "celluniverse3_window_map_primary_asymmetric_min_axis_alignment: " << celluniverse3_window_map_primary_asymmetric_min_axis_alignment << '\n';
+        std::cout << "celluniverse3_single_frame_future_center_requires_window_map_support: " << celluniverse3_single_frame_future_center_requires_window_map_support << '\n';
+        std::cout << "celluniverse3_single_frame_future_center_max_future_both: " << celluniverse3_single_frame_future_center_max_future_both << '\n';
+        std::cout << "celluniverse3_require_window_map_split_for_pca_bridge: " << celluniverse3_require_window_map_split_for_pca_bridge << '\n';
+        std::cout << "celluniverse3_window_map_candidate_gate_enabled: " << celluniverse3_window_map_candidate_gate_enabled << '\n';
+        std::cout << "celluniverse3_window_map_candidate_max_midpoint_shift_scale: " << celluniverse3_window_map_candidate_max_midpoint_shift_scale << '\n';
+        std::cout << "celluniverse3_window_map_candidate_min_sep_fraction: " << celluniverse3_window_map_candidate_min_sep_fraction << '\n';
+        std::cout << "celluniverse3_window_map_candidate_min_axis_alignment: " << celluniverse3_window_map_candidate_min_axis_alignment << '\n';
+        std::cout << "celluniverse3_window_map_neighbor_bridge_bypass_enabled: " << celluniverse3_window_map_neighbor_bridge_bypass_enabled << '\n';
+        std::cout << "celluniverse3_window_map_neighbor_bridge_min_future_brightness: " << celluniverse3_window_map_neighbor_bridge_min_future_brightness << '\n';
+        std::cout << "celluniverse3_window_map_neighbor_bridge_min_parent_shape: " << celluniverse3_window_map_neighbor_bridge_min_parent_shape << '\n';
+        std::cout << "celluniverse3_window_map_neighbor_bridge_max_parent_shape: " << celluniverse3_window_map_neighbor_bridge_max_parent_shape << '\n';
+        std::cout << "celluniverse3_window_map_overlap_position_lock_enabled: " << celluniverse3_window_map_overlap_position_lock_enabled << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_enabled: " << celluniverse3_window_map_primary_cost_rescue_enabled << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_min_u_support: " << celluniverse3_window_map_primary_cost_rescue_min_u_support << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_region_penalty: " << celluniverse3_window_map_primary_cost_rescue_max_region_penalty << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_min_axis_alignment: " << celluniverse3_window_map_primary_cost_rescue_min_axis_alignment << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_min_parent_balance: " << celluniverse3_window_map_primary_cost_rescue_min_parent_balance << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_cost_fraction: " << celluniverse3_window_map_primary_cost_rescue_max_cost_fraction << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs: " << celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction: " << celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale: " << celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_drift_scale: " << celluniverse3_window_map_primary_cost_rescue_max_drift_scale << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright: " << celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright << '\n';
+        std::cout << "celluniverse3_window_map_primary_cost_rescue_max_gap_density: " << celluniverse3_window_map_primary_cost_rescue_max_gap_density << '\n';
+        std::cout << "celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment: " << celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment << '\n';
         std::cout << "split_weak_pca_bridge_strict_no_valley_enabled: " << split_weak_pca_bridge_strict_no_valley_enabled << '\n';
         std::cout << "split_weak_pca_bridge_strict_no_valley_max_parent_shape: " << split_weak_pca_bridge_strict_no_valley_max_parent_shape << '\n';
         std::cout << "split_weak_pca_bridge_strict_no_valley_min_valley_from_bright: " << split_weak_pca_bridge_strict_no_valley_min_valley_from_bright << '\n';
@@ -4290,7 +4791,19 @@ public:
         std::cout << "signal_center_centered_compact_min_brightness: " << signal_center_centered_compact_min_brightness << '\n';
         std::cout << "pca_bridge_snap_trust_abs: " << pca_bridge_snap_trust_abs << '\n';
         std::cout << "celluniverse2_clean_far_pca_preserve_min_brightness: " << celluniverse2_clean_far_pca_preserve_min_brightness << '\n';
+        std::cout << "celluniverse3_pca_bridge_recent_daughter_requires_window_map: " << celluniverse3_pca_bridge_recent_daughter_requires_window_map << '\n';
+        std::cout << "celluniverse3_pca_bridge_recent_daughter_cooldown_frames: " << celluniverse3_pca_bridge_recent_daughter_cooldown_frames << '\n';
         std::cout << "post_pca_bridge_severe_new_rod_min_shape: " << post_pca_bridge_severe_new_rod_min_shape << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_bypass_enabled: " << celluniverse3_tunnel_neighbor_claim_bypass_enabled << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_min_parent_shape: " << celluniverse3_tunnel_neighbor_claim_min_parent_shape << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_min_future_brightness: " << celluniverse3_tunnel_neighbor_claim_min_future_brightness << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_min_parent_balance: " << celluniverse3_tunnel_neighbor_claim_min_parent_balance << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_min_future_both: " << celluniverse3_tunnel_neighbor_claim_min_future_both << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_max_missing: " << celluniverse3_tunnel_neighbor_claim_max_missing << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_min_sep_fraction: " << celluniverse3_tunnel_neighbor_claim_min_sep_fraction << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_min_blocker_radius_units: " << celluniverse3_tunnel_neighbor_claim_min_blocker_radius_units << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_require_separate_tunnel: " << celluniverse3_tunnel_neighbor_claim_require_separate_tunnel << '\n';
+        std::cout << "celluniverse3_tunnel_neighbor_claim_support_radius_scale: " << celluniverse3_tunnel_neighbor_claim_support_radius_scale << '\n';
         std::cout << "signal_center_severe_future_claim_enabled: " << signal_center_severe_future_claim_enabled << '\n';
         std::cout << "signal_center_severe_future_claim_min_parent_shape: " << signal_center_severe_future_claim_min_parent_shape << '\n';
         std::cout << "signal_center_severe_future_claim_min_brightness: " << signal_center_severe_future_claim_min_brightness << '\n';
@@ -4320,6 +4833,9 @@ public:
         std::cout << "post_pca_force_rod_split_bright_near_miss_min_seed_brightness: " << post_pca_force_rod_split_bright_near_miss_min_seed_brightness << '\n';
         std::cout << "post_pca_force_rod_split_asymmetric_candidates_enabled: " << post_pca_force_rod_split_asymmetric_candidates_enabled << '\n';
         std::cout << "post_pca_force_rod_split_asymmetric_tip_scale: " << post_pca_force_rod_split_asymmetric_tip_scale << '\n';
+        std::cout << "post_pca_force_rod_split_cluster_suppression_enabled: " << post_pca_force_rod_split_cluster_suppression_enabled << '\n';
+        std::cout << "post_pca_force_rod_split_cluster_radius_scale: " << post_pca_force_rod_split_cluster_radius_scale << '\n';
+        std::cout << "celluniverse3_post_pca_force_rod_require_window_map_primary_support: " << celluniverse3_post_pca_force_rod_require_window_map_primary_support << '\n';
     }
 };
 
@@ -4548,6 +5064,7 @@ public:
     bool trashRemovalEnabled{false};
     float trashRemovalBrightnessThreshold{0.05f};
     int trashRemovalConsecutiveDimFrames{1};
+    int trashRemovalMinFrameAge{0};
     // Reference radius for proportional perturbation sigma scaling.
     // positionScale = max(cell.a, cell.b, cell.c) / perturbSigmaReferenceRadius.
     // Cells larger than refR take bigger steps; smaller cells take smaller
@@ -4655,6 +5172,7 @@ public:
         if (node["trashRemovalEnabled"]) trashRemovalEnabled = node["trashRemovalEnabled"].as<bool>();
         if (node["trashRemovalBrightnessThreshold"]) trashRemovalBrightnessThreshold = node["trashRemovalBrightnessThreshold"].as<float>();
         if (node["trashRemovalConsecutiveDimFrames"]) trashRemovalConsecutiveDimFrames = node["trashRemovalConsecutiveDimFrames"].as<int>();
+        if (node["trashRemovalMinFrameAge"]) trashRemovalMinFrameAge = node["trashRemovalMinFrameAge"].as<int>();
         if (node["perturbSigmaReferenceRadius"]) perturbSigmaReferenceRadius = node["perturbSigmaReferenceRadius"].as<float>();
         if (node["randomPerturbRadiusRatio"]) randomPerturbRadiusRatio = node["randomPerturbRadiusRatio"].as<float>();
         if (node["randomPerturbBrightCoreGuidanceEnabled"]) randomPerturbBrightCoreGuidanceEnabled = node["randomPerturbBrightCoreGuidanceEnabled"].as<bool>();

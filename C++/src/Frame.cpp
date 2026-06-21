@@ -1,5 +1,6 @@
 #include "../includes/Frame.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -783,8 +784,70 @@ void Frame::loadImageStacks(const std::vector<cv::Mat> &realFrame)
             z_slices.push_back(static_cast<double>(i));
         }
     }
+    if (!_backgroundFrame.empty() &&
+        _backgroundFrame.size() != _realFrame.size()) {
+        _backgroundFrame.clear();
+    }
     _synthFrame = generateSynthFrame();
     refreshFullCostCache();
+}
+
+void Frame::setBackgroundFrame(std::vector<cv::Mat> backgroundFrame)
+{
+    if (!backgroundFrame.empty() && !_realFrame.empty() &&
+        backgroundFrame.size() != _realFrame.size()) {
+        std::cout << "[Background Frame] ignored size_mismatch expected="
+                  << _realFrame.size()
+                  << " got=" << backgroundFrame.size()
+                  << std::endl;
+        _backgroundFrame.clear();
+        return;
+    }
+    for (cv::Mat &slice : backgroundFrame) {
+        if (slice.empty()) {
+            continue;
+        }
+        if (slice.type() != CV_32F) {
+            slice.convertTo(slice, CV_32F);
+        }
+    }
+    _backgroundFrame = std::move(backgroundFrame);
+}
+
+void Frame::addBackgroundOffset(float backgroundDelta)
+{
+    if (!std::isfinite(backgroundDelta) ||
+        std::abs(backgroundDelta) <= 1e-9f) {
+        return;
+    }
+
+    _backgroundValue = std::clamp(_backgroundValue + backgroundDelta, 0.0f, 1.0f);
+    for (cv::Mat &background : _backgroundFrame) {
+        if (background.empty() || background.type() != CV_32F) {
+            continue;
+        }
+        for (int y = 0; y < background.rows; ++y) {
+            float *row = background.ptr<float>(y);
+            for (int x = 0; x < background.cols; ++x) {
+                row[x] = std::clamp(row[x] + backgroundDelta, 0.0f, 1.0f);
+            }
+        }
+    }
+}
+
+cv::Mat Frame::makeSynthBackgroundSlice(cv::Size shape, int sliceIndex) const
+{
+    if (sliceIndex >= 0 &&
+        static_cast<size_t>(sliceIndex) < _backgroundFrame.size()) {
+        const cv::Mat &background =
+            _backgroundFrame[static_cast<size_t>(sliceIndex)];
+        if (!background.empty() &&
+            background.size() == shape &&
+            background.type() == CV_32F) {
+            return background.clone();
+        }
+    }
+    return cv::Mat(shape, CV_32F, cv::Scalar(_backgroundValue));
 }
 
 void Frame::refreshFullCostCache()
@@ -876,7 +939,8 @@ std::vector<cv::Mat> Frame::generateSynthFrame()
 
     forEachSliceIndex(simulationConfig, static_cast<int>(z_slices.size()), [&](int i) {
         const double z = z_slices[static_cast<size_t>(i)];
-        Image synthImage = cv::Mat(shape, CV_32F, cv::Scalar(_backgroundValue));
+        Image synthImage = makeSynthBackgroundSlice(
+            shape, static_cast<int>(i));
         const float zf = static_cast<float>(z);
         for (size_t c = 0; c < nCells; ++c)
         {
@@ -1319,7 +1383,7 @@ std::vector<cv::Mat> Frame::generateSynthFrameFast(Ellipsoid &oldCell, Ellipsoid
         forEachSliceIndex(simulationConfig, affectedCount, [&](int localIndex) {
             const int sliceIndex = affectedMin + localIndex;
             const double z = z_slices[static_cast<size_t>(sliceIndex)];
-            cv::Mat synthImage = cv::Mat(shape, CV_32F, cv::Scalar(_backgroundValue));
+            cv::Mat synthImage = makeSynthBackgroundSlice(shape, sliceIndex);
 
             for (size_t c = 0; c < nCells; ++c)
             {
@@ -2670,6 +2734,121 @@ bool Frame::imageGroundExpectedDaughters(
     return true;
 }
 
+bool Frame::evaluateSplitSeedPairByPca(
+    size_t cellIndex,
+    const PreviousFrameSnapshot &snapshot,
+    const ClaimSet &otherCellsClaimSets,
+    const cv::Point3f &seedD1,
+    const cv::Point3f &seedD2,
+    float gatherRadiusScale,
+    int minPixels,
+    float minAxisAlignment,
+    float maxSeedDistanceScale,
+    cv::Point3f &outD1,
+    cv::Point3f &outD2,
+    float *outAxisAlignment,
+    float *outMaxSeedDistance,
+    int *outKeptPixels,
+    float *outMeanWeight) const
+{
+    if (outAxisAlignment) *outAxisAlignment = 0.0f;
+    if (outMaxSeedDistance) *outMaxSeedDistance = std::numeric_limits<float>::infinity();
+    if (outKeptPixels) *outKeptPixels = 0;
+    if (outMeanWeight) *outMeanWeight = 0.0f;
+    if (cellIndex >= cells.size() || !snapshot.valid || _realFrame.empty()) {
+        return false;
+    }
+
+    const cv::Point3f seedDelta = seedD2 - seedD1;
+    const float seedSep = static_cast<float>(cv::norm(seedDelta));
+    if (seedSep <= 1e-6f) return false;
+    const cv::Point3f seedAxis = seedDelta * (1.0f / seedSep);
+
+    const Ellipsoid &cell = cells[cellIndex];
+    const float srcMajor = std::max({snapshot.aRadius, cell.getARadius(), 1.0f});
+    const float srcB = std::max({snapshot.bRadius, cell.getBRadius(), 1.0f});
+    const float srcMinor = std::max({snapshot.cRadius, cell.getCRadius(), 1.0f});
+    const float parentMaxR = std::max({srcMajor, srcB, srcMinor, 1.0f});
+    const cv::Point3f gatherCenter = 0.5f * (seedD1 + seedD2);
+    const float gatherRadius = std::max(
+        std::max(0.5f * seedSep + parentMaxR,
+                 std::max(0.0f, gatherRadiusScale) * parentMaxR),
+        parentMaxR);
+
+    const std::vector<cv::Point3f> selfClaim{seedD1, seedD2};
+    GatherStats gstats;
+    const auto pixels = gatherBrightPixelsVoronoi(
+        _realFrame,
+        _backgroundValue,
+        gatherCenter,
+        gatherRadius,
+        selfClaim,
+        otherCellsClaimSets,
+        &gstats);
+    if (outKeptPixels) *outKeptPixels = gstats.voronoiKept;
+    if (outMeanWeight && !pixels.empty()) {
+        float sum = 0.0f;
+        for (const auto &bp : pixels) sum += bp.weight;
+        *outMeanWeight = sum / static_cast<float>(pixels.size());
+    }
+    if (static_cast<int>(pixels.size()) < std::max(1, minPixels)) {
+        return false;
+    }
+
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    const cv::Point3f pcaCenter = snapshot.position;
+    cv::Point3f pcaAxis;
+    cv::Point3f pcaD1;
+    cv::Point3f pcaD2;
+    if (!pca3DWithCentroids(pixels,
+                            pcaAxis,
+                            pcaD1,
+                            pcaD2,
+                            &pcaCenter,
+                            &R_T,
+                            srcMajor,
+                            srcB,
+                            srcMinor)) {
+        return false;
+    }
+
+    const float directDistance =
+        static_cast<float>(cv::norm(pcaD1 - seedD1) + cv::norm(pcaD2 - seedD2));
+    const float swappedDistance =
+        static_cast<float>(cv::norm(pcaD2 - seedD1) + cv::norm(pcaD1 - seedD2));
+    if (swappedDistance < directDistance) {
+        std::swap(pcaD1, pcaD2);
+    }
+
+    const cv::Point3f pcaDelta = pcaD2 - pcaD1;
+    const float pcaSep = static_cast<float>(cv::norm(pcaDelta));
+    if (pcaSep <= 1e-6f) return false;
+    const cv::Point3f pcaSeedOrderAxis = pcaDelta * (1.0f / pcaSep);
+    const float axisAlignment =
+        std::abs(seedAxis.x * pcaSeedOrderAxis.x +
+                 seedAxis.y * pcaSeedOrderAxis.y +
+                 seedAxis.z * pcaSeedOrderAxis.z);
+    const float maxSeedDistance = std::max(
+        static_cast<float>(cv::norm(pcaD1 - seedD1)),
+        static_cast<float>(cv::norm(pcaD2 - seedD2)));
+
+    if (outAxisAlignment) *outAxisAlignment = axisAlignment;
+    if (outMaxSeedDistance) *outMaxSeedDistance = maxSeedDistance;
+
+    if (axisAlignment < std::clamp(minAxisAlignment, 0.0f, 1.0f)) {
+        return false;
+    }
+    if (maxSeedDistanceScale > 0.0f &&
+        maxSeedDistance > maxSeedDistanceScale * parentMaxR) {
+        return false;
+    }
+
+    outD1 = pcaD1;
+    outD2 = pcaD2;
+    return true;
+}
+
 // Position-only calibration via weighted bright-pixel centroid.
 // The centroid is the analytic midpoint-between-daughters for a dividing
 // cell (pixels split into two clusters contribute equally to the mean)
@@ -3495,6 +3674,336 @@ bool Frame::calibrateCellShapeViaPca(
     return anyUpdate;
 }
 
+bool Frame::refineCellShapeViaEdgeSticks(size_t cellIndex,
+                                         std::ostream *logSink)
+{
+    if (!simulationConfig.celluniverse3_enabled ||
+        !simulationConfig.celluniverse3_edge_axis_fit_enabled ||
+        cellIndex >= cells.size() ||
+        _realFrame.empty()) {
+        return false;
+    }
+
+    Ellipsoid &cell = cells[cellIndex];
+    if (cell.isTrash()) {
+        return false;
+    }
+
+    const int maxIters =
+        std::max(0, simulationConfig.celluniverse3_edge_axis_fit_iterations);
+    if (maxIters <= 0) {
+        return false;
+    }
+
+    std::ostream &log = logSink ? *logSink : std::cout;
+    bool anyChange = false;
+    std::ostringstream detail;
+
+    for (int iter = 0; iter < maxIters; ++iter) {
+        const std::array<float, 3> oldR = {
+            cell.getARadius(), cell.getBRadius(), cell.getCRadius()
+        };
+        const float minR = std::max(1e-3f, std::min({oldR[0], oldR[1], oldR[2]}));
+        const float maxR = std::max({oldR[0], oldR[1], oldR[2]});
+        const float shape = maxR / minR;
+        int longestAxis = 0;
+        if (oldR[1] > oldR[longestAxis]) longestAxis = 1;
+        if (oldR[2] > oldR[longestAxis]) longestAxis = 2;
+        if (shape < simulationConfig.celluniverse3_edge_axis_fit_min_shape) {
+            break;
+        }
+
+        std::array<double, 9> R_T;
+        cell.generateInverseRotationMatrix(R_T);
+        std::array<cv::Point3f, 3> axis = {
+            normalizedOr(cv::Point3f(static_cast<float>(R_T[0]),
+                                     static_cast<float>(R_T[1]),
+                                     static_cast<float>(R_T[2])),
+                         cv::Point3f(1.0f, 0.0f, 0.0f)),
+            normalizedOr(cv::Point3f(static_cast<float>(R_T[3]),
+                                     static_cast<float>(R_T[4]),
+                                     static_cast<float>(R_T[5])),
+                         cv::Point3f(0.0f, 1.0f, 0.0f)),
+            normalizedOr(cv::Point3f(static_cast<float>(R_T[6]),
+                                     static_cast<float>(R_T[7]),
+                                     static_cast<float>(R_T[8])),
+                         cv::Point3f(0.0f, 0.0f, 1.0f))
+        };
+
+        std::array<float, 3> newR = oldR;
+        std::array<int, 3> validHalfCounts = {0, 0, 0};
+        std::array<float, 3> rawTargets = {oldR[0], oldR[1], oldR[2]};
+        const cv::Point3f center(cell.getX(), cell.getY(), cell.getZ());
+        const float band =
+            simulationConfig.celluniverse3_edge_axis_fit_search_band_fraction;
+        const int samples =
+            std::max(3, simulationConfig.celluniverse3_edge_axis_fit_samples_per_half_axis);
+        const float minGradient =
+            simulationConfig.celluniverse3_edge_axis_fit_min_falling_gradient;
+        const float minContrast =
+            simulationConfig.celluniverse3_edge_axis_fit_min_inner_outer_contrast;
+        const float stepFraction =
+            simulationConfig.celluniverse3_edge_axis_fit_radius_step_fraction;
+        const float maxChangeFraction =
+            simulationConfig.celluniverse3_edge_axis_fit_max_radius_change_fraction;
+
+        for (int ai = 0; ai < 3; ++ai) {
+            float signedDeltaWeightSum = 0.0f;
+            float edgeWeightSum = 0.0f;
+            int targetCount = 0;
+            std::array<float, 2> halfDelta = {0.0f, 0.0f};
+            std::array<float, 2> halfScore = {0.0f, 0.0f};
+            std::array<float, 2> halfEdge = {oldR[ai], oldR[ai]};
+            std::array<bool, 2> halfValid = {false, false};
+            cv::Point3f u, v;
+            orthonormalFrame(axis[ai], u, v);
+            const float other0 = oldR[(ai + 1) % 3];
+            const float other1 = oldR[(ai + 2) % 3];
+            const float cylR = std::max(
+                simulationConfig.celluniverse3_edge_axis_fit_min_cylinder_radius,
+                std::min(other0, other1) *
+                    simulationConfig.celluniverse3_edge_axis_fit_cylinder_radius_scale);
+            const std::array<cv::Point3f, 5> offsets = {
+                cv::Point3f(0.0f, 0.0f, 0.0f),
+                u * cylR,
+                u * -cylR,
+                v * cylR,
+                v * -cylR
+            };
+
+            for (int sign = -1; sign <= 1; sign += 2) {
+                const int halfIdx = (sign < 0) ? 0 : 1;
+                const cv::Point3f dir = axis[ai] * static_cast<float>(sign);
+                const float tMin = std::max(1.0f, oldR[ai] * (1.0f - band));
+                const float tMax = std::max(tMin + 1.0f, oldR[ai] * (1.0f + band));
+                float bestT = oldR[ai];
+                float bestScore = 0.0f;
+                float bestFalling = 0.0f;
+                float bestContrast = 0.0f;
+
+                for (int si = 0; si < samples; ++si) {
+                    const float alpha = (samples == 1)
+                        ? 0.0f
+                        : static_cast<float>(si) / static_cast<float>(samples - 1);
+                    const float t = tMin + (tMax - tMin) * alpha;
+                    float fallingSum = 0.0f;
+                    float contrastSum = 0.0f;
+                    int support = 0;
+                    for (const cv::Point3f &offset : offsets) {
+                        const cv::Point3f p = center + dir * t + offset;
+                        const cv::Point3f grad = signalProbabilityGradientAt(_realFrame, p);
+                        const float falling = std::max(0.0f, -grad.dot(dir));
+                        const float inner = sampleSignalProbability(
+                            _realFrame, p.x - dir.x * 1.5f,
+                            p.y - dir.y * 1.5f, p.z - dir.z * 1.5f);
+                        const float outer = sampleSignalProbability(
+                            _realFrame, p.x + dir.x * 1.5f,
+                            p.y + dir.y * 1.5f, p.z + dir.z * 1.5f);
+                        const float contrast = std::max(0.0f, inner - outer);
+                        fallingSum += falling;
+                        contrastSum += contrast;
+                        ++support;
+                    }
+                    if (support <= 0) {
+                        continue;
+                    }
+                    const float fallingMean =
+                        fallingSum / static_cast<float>(support);
+                    const float contrastMean =
+                        contrastSum / static_cast<float>(support);
+                    if (fallingMean < minGradient || contrastMean < minContrast) {
+                        continue;
+                    }
+                    const float score = fallingMean * contrastMean;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestT = t;
+                        bestFalling = fallingMean;
+                        bestContrast = contrastMean;
+                    }
+                }
+
+                if (bestScore > 0.0f) {
+                    const float deltaToEdge = bestT - oldR[ai];
+                    halfValid[halfIdx] = true;
+                    halfDelta[halfIdx] = deltaToEdge;
+                    halfScore[halfIdx] = bestScore;
+                    halfEdge[halfIdx] = bestT;
+                    signedDeltaWeightSum += deltaToEdge * bestScore;
+                    edgeWeightSum += bestScore;
+                    ++targetCount;
+                    detail << " axis=" << ai
+                           << " half=" << (sign < 0 ? "-" : "+")
+                           << " tip=" << oldR[ai]
+                           << " edge=" << bestT
+                           << " halfDelta=" << deltaToEdge
+                           << " fall=" << bestFalling
+                           << " contrast=" << bestContrast;
+                }
+            }
+
+            if (targetCount > 0) {
+                validHalfCounts[ai] = targetCount;
+                float signedEdgeDelta =
+                    (edgeWeightSum > 1e-9f) ? signedDeltaWeightSum / edgeWeightSum
+                                             : 0.0f;
+                float confidence = (targetCount >= 2) ? 1.0f : 0.30f;
+                float activeStepFraction = stepFraction;
+                float activeMaxChangeFraction = maxChangeFraction;
+                std::string mergeMode = "weighted";
+                if (simulationConfig.celluniverse3_edge_axis_fit_rod_conflict_enabled &&
+                    ai == longestAxis &&
+                    shape >= simulationConfig.celluniverse3_edge_axis_fit_rod_conflict_min_shape &&
+                    targetCount >= 2) {
+                    const bool bothOutward =
+                        halfValid[0] && halfValid[1] &&
+                        halfDelta[0] > 0.0f && halfDelta[1] > 0.0f;
+                    const int shrinkIdx =
+                        (!halfValid[0] ||
+                         (halfValid[1] && halfDelta[1] < halfDelta[0])) ? 1 : 0;
+                    const float bestScore = std::max(halfScore[0], halfScore[1]);
+                    const bool shrinkSupported =
+                        halfValid[shrinkIdx] &&
+                        halfDelta[shrinkIdx] < 0.0f &&
+                        halfScore[shrinkIdx] >=
+                            simulationConfig
+                                .celluniverse3_edge_axis_fit_rod_conflict_shrink_score_ratio *
+                                bestScore;
+                    if (!bothOutward && shrinkSupported) {
+                        signedEdgeDelta = halfDelta[shrinkIdx];
+                        confidence = 1.0f;
+                        activeStepFraction =
+                            simulationConfig
+                                .celluniverse3_edge_axis_fit_rod_conflict_step_fraction;
+                        activeMaxChangeFraction =
+                            simulationConfig
+                                .celluniverse3_edge_axis_fit_rod_conflict_max_radius_change_fraction;
+                        mergeMode = "rod_nearer_edge";
+                    }
+                }
+                rawTargets[ai] = oldR[ai] + signedEdgeDelta * confidence;
+                const float maxDelta = oldR[ai] * activeMaxChangeFraction;
+                const float delta = std::clamp(signedEdgeDelta * confidence,
+                                               -maxDelta, maxDelta) *
+                                    activeStepFraction;
+                newR[ai] = oldR[ai] + delta;
+                detail << " axis=" << ai
+                       << " merge=" << mergeMode
+                       << " targetDelta=" << signedEdgeDelta * confidence
+                       << " step=" << activeStepFraction
+                       << " maxChange=" << activeMaxChangeFraction;
+            }
+        }
+
+        const std::array<float, 3> minAxisR = {
+            std::max(static_cast<float>(Ellipsoid::cellConfig.minARadius),
+                     Ellipsoid::cellConfig.minAnyRadiusEnabled
+                         ? static_cast<float>(Ellipsoid::cellConfig.minAnyRadius)
+                         : 0.0f),
+            std::max(static_cast<float>(Ellipsoid::cellConfig.minBRadius),
+                     Ellipsoid::cellConfig.minAnyRadiusEnabled
+                         ? static_cast<float>(Ellipsoid::cellConfig.minAnyRadius)
+                         : 0.0f),
+            std::max(static_cast<float>(Ellipsoid::cellConfig.minCRadius),
+                     Ellipsoid::cellConfig.minAnyRadiusEnabled
+                         ? static_cast<float>(Ellipsoid::cellConfig.minAnyRadius)
+                         : 0.0f)
+        };
+        const std::array<float, 3> maxAxisR = {
+            static_cast<float>(Ellipsoid::cellConfig.maxARadius),
+            static_cast<float>(Ellipsoid::cellConfig.maxBRadius),
+            static_cast<float>(Ellipsoid::cellConfig.maxCRadius)
+        };
+        for (int ai = 0; ai < 3; ++ai) {
+            const float upper = maxAxisR[ai] > minAxisR[ai]
+                ? maxAxisR[ai]
+                : std::numeric_limits<float>::max();
+            newR[ai] = std::clamp(newR[ai], minAxisR[ai], upper);
+        }
+
+        const float maxAbsDelta = std::max({
+            std::abs(newR[0] - oldR[0]),
+            std::abs(newR[1] - oldR[1]),
+            std::abs(newR[2] - oldR[2])
+        });
+        if (maxAbsDelta < 0.05f) {
+            break;
+        }
+
+        const float oldBrightness = cell.getBrightness();
+        const float oldRadiusSum = oldR[0] + oldR[1] + oldR[2];
+        const float newRadiusSum = newR[0] + newR[1] + newR[2];
+        const float shrinkFraction = oldRadiusSum > 1e-6f
+            ? std::clamp((oldRadiusSum - newRadiusSum) / oldRadiusSum, 0.0f, 1.0f)
+            : 0.0f;
+        float newBrightness = oldBrightness;
+        bool coreBrightnessReset = false;
+        if (simulationConfig.celluniverse3_edge_axis_fit_core_brightness_enabled &&
+            shrinkFraction >=
+                simulationConfig
+                    .celluniverse3_edge_axis_fit_core_brightness_min_shrink_fraction) {
+            EllipsoidParams coreParams = cell.getCellParams();
+            const float coreScale = std::clamp(
+                simulationConfig
+                    .celluniverse3_edge_axis_fit_core_brightness_radius_scale,
+                0.05f, 1.0f);
+            coreParams.aRadius = std::max(1.0f, newR[0] * coreScale);
+            coreParams.bRadius = std::max(1.0f, newR[1] * coreScale);
+            coreParams.cRadius = std::max(1.0f, newR[2] * coreScale);
+            coreParams.brightness = oldBrightness;
+            Ellipsoid coreCell(coreParams);
+            const float sampledCoreBrightness = coreCell.measureMeanBrightness(
+                _realFrame,
+                simulationConfig
+                    .celluniverse3_edge_axis_fit_core_brightness_top_fraction);
+            if (std::isfinite(sampledCoreBrightness) &&
+                sampledCoreBrightness > 0.0f) {
+                const float maxChange =
+                    std::max(0.0f,
+                             simulationConfig
+                                 .celluniverse3_edge_axis_fit_core_brightness_max_change_fraction) *
+                    std::max(1e-6f, oldBrightness);
+                const float clampedCoreBrightness =
+                    std::clamp(sampledCoreBrightness,
+                               std::max(0.0f, oldBrightness - maxChange),
+                               std::min(1.0f, oldBrightness + maxChange));
+                const float blend = std::clamp(
+                    simulationConfig
+                        .celluniverse3_edge_axis_fit_core_brightness_blend,
+                    0.0f, 1.0f);
+                newBrightness = oldBrightness * (1.0f - blend) +
+                                clampedCoreBrightness * blend;
+                coreBrightnessReset =
+                    std::abs(newBrightness - oldBrightness) > 1e-6f;
+                detail << " coreBrightnessSample=" << sampledCoreBrightness
+                       << " coreBrightnessClamped=" << clampedCoreBrightness
+                       << " coreBrightnessOld=" << oldBrightness
+                       << " coreBrightnessNew=" << newBrightness;
+            }
+        }
+        cell.setRadii(newR[0], newR[1], newR[2]);
+        if (coreBrightnessReset) {
+            cell.setBrightness(newBrightness);
+        }
+        anyChange = true;
+        log << "  [CellUniverse3 Edge Axis Fit] cell=" << cell.getName()
+            << " iter=" << iter
+            << " shape=" << shape
+            << " old=(" << oldR[0] << "," << oldR[1] << "," << oldR[2] << ")"
+            << " target=(" << rawTargets[0] << "," << rawTargets[1]
+            << "," << rawTargets[2] << ")"
+            << " new=(" << newR[0] << "," << newR[1] << "," << newR[2] << ")"
+            << " validHalves=(" << validHalfCounts[0] << ","
+            << validHalfCounts[1] << "," << validHalfCounts[2] << ")"
+            << detail.str()
+            << std::endl;
+        detail.str("");
+        detail.clear();
+    }
+
+    return anyChange;
+}
+
 // Discover-only PCA bridge: runs the dark-gap bin analysis and returns the
 // (left, right) weighted centroids as a daughter-pair PROPOSAL. Does NOT
 // mutate cells, _synthFrame, or any cost cache. Caller passes the proposal
@@ -3828,6 +4337,84 @@ CostCallbackPair Frame::trySplitCellPhased(
     // to keep Phase B's perturbation progress.
     const Ellipsoid liveParent = cells[cellIndex];
     const std::string parentName = liveParent.getName();
+    const bool bridgeTunnelConstraintActive =
+        simulationConfig.celluniverse3_enabled &&
+        bridgeProposalOnly &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->cellUniverse3MapTunnelConstraintAvailable;
+    auto bridgeTunnelContainsPoint = [&](const cv::Point3f &pos) {
+        if (!bridgeTunnelConstraintActive) {
+            return true;
+        }
+        if (!std::isfinite(pos.x) ||
+            !std::isfinite(pos.y) ||
+            !std::isfinite(pos.z) ||
+            bridgeProposal->cellUniverse3MapTunnelFlatIndices.empty() ||
+            bridgeProposal->cellUniverse3MapTunnelGridX <= 0 ||
+            bridgeProposal->cellUniverse3MapTunnelGridY <= 0 ||
+            bridgeProposal->cellUniverse3MapTunnelGridZ <= 0) {
+            return false;
+        }
+        const BoundingBox3D &bbox =
+            bridgeProposal->cellUniverse3MapTunnelBbox;
+        if (bbox.isValid() &&
+            (pos.x < static_cast<float>(bbox.xMin) ||
+             pos.x > static_cast<float>(bbox.xMax) ||
+             pos.y < static_cast<float>(bbox.yMin) ||
+             pos.y > static_cast<float>(bbox.yMax) ||
+             pos.z < static_cast<float>(bbox.zMin) ||
+             pos.z > static_cast<float>(bbox.zMax))) {
+            return false;
+        }
+        auto gridForPoint = [&](const cv::Point3f &point) {
+            const int ix = std::clamp(
+                static_cast<int>(std::floor(
+                    point.x / std::max(1, bridgeProposal->cellUniverse3MapTunnelBoxSizeX))),
+                0,
+                std::max(0, bridgeProposal->cellUniverse3MapTunnelGridX - 1));
+            const int iy = std::clamp(
+                static_cast<int>(std::floor(
+                    point.y / std::max(1, bridgeProposal->cellUniverse3MapTunnelBoxSizeY))),
+                0,
+                std::max(0, bridgeProposal->cellUniverse3MapTunnelGridY - 1));
+            const int iz = std::clamp(
+                static_cast<int>(std::floor(
+                    point.z / std::max(1, bridgeProposal->cellUniverse3MapTunnelBoxSizeZ))),
+                0,
+                std::max(0, bridgeProposal->cellUniverse3MapTunnelGridZ - 1));
+            return std::make_tuple(ix, iy, iz);
+        };
+        auto flatIndex = [&](int ix, int iy, int iz) {
+            return (iz * std::max(1, bridgeProposal->cellUniverse3MapTunnelGridY) + iy) *
+                       std::max(1, bridgeProposal->cellUniverse3MapTunnelGridX) +
+                   ix;
+        };
+        const auto [baseIx, baseIy, baseIz] = gridForPoint(pos);
+        const int neighborBoxes = std::clamp(
+            bridgeProposal->cellUniverse3MapTunnelNeighborBoxes,
+            0,
+            2);
+        const auto &flatIndices =
+            bridgeProposal->cellUniverse3MapTunnelFlatIndices;
+        for (int dz = -neighborBoxes; dz <= neighborBoxes; ++dz) {
+            const int iz = baseIz + dz;
+            if (iz < 0 || iz >= bridgeProposal->cellUniverse3MapTunnelGridZ) continue;
+            for (int dy = -neighborBoxes; dy <= neighborBoxes; ++dy) {
+                const int iy = baseIy + dy;
+                if (iy < 0 || iy >= bridgeProposal->cellUniverse3MapTunnelGridY) continue;
+                for (int dx = -neighborBoxes; dx <= neighborBoxes; ++dx) {
+                    const int ix = baseIx + dx;
+                    if (ix < 0 || ix >= bridgeProposal->cellUniverse3MapTunnelGridX) continue;
+                    if (std::binary_search(flatIndices.begin(),
+                                           flatIndices.end(),
+                                           flatIndex(ix, iy, iz))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
 
     const bool snapshotValid = snapshot.valid &&
         snapshot.aRadius > 1e-3f &&
@@ -4352,14 +4939,218 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeCand.d2Pos = bridgeProposal->d2Pos;
         bridgeCand.label = "bridge_primary";
         bridgeCand.sphereRadiusOverride = bridgeProposal->daughterSphereRadius;
-        std::vector<Candidate> bridgeCandidates{bridgeCand};
+        std::vector<Candidate> bridgeCandidates;
+        int bridgeCenterSlideCount = 0;
+        int bridgeEvidenceMidpointCount = 0;
+        const auto validPoint = [](const cv::Point3f &p) {
+            return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        };
+        const auto duplicateBridgeCandidate = [&](const Candidate &cand) {
+            for (const auto &existing : bridgeCandidates) {
+                const float direct =
+                    static_cast<float>(cv::norm(existing.d1Pos - cand.d1Pos) +
+                                       cv::norm(existing.d2Pos - cand.d2Pos));
+                const float swapped =
+                    static_cast<float>(cv::norm(existing.d1Pos - cand.d2Pos) +
+                                       cv::norm(existing.d2Pos - cand.d1Pos));
+                if (std::min(direct, swapped) < 1.0f) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto appendBridgeCandidate = [&](const Candidate &baseCand,
+                                               bool allowCenterSlides,
+                                               bool countsAsEvidence) {
+            if (!validPoint(baseCand.d1Pos) || !validPoint(baseCand.d2Pos)) {
+                return false;
+            }
+            const cv::Point3f axisVec = baseCand.d2Pos - baseCand.d1Pos;
+            const float sep = static_cast<float>(cv::norm(axisVec));
+            if (sep <= 1e-3f || duplicateBridgeCandidate(baseCand)) {
+                return false;
+            }
+            bridgeCandidates.push_back(baseCand);
+            if (countsAsEvidence) {
+                ++bridgeEvidenceMidpointCount;
+            }
+            if (!bridgeProposalOnly ||
+                !simulationConfig.celluniverse3_enabled ||
+                !probConfig.celluniverse3_injected_split_center_slide_enabled ||
+                !allowCenterSlides) {
+                return true;
+            }
+            const cv::Point3f axis(axisVec.x / sep, axisVec.y / sep, axisVec.z / sep);
+            const float slideRange =
+                std::max(0.0f,
+                         probConfig.celluniverse3_injected_split_center_slide_range_scale) *
+                std::max(srcMaxR, 1.0f);
+            const float slideStep = std::max(
+                std::max(0.1f,
+                         probConfig.celluniverse3_injected_split_center_slide_min_step),
+                std::max(0.0f,
+                         probConfig.celluniverse3_injected_split_center_slide_step_scale) *
+                    std::max(srcMaxR, 1.0f));
+            if (slideRange < slideStep) return true;
+            const int nSteps = static_cast<int>(std::floor(slideRange / slideStep));
+            for (int stepIdx = 1; stepIdx <= nSteps; ++stepIdx) {
+                for (float sign : {-1.0f, 1.0f}) {
+                    const float offset = sign * slideStep * static_cast<float>(stepIdx);
+                    if (std::abs(offset) > slideRange + 1e-3f) continue;
+                    Candidate slid = baseCand;
+                    slid.d1Pos = cv::Point3f(baseCand.d1Pos.x + offset * axis.x,
+                                             baseCand.d1Pos.y + offset * axis.y,
+                                             baseCand.d1Pos.z + offset * axis.z);
+                    slid.d2Pos = cv::Point3f(baseCand.d2Pos.x + offset * axis.x,
+                                             baseCand.d2Pos.y + offset * axis.y,
+                                             baseCand.d2Pos.z + offset * axis.z);
+                    if (!duplicateBridgeCandidate(slid)) {
+                        bridgeCandidates.push_back(slid);
+                        ++bridgeCenterSlideCount;
+                    }
+                }
+            }
+            return true;
+        };
+        appendBridgeCandidate(bridgeCand, true, false);
+
+        if (bridgeProposalOnly &&
+            simulationConfig.celluniverse3_enabled &&
+            probConfig.celluniverse3_injected_split_evidence_midpoints_enabled) {
+            const cv::Point3f baseAxisVec = bridgeCand.d2Pos - bridgeCand.d1Pos;
+            const float baseSep = static_cast<float>(cv::norm(baseAxisVec));
+            if (baseSep > 1e-3f) {
+                const cv::Point3f baseAxis =
+                    baseAxisVec * (1.0f / baseSep);
+                const cv::Point3f baseMid =
+                    0.5f * (bridgeCand.d1Pos + bridgeCand.d2Pos);
+                const float maxMidShift =
+                    std::max(0.0f,
+                             probConfig
+                                 .celluniverse3_injected_split_evidence_midpoint_max_shift_scale) *
+                    std::max(srcMaxR, 1.0f);
+                const float maxPairSep =
+                    std::max(0.0f,
+                             probConfig
+                                 .celluniverse3_injected_split_evidence_pair_max_sep_scale) *
+                    std::max(srcMaxR, 1.0f);
+                const auto appendMidpointCandidate =
+                    [&](const cv::Point3f &mid,
+                        const cv::Point3f &axis,
+                        const char *,
+                        bool allowSlides) {
+                        if (!validPoint(mid) || !validPoint(axis)) return;
+                        const float axisNorm = static_cast<float>(cv::norm(axis));
+                        if (axisNorm <= 1e-3f) return;
+                        if (maxMidShift > 0.0f &&
+                            cv::norm(mid - baseMid) > maxMidShift) {
+                            return;
+                        }
+                        const cv::Point3f unitAxis = axis * (1.0f / axisNorm);
+                        Candidate cand = bridgeCand;
+                        cand.d1Pos = mid - 0.5f * baseSep * unitAxis;
+                        cand.d2Pos = mid + 0.5f * baseSep * unitAxis;
+                        cand.label = "bridge_primary";
+                        appendBridgeCandidate(cand, allowSlides, true);
+                    };
+                const auto appendPairCandidate =
+                    [&](cv::Point3f d1,
+                        cv::Point3f d2,
+                        const char *) {
+                        if (!validPoint(d1) || !validPoint(d2)) return;
+                        const cv::Point3f pairVec = d2 - d1;
+                        const float pairSep = static_cast<float>(cv::norm(pairVec));
+                        if (pairSep <= 1e-3f) return;
+                        if (maxPairSep > 0.0f && pairSep > maxPairSep) return;
+                        const cv::Point3f mid = 0.5f * (d1 + d2);
+                        if (maxMidShift > 0.0f &&
+                            cv::norm(mid - baseMid) > maxMidShift) {
+                            return;
+                        }
+                        const float align =
+                            pairVec.x * baseAxis.x +
+                            pairVec.y * baseAxis.y +
+                            pairVec.z * baseAxis.z;
+                        if (align < 0.0f) {
+                            std::swap(d1, d2);
+                        }
+                        Candidate cand = bridgeCand;
+                        cand.d1Pos = d1;
+                        cand.d2Pos = d2;
+                        cand.label = "bridge_primary";
+                        appendBridgeCandidate(cand, false, true);
+                    };
+
+                if (!axisPlace.empty() && axisPlace.front().valid) {
+                    appendPairCandidate(axisPlace.front().d1,
+                                        axisPlace.front().d2,
+                                        "current_axis_place_pair");
+                    appendMidpointCandidate(axisPlace.front().midpoint,
+                                            baseAxis,
+                                            "current_axis_place_mid",
+                                            false);
+                }
+                if (bridgeProposal->windowBothDaughtersSupported >= 2) {
+                    appendPairCandidate(bridgeProposal->windowBestMatchedD1Pos,
+                                        bridgeProposal->windowBestMatchedD2Pos,
+                                        "future_best_pair");
+                    appendMidpointCandidate(
+                        0.5f * (bridgeProposal->windowBestMatchedD1Pos +
+                                bridgeProposal->windowBestMatchedD2Pos),
+                        baseAxis,
+                        "future_best_mid",
+                        false);
+                }
+                if (bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+                    bridgeProposal->windowBothDaughtersSupported >= 2) {
+                    appendPairCandidate(
+                        bridgeProposal->windowImmediateMatchedD1Pos,
+                        bridgeProposal->windowImmediateMatchedD2Pos,
+                        "future_immediate_pair");
+                    appendMidpointCandidate(
+                        0.5f * (bridgeProposal->windowImmediateMatchedD1Pos +
+                                bridgeProposal->windowImmediateMatchedD2Pos),
+                        baseAxis,
+                        "future_immediate_mid",
+                        false);
+                }
+                if (bridgeProposal->cellUniverse3MapPriorEvaluated) {
+                    const cv::Point3f mapAxis =
+                        (cv::norm(bridgeProposal->cellUniverse3MapAxis) > 1e-3f)
+                            ? bridgeProposal->cellUniverse3MapAxis
+                            : baseAxis;
+                    appendMidpointCandidate(
+                        bridgeProposal->cellUniverse3MapOCenter,
+                        baseAxis,
+                        "map_o_mid_base_axis",
+                        true);
+                    appendMidpointCandidate(
+                        bridgeProposal->cellUniverse3MapOCenter,
+                        mapAxis,
+                        "map_o_mid_map_axis",
+                        true);
+                    appendMidpointCandidate(
+                        0.5f * (bridgeProposal->cellUniverse3MapOCenter +
+                                bridgeProposal->cellUniverse3MapDCenter),
+                        baseAxis,
+                        "map_od_mid_base_axis",
+                        true);
+                    appendMidpointCandidate(
+                        0.5f * (bridgeProposal->cellUniverse3MapOCenter +
+                                bridgeProposal->cellUniverse3MapDCenter),
+                        mapAxis,
+                        "map_od_mid_map_axis",
+                        true);
+                }
+            }
+        }
         if (bridgeProposal->hasAlternateSeedPair) {
             Candidate altCand;
             altCand.d1Pos = bridgeProposal->altD1Pos;
             altCand.d2Pos = bridgeProposal->altD2Pos;
             altCand.label = "bridge_tip_alt";
             altCand.sphereRadiusOverride = bridgeProposal->daughterSphereRadius;
-            bridgeCandidates.push_back(altCand);
+            appendBridgeCandidate(altCand, false, false);
         }
         const float rodTipAxisPlaceMaxShape =
             std::max(0.0f,
@@ -4424,6 +5215,14 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " gapBins=" << bridgeProposal->gapStartBin << "-"
                   << bridgeProposal->gapEndBin
                   << " sphereRadius=" << bridgeProposal->daughterSphereRadius
+                  << " centerSlides=" << bridgeCenterSlideCount
+                  << " evidenceMidpoints=" << bridgeEvidenceMidpointCount
+                  << " slideRangeScale="
+                  << probConfig.celluniverse3_injected_split_center_slide_range_scale
+                  << " slideStepScale="
+                  << probConfig.celluniverse3_injected_split_center_slide_step_scale
+                  << " slideMinStep="
+                  << probConfig.celluniverse3_injected_split_center_slide_min_step
                   << std::endl;
     }
 
@@ -4681,8 +5480,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             // the savedSynth reference (cv::Mat shallow copy = free).
             const cv::Size shape = getImageShape();
             for (int z = zLo; z <= zHi; ++z) {
-                cv::Mat synthImage = cv::Mat(shape, CV_32F,
-                                            cv::Scalar(_backgroundValue));
+                cv::Mat synthImage = makeSynthBackgroundSlice(shape, z);
                 const float zf = static_cast<float>(z_slices[z]);
                 for (const auto &cell : cells) {
                     const float cmr = std::max({cell.getARadius(),
@@ -4733,6 +5531,22 @@ CostCallbackPair Frame::trySplitCellPhased(
             cv::Point3f(candD1.getX(), candD1.getY(), candD1.getZ()) - cand.d1Pos));
         const float candDrift2 = static_cast<float>(cv::norm(
             cv::Point3f(candD2.getX(), candD2.getY(), candD2.getZ()) - cand.d2Pos));
+        const cv::Point3f candD1Pos(candD1.getX(), candD1.getY(), candD1.getZ());
+        const cv::Point3f candD2Pos(candD2.getX(), candD2.getY(), candD2.getZ());
+        const bool bridgeTunnelSeedD1Inside =
+            bridgeTunnelContainsPoint(cand.d1Pos);
+        const bool bridgeTunnelSeedD2Inside =
+            bridgeTunnelContainsPoint(cand.d2Pos);
+        const bool bridgeTunnelFinalD1Inside =
+            bridgeTunnelContainsPoint(candD1Pos);
+        const bool bridgeTunnelFinalD2Inside =
+            bridgeTunnelContainsPoint(candD2Pos);
+        const bool bridgeTunnelCandidatePass =
+            !bridgeTunnelConstraintActive ||
+            (bridgeTunnelSeedD1Inside &&
+             bridgeTunnelSeedD2Inside &&
+             bridgeTunnelFinalD1Inside &&
+             bridgeTunnelFinalD2Inside);
         std::cout << "  [Split Cand] " << parentName
                   << " idx=" << ci << "/" << candidates.size()
                   << " label=" << cand.label
@@ -4745,6 +5559,22 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " total=" << candTotal
                   << " (image=" << candImageCost << " overlap=" << candOverlap << ")"
                   << std::endl;
+        if (!bridgeTunnelCandidatePass) {
+            std::cout << "  [Split Cand Tunnel Gate] " << parentName
+                      << " idx=" << ci
+                      << " label=" << cand.label
+                      << " seedD1Inside=" << (bridgeTunnelSeedD1Inside ? 1 : 0)
+                      << " seedD2Inside=" << (bridgeTunnelSeedD2Inside ? 1 : 0)
+                      << " finalD1Inside=" << (bridgeTunnelFinalD1Inside ? 1 : 0)
+                      << " finalD2Inside=" << (bridgeTunnelFinalD2Inside ? 1 : 0)
+                      << " tunnelBoxes="
+                      << (bridgeProposal != nullptr
+                              ? bridgeProposal
+                                    ->cellUniverse3MapTunnelFlatIndices.size()
+                              : 0)
+                      << " action=reject_candidate"
+                      << std::endl;
+        }
 
         // Per-candidate edge brightness pre-filter. A daughter whose
         // position in the real image is below the edge_too_dim threshold
@@ -4944,10 +5774,88 @@ CostCallbackPair Frame::trySplitCellPhased(
                                    .split_future_rod_tip_primary_selection_bonus_fraction) *
                                baselineImageCost)
                 : 0.0;
+        bool cellUniverse3WindowMapCandidatePass = true;
+        float cellUniverse3WindowMapCandidateMidShiftUnits = 0.0f;
+        float cellUniverse3WindowMapCandidateSepFraction = 1.0f;
+        float cellUniverse3WindowMapCandidateAxisAlignment = 1.0f;
+        if (simulationConfig.celluniverse3_enabled &&
+            probConfig.celluniverse3_window_map_candidate_gate_enabled &&
+            candIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->cellUniverse3MapProposal &&
+            bridgeProposal->cellUniverse3MapPriorConfident) {
+            const cv::Point3f baseD1 = bridgeProposal->d1Pos;
+            const cv::Point3f baseD2 = bridgeProposal->d2Pos;
+            const cv::Point3f baseMid = 0.5f * (baseD1 + baseD2);
+            const cv::Point3f candMid = 0.5f * (cand.d1Pos + cand.d2Pos);
+            const cv::Point3f baseVec = baseD2 - baseD1;
+            const cv::Point3f candVec = cand.d2Pos - cand.d1Pos;
+            const float baseSep = static_cast<float>(cv::norm(baseVec));
+            const float candSep = static_cast<float>(cv::norm(candVec));
+            const float normScale = std::max(1.0f, srcMaxR);
+            cellUniverse3WindowMapCandidateMidShiftUnits =
+                static_cast<float>(cv::norm(candMid - baseMid)) / normScale;
+            if (baseSep > 1e-3f && candSep > 1e-3f) {
+                cellUniverse3WindowMapCandidateSepFraction =
+                    std::min(candSep / baseSep, baseSep / candSep);
+                const cv::Point3f baseAxis = baseVec * (1.0f / baseSep);
+                const cv::Point3f candAxis = candVec * (1.0f / candSep);
+                cellUniverse3WindowMapCandidateAxisAlignment = std::abs(
+                    baseAxis.x * candAxis.x +
+                    baseAxis.y * candAxis.y +
+                    baseAxis.z * candAxis.z);
+            } else {
+                cellUniverse3WindowMapCandidateSepFraction = 0.0f;
+                cellUniverse3WindowMapCandidateAxisAlignment = 0.0f;
+            }
+            const float maxMidShift =
+                std::max(
+                    0.0f,
+                    probConfig
+                        .celluniverse3_window_map_candidate_max_midpoint_shift_scale);
+            const float minSepFraction =
+                std::clamp(
+                    probConfig.celluniverse3_window_map_candidate_min_sep_fraction,
+                    0.0f,
+                    1.0f);
+            const float minAxisAlignment =
+                std::clamp(
+                    probConfig
+                        .celluniverse3_window_map_candidate_min_axis_alignment,
+                    0.0f,
+                    1.0f);
+            cellUniverse3WindowMapCandidatePass =
+                cellUniverse3WindowMapCandidateMidShiftUnits <= maxMidShift &&
+                cellUniverse3WindowMapCandidateSepFraction >= minSepFraction &&
+                cellUniverse3WindowMapCandidateAxisAlignment >= minAxisAlignment;
+            if (!cellUniverse3WindowMapCandidatePass) {
+                std::cout << "  [Split Cand WindowMap Gate] " << parentName
+                          << " idx=" << ci
+                          << " label=" << cand.label
+                          << " midShiftUnits="
+                          << cellUniverse3WindowMapCandidateMidShiftUnits
+                          << " maxMidShift=" << maxMidShift
+                          << " sepFraction="
+                          << cellUniverse3WindowMapCandidateSepFraction
+                          << " minSepFraction=" << minSepFraction
+                          << " axisAlignment="
+                          << cellUniverse3WindowMapCandidateAxisAlignment
+                          << " minAxisAlignment=" << minAxisAlignment
+                          << " mapUSupportD1="
+                          << bridgeProposal->cellUniverse3MapUSupportD1
+                          << " mapUSupportD2="
+                          << bridgeProposal->cellUniverse3MapUSupportD2
+                          << " action=reject_candidate"
+                          << std::endl;
+            }
+        }
         const double candSelectionScore =
             candTotal - futureRodTipPrimarySelectionBonus;
 
-        if (candPassesPreFilter && candSelectionScore < bestSelectionScore) {
+        if (candPassesPreFilter &&
+            cellUniverse3WindowMapCandidatePass &&
+            bridgeTunnelCandidatePass &&
+            candSelectionScore < bestSelectionScore) {
             bestTotal = candTotal;
             bestSelectionScore = candSelectionScore;
             bestIdx = static_cast<int>(ci);
@@ -5486,6 +6394,31 @@ CostCallbackPair Frame::trySplitCellPhased(
                 bridgeProposal->cellUniverse3DelayedMissingDaughter &&
                 bridgeProposal->centerSnapApplied &&
                 bridgeProposal->windowParentPersists == 0;
+            const bool lockCellUniverse3WindowMapOverlapDaughterPosition =
+                simulationConfig.celluniverse3_enabled &&
+                probConfig.celluniverse3_window_map_overlap_position_lock_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->cellUniverse3MapOverlapCenterProposal &&
+                bridgeProposal->cellUniverse3MapPriorConfident &&
+                bridgeProposal->cellUniverse3MapUSupportD1 >=
+                    probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+                bridgeProposal->cellUniverse3MapUSupportD2 >=
+                    probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+                bridgeProposal->cellUniverse3MapRegionPenalty <=
+                    probConfig.celluniverse3_window_map_primary_support_max_region_penalty &&
+                bridgeProposal->parentShapeElongation >=
+                    probConfig.celluniverse3_window_map_neighbor_bridge_min_parent_shape &&
+                bridgeProposal->parentShapeElongation <=
+                    probConfig.celluniverse3_window_map_neighbor_bridge_max_parent_shape &&
+                bridgeProposal->parentDistanceBalance >=
+                    probConfig.celluniverse3_window_map_primary_support_min_parent_balance;
+            const bool lockCellUniverse3TunnelDaughterPosition =
+                bridgeTunnelConstraintActive &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->cellUniverse3MapPriorEvaluated;
             const bool lockSplitDaughterRefitPosition =
                 lockFutureRodTipDaughterPosition ||
                 lockCleanFuturePcaBridgeDaughterPosition ||
@@ -5500,7 +6433,9 @@ CostCallbackPair Frame::trySplitCellPhased(
                 lockCellUniverse3SignalCenterFuturePosition ||
                 lockCellUniverse3CleanFutureBridgeDaughterPosition ||
                 lockBridgeAxisPlaceDaughterPosition ||
-                lockCellUniverse3DelayedMissingDaughterPosition;
+                lockCellUniverse3DelayedMissingDaughterPosition ||
+                lockCellUniverse3WindowMapOverlapDaughterPosition ||
+                lockCellUniverse3TunnelDaughterPosition;
             const char *splitDaughterRefitLockReason = "none";
             if (lockFutureRodTipDaughterPosition) {
                 splitDaughterRefitLockReason = "future_supported_rod_tip";
@@ -5537,6 +6472,12 @@ CostCallbackPair Frame::trySplitCellPhased(
             } else if (lockCellUniverse3DelayedMissingDaughterPosition) {
                 splitDaughterRefitLockReason =
                     "celluniverse3_delayed_missing_daughter";
+            } else if (lockCellUniverse3WindowMapOverlapDaughterPosition) {
+                splitDaughterRefitLockReason =
+                    "celluniverse3_window_map_overlap";
+            } else if (lockCellUniverse3TunnelDaughterPosition) {
+                splitDaughterRefitLockReason =
+                    "celluniverse3_window_map_tunnel";
             }
             const bool preserveCellUniverse3FutureBridgeSeedPosition =
                 simulationConfig.celluniverse3_enabled &&
@@ -5549,6 +6490,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                 lockCellUniverse3DelayedMissingDaughterPosition ||
                 lockCellUniverse3SignalCenterFuturePosition ||
                 lockCellUniverse3CleanFutureBridgeDaughterPosition ||
+                lockCellUniverse3WindowMapOverlapDaughterPosition ||
+                lockCellUniverse3TunnelDaughterPosition ||
                 preserveCellUniverse3FutureBridgeSeedPosition;
             const bool allowFutureBridgeDaughterPcaPositionUpdate =
                 simulationConfig.celluniverse2_enabled &&
@@ -6699,8 +7642,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                     std::max(rd1.getZ(), rd2.getZ()) + extentR)));
                 const cv::Size shape = getImageShape();
                 for (int z = zLo; z <= zHi; ++z) {
-                    cv::Mat synthImage = cv::Mat(shape, CV_32F,
-                                                cv::Scalar(_backgroundValue));
+                    cv::Mat synthImage = makeSynthBackgroundSlice(shape, z);
                     const float zf = static_cast<float>(z_slices[z]);
                     for (const auto &cell : cells) {
                         const float cmr = std::max({cell.getARadius(),
@@ -6833,6 +7775,28 @@ CostCallbackPair Frame::trySplitCellPhased(
 
     const cv::Point3f bestD1Pos(bestD1.getX(), bestD1.getY(), bestD1.getZ());
     const cv::Point3f bestD2Pos(bestD2.getX(), bestD2.getY(), bestD2.getZ());
+    const bool bestTunnelD1Inside = bridgeTunnelContainsPoint(bestD1Pos);
+    const bool bestTunnelD2Inside = bridgeTunnelContainsPoint(bestD2Pos);
+    if (bridgeTunnelConstraintActive &&
+        (!bestTunnelD1Inside || !bestTunnelD2Inside)) {
+        std::cout << "  [Split Final Tunnel Gate] " << parentName
+                  << " label=" << bestLabel
+                  << " d1Inside=" << (bestTunnelD1Inside ? 1 : 0)
+                  << " d2Inside=" << (bestTunnelD2Inside ? 1 : 0)
+                  << " d1=(" << bestD1Pos.x << "," << bestD1Pos.y
+                  << "," << bestD1Pos.z << ")"
+                  << " d2=(" << bestD2Pos.x << "," << bestD2Pos.y
+                  << "," << bestD2Pos.z << ")"
+                  << " tunnelBoxes="
+                  << (bridgeProposal != nullptr
+                          ? bridgeProposal
+                                ->cellUniverse3MapTunnelFlatIndices.size()
+                          : 0)
+                  << " action=reject_split"
+                  << std::endl;
+        restoreLiveParent();
+        return {0.0, noop};
+    }
     const bool bestIsCellLumenPrior = (bestLabel == "cell_lumen_primary");
     const bool bestIsDeterministicSingleProposal =
         bridgeProposalOnly &&
@@ -8307,16 +9271,15 @@ CostCallbackPair Frame::trySplitCellPhased(
                 return {0.0, noop};
             }
             const float maxDaughterSeedDrift = std::max(drift1, drift2);
-            const bool denseDriftingDeterministicBridge =
-                simulationConfig.celluniverse2_enabled &&
-                bridgeProposalOnly &&
-                bestLabel == "bridge_primary" &&
+            const float denseDriftingBridgeDriftLimit =
+                probConfig.split_dense_drifting_bridge_seed_drift_fraction *
+                std::max(1.0f, parentMaxRadiusForSoftGeometry);
+            const bool denseDriftingBridgeGeometryTriggered =
                 gapDensity >= probConfig.split_dense_drifting_bridge_min_gap_density &&
                 valleyFromBright >=
                     probConfig.split_dense_drifting_bridge_min_valley_from_bright &&
-                maxDaughterSeedDrift >=
-                    probConfig.split_dense_drifting_bridge_seed_drift_fraction *
-                        std::max(1.0f, parentMaxRadiusForSoftGeometry) &&
+                maxDaughterSeedDrift >= denseDriftingBridgeDriftLimit;
+            const bool denseDriftingBridgeFutureWeak =
                 (bridgeProposal == nullptr ||
                  bridgeProposal->windowBestMatchedMinBrightness <
                      probConfig.split_dense_drifting_bridge_future_brightness_floor ||
@@ -8324,6 +9287,67 @@ CostCallbackPair Frame::trySplitCellPhased(
                      std::max(2, probConfig.pca_bridge_future_window_min_both_daughter_support) ||
                  bridgeProposal->windowMissingDaughterCount > 0 ||
                  bridgeProposal->windowParentPersists > 0);
+            const float cellUniverse3MapPrimaryDenseBridgeDriftLimit =
+                probConfig
+                    .celluniverse3_window_map_primary_dense_bridge_max_drift_scale *
+                std::max(1.0f, parentMaxRadiusForSoftGeometry);
+            const float cellUniverse3MapMinUSupport =
+                std::max(0.0f,
+                         simulationConfig.celluniverse3_window_map_min_u_support);
+            const bool cellUniverse3WindowMapPrimaryDenseBridgeRescue =
+                simulationConfig.celluniverse3_enabled &&
+                probConfig
+                    .celluniverse3_window_map_primary_dense_bridge_rescue_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->cellUniverse3MapProposal &&
+                bridgeProposal->cellUniverse3MapPriorConfident &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->cellUniverse3MapUSupportD1 >= cellUniverse3MapMinUSupport &&
+                bridgeProposal->cellUniverse3MapUSupportD2 >= cellUniverse3MapMinUSupport &&
+                bridgeProposal->cellUniverse3MapRegionPenalty <= 0.25f &&
+                valleyFromBright <=
+                    probConfig
+                        .celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright &&
+                gapDensity <=
+                    probConfig
+                        .celluniverse3_window_map_primary_dense_bridge_max_gap_density &&
+                maxDaughterSeedDrift <= cellUniverse3MapPrimaryDenseBridgeDriftLimit;
+            if (edgeCount > 0 &&
+                denseDriftingBridgeGeometryTriggered &&
+                denseDriftingBridgeFutureWeak &&
+                cellUniverse3WindowMapPrimaryDenseBridgeRescue) {
+                std::cout << "[CellUniverse3 Window Map Dense Bridge Rescue] "
+                          << parentName
+                          << " valleyFromBright=" << valleyFromBright
+                          << " maxValley="
+                          << probConfig
+                                 .celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright
+                          << " gapDensity=" << gapDensity
+                          << " maxGapDensity="
+                          << probConfig
+                                 .celluniverse3_window_map_primary_dense_bridge_max_gap_density
+                          << " maxDaughterSeedDrift=" << maxDaughterSeedDrift
+                          << " driftLimit="
+                          << cellUniverse3MapPrimaryDenseBridgeDriftLimit
+                          << " uSupportD1="
+                          << bridgeProposal->cellUniverse3MapUSupportD1
+                          << " uSupportD2="
+                          << bridgeProposal->cellUniverse3MapUSupportD2
+                          << " futureBoth="
+                          << bridgeProposal->windowBothDaughtersSupported
+                          << " futureMissing="
+                          << bridgeProposal->windowMissingDaughterCount
+                          << std::endl;
+            }
+            const bool denseDriftingDeterministicBridge =
+                simulationConfig.celluniverse2_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                denseDriftingBridgeGeometryTriggered &&
+                denseDriftingBridgeFutureWeak &&
+                !cellUniverse3WindowMapPrimaryDenseBridgeRescue;
             if (edgeCount > 0 && denseDriftingDeterministicBridge) {
                 std::cout << "[Split Reject bio] " << parentName
                           << " reason=dense_drifting_bridge"
@@ -8331,8 +9355,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " gapDensity=" << gapDensity
                           << " maxDaughterSeedDrift=" << maxDaughterSeedDrift
                           << " driftLimit="
-                          << probConfig.split_dense_drifting_bridge_seed_drift_fraction *
-                                 std::max(1.0f, parentMaxRadiusForSoftGeometry)
+                          << denseDriftingBridgeDriftLimit
                           << " futureBestMinBrightness="
                           << (bridgeProposal != nullptr
                                   ? bridgeProposal->windowBestMatchedMinBrightness
@@ -8863,6 +9886,29 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeProposal->parentDistanceBalance >=
             std::max(0.0f,
                      probConfig.signal_center_severe_future_claim_min_parent_balance);
+    const bool cellUniverse3WindowMapNeighborBridgeBypass =
+        simulationConfig.celluniverse3_enabled &&
+        probConfig.celluniverse3_window_map_neighbor_bridge_bypass_enabled &&
+        bridgeProposalOnly &&
+        bridgeProposal != nullptr &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal->cellUniverse3MapOverlapCenterProposal &&
+        bridgeProposal->cellUniverse3MapPriorConfident &&
+        bridgeProposal->cellUniverse3MapUSupportD1 >=
+            probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+        bridgeProposal->cellUniverse3MapUSupportD2 >=
+            probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+        bridgeProposal->cellUniverse3MapRegionPenalty <=
+            probConfig.celluniverse3_window_map_primary_support_max_region_penalty &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.celluniverse3_window_map_neighbor_bridge_min_future_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig.celluniverse3_window_map_neighbor_bridge_min_parent_shape &&
+        bridgeProposal->parentShapeElongation <=
+            probConfig.celluniverse3_window_map_neighbor_bridge_max_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.celluniverse3_window_map_primary_support_min_parent_balance;
     const bool skipExistingCellBuriedForBio =
         (useCellLumenGateParams && lumenSkipExistingCellBuriedCheck) ||
         futureSupportedBridgeAxisBuriedRescue ||
@@ -8874,7 +9920,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         cleanTwoFrameRodTipContinuationRescue ||
         cleanPcaBridgeContinuationRescue ||
         cellUniverse3CleanFutureBridgeBioOwnershipRescue ||
-        cellUniverse3SevereSignalCenterBridgeBioOwnershipRescue;
+        cellUniverse3SevereSignalCenterBridgeBioOwnershipRescue ||
+        cellUniverse3WindowMapNeighborBridgeBypass;
     const bool dimExactFutureSignalRodBlockerRescue =
         bestIsSignalCenterProposal &&
         bridgeProposal != nullptr &&
@@ -8894,11 +9941,15 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeProposal != nullptr &&
         bestLabel == "bridge_primary" &&
         (bestHasCleanFutureSplitSupport ||
-         dimExactFutureSignalRodBlockerRescue) &&
+         dimExactFutureSignalRodBlockerRescue ||
+         cellUniverse3WindowMapNeighborBridgeBypass) &&
         bridgeProposal->windowParentPersists == 0 &&
         (bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_ignore_suspicious_rod_min_brightness ||
-         dimExactFutureSignalRodBlockerRescue) &&
-        bridgeProposal->parentShapeElongation >= probConfig.split_ignore_suspicious_rod_min_parent_shape;
+         dimExactFutureSignalRodBlockerRescue ||
+         cellUniverse3WindowMapNeighborBridgeBypass) &&
+        (bridgeProposal->parentShapeElongation >=
+             probConfig.split_ignore_suspicious_rod_min_parent_shape ||
+         cellUniverse3WindowMapNeighborBridgeBypass);
     const bool delayedFuturePcaBridgeBioOwnershipRescue =
         simulationConfig.celluniverse2_enabled &&
         bridgeProposalOnly &&
@@ -11905,7 +12956,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             static_cast<double>(
                 probConfig
                     .split_severe_post_pca_rod_future_cost_rescue_max_overlap_diff_abs);
-    const bool cellUniverse3WindowSoftPenaltyCostRescued =
+    const bool cellUniverse3WindowPenaltyPcaCostRescued =
         simulationConfig.celluniverse3_enabled &&
         probConfig.celluniverse3_window_soft_penalty_cost_rescue_enabled &&
         bestIsPcaBridgeOnly &&
@@ -11960,6 +13011,147 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeCostRescueGapDensity <=
             probConfig
                 .celluniverse3_window_soft_penalty_cost_rescue_max_gap_density;
+    const bool cellUniverse3WindowUnionSoftPenaltyCostRescued =
+        simulationConfig.celluniverse3_enabled &&
+        probConfig
+            .celluniverse3_window_union_soft_penalty_cost_rescue_enabled &&
+        bestIsSignalCenterProposal &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->signalCenterScore >= 0.0f &&
+        !bridgeProposal->cellUniverse3MapProposal &&
+        bridgeProposal->cellUniverse3MapPriorEvaluated &&
+        bridgeProposal->cellUniverse3MapPriorConfident &&
+        bridgeProposal->cellUniverse3MapUSupportD1 >=
+            probConfig
+                .celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support &&
+        bridgeProposal->cellUniverse3MapUSupportD2 >=
+            probConfig
+                .celluniverse3_window_union_soft_penalty_cost_rescue_min_u_support &&
+        bridgeProposal->cellUniverse3MapRegionPenalty <=
+            probConfig
+                .celluniverse3_window_union_soft_penalty_cost_rescue_max_region_penalty &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(
+                1,
+                probConfig
+                    .celluniverse3_window_soft_penalty_cost_rescue_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            std::max(
+                0,
+                probConfig
+                    .celluniverse3_window_soft_penalty_cost_rescue_max_missing_daughters) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_min_future_brightness &&
+        bridgeProposal->parentShapeElongation >=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_min_parent_shape &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_min_parent_balance &&
+        costDiff <= 0.0 &&
+        imageCostDiff <= 0.0 &&
+        geometryAdjustedCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .celluniverse3_window_soft_penalty_cost_rescue_max_geometry_fraction) *
+                baselineImageCost &&
+        overlapCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .celluniverse3_window_union_soft_penalty_cost_rescue_max_overlap_fraction) *
+                baselineImageCost &&
+        finalAxisLen >=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_max_drift_scale *
+            std::max(1.0f, srcMaxR) &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <=
+            probConfig
+                .celluniverse3_window_soft_penalty_cost_rescue_max_gap_density;
+    const double cellUniverse3WindowMapPrimaryCostLimit =
+        static_cast<double>(std::max(
+            0.0f,
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_cost_fraction)) *
+        baselineImageCost;
+    const double cellUniverse3WindowMapPrimaryOverlapLimit =
+        static_cast<double>(std::max(
+            0.0f,
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction)) *
+        baselineImageCost;
+    const bool cellUniverse3WindowMapPrimaryHasFutureSupport =
+        bridgeProposal != nullptr &&
+        (bridgeProposal->windowBothDaughtersSupported > 0 ||
+         bridgeProposal->windowImmediateBothDaughtersSupported > 0);
+    const float cellUniverse3WindowMapPrimaryCostMinAxisAlignment =
+        (bridgeProposal != nullptr &&
+         bridgeProposal->cellUniverse3MapOverlapCenterProposal &&
+         cellUniverse3WindowMapPrimaryHasFutureSupport)
+            ? std::max(
+                  0.0f,
+                  probConfig
+                      .celluniverse3_window_map_overlap_cost_rescue_min_axis_alignment)
+            : std::max(
+                  0.0f,
+                  probConfig
+                      .celluniverse3_window_map_primary_cost_rescue_min_axis_alignment);
+    const bool cellUniverse3WindowMapPrimaryCostRescued =
+        simulationConfig.celluniverse3_enabled &&
+        probConfig.celluniverse3_window_map_primary_cost_rescue_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->centerSnapApplied &&
+        bridgeProposal->cellUniverse3MapProposal &&
+        bridgeProposal->cellUniverse3MapPriorConfident &&
+        bridgeProposal->cellUniverse3MapUSupportD1 >=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_min_u_support &&
+        bridgeProposal->cellUniverse3MapUSupportD2 >=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_min_u_support &&
+        bridgeProposal->cellUniverse3MapRegionPenalty <=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_region_penalty &&
+        std::abs(bridgeProposal->cellUniverse3MapAxisAlignment) >=
+            cellUniverse3WindowMapPrimaryCostMinAxisAlignment &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_min_parent_balance &&
+        costDiff <= cellUniverse3WindowMapPrimaryCostLimit &&
+        imageCostDiff <=
+            static_cast<double>(
+                probConfig
+                    .celluniverse3_window_map_primary_cost_rescue_max_image_diff_abs) &&
+        overlapCostDiff <= cellUniverse3WindowMapPrimaryOverlapLimit &&
+        finalAxisLen >=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_min_axis_length_scale *
+            std::max(1.0f, srcMaxR) &&
+        maxDaughterSeedDrift <=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_drift_scale *
+            std::max(1.0f, srcMaxR) &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_gap_density;
+    const bool cellUniverse3WindowSoftPenaltyCostRescued =
+        cellUniverse3WindowPenaltyPcaCostRescued ||
+        cellUniverse3WindowUnionSoftPenaltyCostRescued ||
+        cellUniverse3WindowMapPrimaryCostRescued;
     const double cellUniverse3SignalCenterFutureCostLimit =
         std::max(
             static_cast<double>(
@@ -12321,6 +13513,12 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << (cellUniverse3WeakPcaBridgeImageCostOk ? 1 : 0)
                   << " cellUniverse3WindowSoftPenaltyCostRescue="
                   << (cellUniverse3WindowSoftPenaltyCostRescued ? 1 : 0)
+                  << " cellUniverse3WindowMapPrimaryCostRescue="
+                  << (cellUniverse3WindowMapPrimaryCostRescued ? 1 : 0)
+                  << " cellUniverse3WindowMapPrimaryCostLimit="
+                  << cellUniverse3WindowMapPrimaryCostLimit
+                  << " cellUniverse3WindowMapPrimaryOverlapLimit="
+                  << cellUniverse3WindowMapPrimaryOverlapLimit
                   << " cellUniverse3SignalCenterFutureCostRescue="
                   << (cellUniverse3SignalCenterFutureCostRescued ? 1 : 0)
                   << " cellUniverse3SignalCenterPositiveCostEvidenceOk="
@@ -12913,6 +14111,14 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << (cellUniverse3WeakPcaBridgeCostRescued ? 1 : 0)
                   << " cellUniverse3WindowSoftPenaltyCostRescue="
                   << (cellUniverse3WindowSoftPenaltyCostRescued ? 1 : 0)
+                  << " cellUniverse3WindowMapPrimaryCostRescue="
+                  << (cellUniverse3WindowMapPrimaryCostRescued ? 1 : 0)
+                  << " cellUniverse3WindowMapPrimaryCostMinAxis="
+                  << cellUniverse3WindowMapPrimaryCostMinAxisAlignment
+                  << " cellUniverse3WindowMapAxis="
+                  << (bridgeProposal != nullptr
+                          ? bridgeProposal->cellUniverse3MapAxisAlignment
+                          : 0.0f)
                   << " cellUniverse3AxisPlaceNearThresholdRescue="
                   << (cellUniverse3AxisPlaceNearThresholdCostRescued ? 1 : 0)
                   << " cellUniverse3DelayedMissingDaughterCostRescue="

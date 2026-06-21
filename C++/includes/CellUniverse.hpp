@@ -142,6 +142,9 @@ private:
        cellUniverse3WindowCentersByFrame;
    struct CellUniverse3WindowMapBox {
        cv::Point3f center{0.0f, 0.0f, 0.0f};
+       int ix = 0;
+       int iy = 0;
+       int iz = 0;
        float priorMax = 0.0f;
        float priorSum = 0.0f;
        float futureMax = 0.0f;
@@ -165,6 +168,12 @@ private:
    };
    std::unordered_map<int, CellUniverse3WindowMap> cellUniverse3WindowMapsByFrame;
    std::unordered_map<int, std::vector<cv::Mat>> cellUniverse3WindowProbabilityByFrame;
+   std::unordered_map<int, std::vector<cv::Mat>> cellUniverse3WindowBackgroundByFrame;
+   std::unordered_map<int, std::vector<cv::Mat>> cellUniverse3WindowBackgroundRegionByFrame;
+   std::unordered_map<int, std::vector<cv::Mat>> cellUniverse3WindowBackgroundSampleByFrame;
+   std::vector<cv::Mat> cellUniverse3GlobalMaxMap;
+   float cellUniverse3GlobalHotThreshold = 0.0f;
+   bool cellUniverse3GlobalMaxMapReady = false;
    struct CellUniverse3MissedSplitMemory {
        int frameIndex = -1;
        cv::Point3f parentPosition{0.0f, 0.0f, 0.0f};
@@ -186,6 +195,24 @@ private:
    double effectiveN2V2ContrastGamma() const;
    BaseConfig configForPreprocessing(int frameIndex) const;
    void invalidatePreparedFramesAfter(int frameIndex);
+   double availableSystemMemoryGb() const;
+   void pruneCellUniverse3PreparedFrameCache(int frameIndex,
+                                             const std::string &reason);
+   bool preparedFrameDiskCacheEnabled() const;
+   fs::path preparedFrameDiskCacheDir() const;
+   fs::path preparedFrameDiskCachePath(int frameIndex,
+                                       const BaseConfig &preprocessConfig) const;
+   bool loadPreparedFrameStackFromDiskCache(int frameIndex,
+                                            const BaseConfig &preprocessConfig,
+                                            PreparedFrameStack &prepared) const;
+   void savePreparedFrameStackToDiskCache(int frameIndex,
+                                          const BaseConfig &preprocessConfig,
+                                          const PreparedFrameStack &prepared) const;
+   void removePreparedFrameDiskCacheVariants(int frameIndex,
+                                             const fs::path &keepPath) const;
+   void prunePreparedFrameDiskCache(int frameIndex,
+                                    int keepFuture,
+                                    const std::string &reason) const;
    PreparedFrameStack loadPreparedFrameStack(int frameIndex);
    void cachePreparedFrameStack(int frameIndex);
    void applyCellLumenRescue(int frameIndex, const std::vector<cv::Mat> &preparedFrame);

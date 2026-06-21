@@ -1,0 +1,36 @@
+base_config: config_celluniverse3.yaml
+
+# High-resource CellUniverse3 profile for a server-class run.
+#
+# Intended target: about 200 CPU cores and 500 GB RAM, but with a scheduler
+# policy that suspends jobs once they exceed roughly 100 processes/tasks. The
+# matching run_config.ini preset sets cores=32, and run_celluniverse.sh now uses
+# that to cap OpenMP/OpenCV/BLAS-style thread pools. This should use the server
+# much harder than the workstation profile while leaving headroom below 100
+# visible tasks.
+simulation:
+  parallel_threads: 32
+  parallel_min_slices: 2
+  n2v2_preprocess:
+    device: cuda
+    inference_batch_size: 64
+
+  # With 500 GB RAM, keep the whole 15-frame future context resident and avoid
+  # aggressive pressure pruning. This should reduce repeated frame reloads and
+  # window-map rebuild churn compared with the workstation profile.
+  celluniverse3_frame_cache_prune_enabled: true
+  celluniverse3_frame_cache_keep_future: 15
+  celluniverse3_frame_cache_min_available_gb: 64.0
+  celluniverse3_frame_cache_pressure_keep_future: 15
+
+  # Cache signal maps too. This uses more disk per prepared frame, but avoids
+  # rebuilding signal maps every time a cached prepared frame is reused.
+  celluniverse3_prepared_frame_disk_cache_enabled: true
+  celluniverse3_prepared_frame_disk_cache_signal_map_enabled: true
+
+  # Moderate throughput tuning. These reduce the most expensive sampling loops
+  # while keeping the same CellUniverse3 evidence/gate structure enabled.
+  celluniverse3_window_guided_iterations_per_cell: 30
+  celluniverse3_window_map_overlap_forced_axis_scan_step_scale: 0.16
+  celluniverse3_window_map_overlap_forced_axis_scan_center_step_scale: 0.15
+  celluniverse3_window_map_overlap_forced_axis_scan_rotation_degrees: 8.0

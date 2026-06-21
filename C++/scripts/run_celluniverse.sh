@@ -917,6 +917,7 @@ usage() {
   echo "  $0 <preset_name> [--cores N] [--yaml config.yaml]" >&2
   echo "  $0 <preset_config.ini> [preset_name] [cores]" >&2
   echo "  $0 <preset_config.ini> [preset_name] [--cores N] [--yaml config.yaml]" >&2
+  echo "  INI presets may also set optional cores=N; CLI --cores wins." >&2
 }
 
 POSITIONAL=()
@@ -1033,6 +1034,7 @@ INITIAL_RAW="$(ini_get "$INI_FILE" "$PRESET" "initial_csv_file")"
 CLI_ARGS_RAW="$(ini_get "$INI_FILE" "$PRESET" "cli_args_file")"
 FIRST_FRAME="$(ini_get "$INI_FILE" "$PRESET" "first_frame")"
 LAST_FRAME="$(ini_get "$INI_FILE" "$PRESET" "last_frame")"
+PRESET_CORES_RAW="$(ini_get "$INI_FILE" "$PRESET" "cores")"
 # Optional checkpoint-resume fields (2026-04-22). Moved out of config.yaml so
 # presets can set resume per-run without editing the YAML. Missing keys →
 # resume disabled (celluniverse treats 0 / empty as no-resume).
@@ -1047,6 +1049,15 @@ RESUME_SRC_RAW="$(ini_get "$INI_FILE" "$PRESET" "resume_source_dir")"
 [ -n "$INITIAL_RAW" ] || { err "[FATAL] missing key: initial_csv_file"; exit 1; }
 [ -n "$FIRST_FRAME" ] || { err "[FATAL] missing key: first_frame"; exit 1; }
 [ -n "$LAST_FRAME" ] || { err "[FATAL] missing key: last_frame"; exit 1; }
+
+if [ -z "$CORES_ARG" ] && [ -n "$PRESET_CORES_RAW" ]; then
+  CORES_ARG="$PRESET_CORES_RAW"
+fi
+if [ -n "$CORES_ARG" ] && ! validate_core_count "$CORES_ARG"; then
+  err "[FATAL] invalid core count: $CORES_ARG"
+  usage
+  exit 1
+fi
 
 BUILD_DIR="$(resolve_path "$BUILD_DIR_RAW" "$INI_DIR")"
 INPUT_PATH="$(resolve_path "$INPUT_PATH_RAW" "$INI_DIR")"
@@ -1129,6 +1140,11 @@ echo "CPU cores: ${CORES_ARG:-YAML default}" >> "$DEBUG_LOG"
 echo "==========================================" >> "$DEBUG_LOG"
 if [ -n "$CORES_ARG" ]; then
   export CELLUNIVERSE_THREADS="$CORES_ARG"
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CORES_ARG}"
+  export OPENCV_FOR_THREADS_NUM="${OPENCV_FOR_THREADS_NUM:-$CORES_ARG}"
+  export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CORES_ARG}"
+  export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CORES_ARG}"
+  export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$CORES_ARG}"
 else
   unset CELLUNIVERSE_THREADS
 fi

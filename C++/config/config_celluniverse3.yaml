@@ -33,14 +33,14 @@ simulation:
   # after map construction unless they are still near enough for immediate
   # future validation.
   celluniverse3_frame_cache_prune_enabled: true
-  celluniverse3_frame_cache_keep_future: 15
-  celluniverse3_frame_cache_min_available_gb: 8.0
-  celluniverse3_frame_cache_pressure_keep_future: 6
+  celluniverse3_frame_cache_keep_future: 12
+  celluniverse3_frame_cache_min_available_gb: 6.0
+  celluniverse3_frame_cache_pressure_keep_future: 4
   # Exact disk-backed prepared-frame cache for CellUniverse3 only. This lets
   # pruned frames reload from the run output folder instead of re-running
   # preprocessing and signal-map construction.
   celluniverse3_prepared_frame_disk_cache_enabled: true
-  celluniverse3_prepared_frame_disk_cache_signal_map_enabled: false
+  celluniverse3_prepared_frame_disk_cache_signal_map_enabled: true
   # Movement guidance from the same future local Wmax/Wsum maps:
   # allowed_region = dilate(Wmax > threshold), probability follows
   # (epsilon + normalized(Wsum)) ^ gamma.
@@ -137,6 +137,10 @@ simulation:
   celluniverse3_edge_axis_fit_melt_released_brightness_enabled: true
   celluniverse3_edge_axis_fit_melt_min_shell_fraction: 0.08
   celluniverse3_edge_axis_fit_melt_max_background_delta: 0.02
+  parallel_threads: 8
+  parallel_min_slices: 4
+  n2v2_preprocess:
+    inference_batch_size: 24
 
 cell:
   # CellUniverse3 relies more on deterministic PCA/window placement than on

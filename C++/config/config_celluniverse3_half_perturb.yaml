@@ -518,7 +518,7 @@ prob:
   # CellUniverse3-only safety net for the opposite bad PCA failure mode:
   # a parent suddenly becomes pancake-flat (large mid/short, ordinary long/mid).
   # Treat it as a failed probe after split retries, and restore the pre-PCA shape.
-  celluniverse3_post_pca_flat_restore_enabled: true
+  celluniverse3_post_pca_flat_restore_enabled: false
   celluniverse3_post_pca_flat_restore_min_shape: 1.60
   celluniverse3_post_pca_flat_restore_min_mid_short_ratio: 1.35
   celluniverse3_post_pca_flat_restore_max_long_mid_ratio: 1.45

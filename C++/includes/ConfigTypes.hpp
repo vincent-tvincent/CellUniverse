@@ -2121,6 +2121,12 @@ public:
     bool celluniverse3_post_pca_rod_salvage_prior_evidence_enabled = false;
     float celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape = 1.75f;
     float celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio = 1.50f;
+    bool celluniverse3_post_pca_flat_restore_enabled = false;
+    float celluniverse3_post_pca_flat_restore_min_shape = 1.60f;
+    float celluniverse3_post_pca_flat_restore_min_mid_short_ratio = 1.35f;
+    float celluniverse3_post_pca_flat_restore_max_long_mid_ratio = 1.45f;
+    float celluniverse3_post_pca_flat_restore_min_elongation_jump = 1.20f;
+    int celluniverse3_post_pca_flat_restore_min_age_frames = 3;
     float pca_bridge_low_long_mid_flat_rescue_min_mid_short_ratio = 1.75f;
     float pca_bridge_low_long_mid_flat_rescue_min_elongation = 1.80f;
     float pca_bridge_collapsed_post_pca_min_elongation_jump = 1.35f;
@@ -3559,6 +3565,12 @@ public:
         if (node["celluniverse3_post_pca_rod_salvage_prior_evidence_enabled"]) celluniverse3_post_pca_rod_salvage_prior_evidence_enabled = node["celluniverse3_post_pca_rod_salvage_prior_evidence_enabled"].as<bool>();
         if (node["celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape"]) celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape = node["celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape"].as<float>();
         if (node["celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio"]) celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio = node["celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio"].as<float>();
+        if (node["celluniverse3_post_pca_flat_restore_enabled"]) celluniverse3_post_pca_flat_restore_enabled = node["celluniverse3_post_pca_flat_restore_enabled"].as<bool>();
+        if (node["celluniverse3_post_pca_flat_restore_min_shape"]) celluniverse3_post_pca_flat_restore_min_shape = node["celluniverse3_post_pca_flat_restore_min_shape"].as<float>();
+        if (node["celluniverse3_post_pca_flat_restore_min_mid_short_ratio"]) celluniverse3_post_pca_flat_restore_min_mid_short_ratio = node["celluniverse3_post_pca_flat_restore_min_mid_short_ratio"].as<float>();
+        if (node["celluniverse3_post_pca_flat_restore_max_long_mid_ratio"]) celluniverse3_post_pca_flat_restore_max_long_mid_ratio = node["celluniverse3_post_pca_flat_restore_max_long_mid_ratio"].as<float>();
+        if (node["celluniverse3_post_pca_flat_restore_min_elongation_jump"]) celluniverse3_post_pca_flat_restore_min_elongation_jump = node["celluniverse3_post_pca_flat_restore_min_elongation_jump"].as<float>();
+        if (node["celluniverse3_post_pca_flat_restore_min_age_frames"]) celluniverse3_post_pca_flat_restore_min_age_frames = node["celluniverse3_post_pca_flat_restore_min_age_frames"].as<int>();
         if (node["split_future_midpoint_near_miss_min_brightness"]) split_future_midpoint_near_miss_min_brightness = node["split_future_midpoint_near_miss_min_brightness"].as<float>();
         if (node["split_future_midpoint_near_miss_limit_scale"]) split_future_midpoint_near_miss_limit_scale = node["split_future_midpoint_near_miss_limit_scale"].as<float>();
         if (node["split_future_pca_bridge_near_sep_min_brightness"]) split_future_pca_bridge_near_sep_min_brightness = node["split_future_pca_bridge_near_sep_min_brightness"].as<float>();
@@ -4902,6 +4914,12 @@ public:
         std::cout << "celluniverse3_post_pca_rod_salvage_prior_evidence_enabled: " << celluniverse3_post_pca_rod_salvage_prior_evidence_enabled << '\n';
         std::cout << "celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape: " << celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape << '\n';
         std::cout << "celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio: " << celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio << '\n';
+        std::cout << "celluniverse3_post_pca_flat_restore_enabled: " << celluniverse3_post_pca_flat_restore_enabled << '\n';
+        std::cout << "celluniverse3_post_pca_flat_restore_min_shape: " << celluniverse3_post_pca_flat_restore_min_shape << '\n';
+        std::cout << "celluniverse3_post_pca_flat_restore_min_mid_short_ratio: " << celluniverse3_post_pca_flat_restore_min_mid_short_ratio << '\n';
+        std::cout << "celluniverse3_post_pca_flat_restore_max_long_mid_ratio: " << celluniverse3_post_pca_flat_restore_max_long_mid_ratio << '\n';
+        std::cout << "celluniverse3_post_pca_flat_restore_min_elongation_jump: " << celluniverse3_post_pca_flat_restore_min_elongation_jump << '\n';
+        std::cout << "celluniverse3_post_pca_flat_restore_min_age_frames: " << celluniverse3_post_pca_flat_restore_min_age_frames << '\n';
     }
 };
 

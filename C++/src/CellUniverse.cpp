@@ -531,20 +531,27 @@ static bool forceSplitSevereRodByName(Frame &frame,
     const double costDiff = bestScore - baselineScore;
     const double achievedImprovementFraction =
         baselineScore > 0.0 ? std::max(0.0, -costDiff) / baselineScore : 0.0;
+    const double positiveCostMissFraction =
+        baselineScore > 0.0 ? std::max(0.0, costDiff) / baselineScore : 0.0;
     const double brightNearMissMinFraction = static_cast<double>(
         std::max(0.0f,
                  prob.post_pca_force_rod_split_bright_near_miss_min_fraction));
     const double brightNearMissMinSeed = static_cast<double>(
         std::max(0.0f,
                  prob.post_pca_force_rod_split_bright_near_miss_min_seed_brightness));
+    const bool brightNearMissSeedSupported =
+        std::min(bestD0Bright, bestD1Bright) >= brightNearMissMinSeed;
     const bool brightNearMissRescue =
         prob.post_pca_force_rod_split_bright_near_miss_rescue_enabled &&
-        costDiff <= maxPositiveCost &&
         brightNearMissMinFraction > 0.0 &&
-        achievedImprovementFraction >= brightNearMissMinFraction &&
-        std::min(bestD0Bright, bestD1Bright) >= brightNearMissMinSeed;
+        brightNearMissSeedSupported &&
+        ((costDiff <= maxPositiveCost &&
+          achievedImprovementFraction >= brightNearMissMinFraction) ||
+         (costDiff > maxPositiveCost &&
+          positiveCostMissFraction <= brightNearMissMinFraction));
     const bool lacksAnyImprovement =
-        requireCostImprovement && costDiff > maxPositiveCost;
+        requireCostImprovement && costDiff > maxPositiveCost &&
+        !brightNearMissRescue;
     const bool lacksStrongImprovement =
         requireCostImprovement && minCostImprovement > 0.0 &&
         (-costDiff) < minCostImprovement && !brightNearMissRescue;
@@ -566,6 +573,8 @@ static bool forceSplitSevereRodByName(Frame &frame,
                   << " minCostImprovement=" << minCostImprovement
                   << " achievedImprovementFraction="
                   << achievedImprovementFraction
+                  << " positiveCostMissFraction="
+                  << positiveCostMissFraction
                   << " brightNearMissRescue=" << brightNearMissRescue
                   << " brightNearMissMinFraction="
                   << brightNearMissMinFraction
@@ -605,6 +614,8 @@ static bool forceSplitSevereRodByName(Frame &frame,
               << minCostImprovementFraction
               << " achievedImprovementFraction="
               << achievedImprovementFraction
+              << " positiveCostMissFraction="
+              << positiveCostMissFraction
               << " brightNearMissRescue=" << brightNearMissRescue
               << " action=replace_parent_with_daughters"
               << std::endl;
@@ -22588,6 +22599,157 @@ void CellUniverse::optimize(int frameIndex)
                   << " minShape=" << minForceShape
                   << " maxPerFrame=" << maxForced
                   << std::endl;
+    }
+
+    if (cellUniverse3Mode &&
+        config.prob.celluniverse3_post_pca_flat_restore_enabled &&
+        config.prob.celluniverse3_post_pca_rod_salvage_restore_prefit_enabled) {
+        auto sortedRadiiDesc = [](const Ellipsoid &cell) {
+            std::array<float, 3> radii{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            std::sort(radii.begin(), radii.end(), std::greater<float>());
+            return radii;
+        };
+        auto ratioOrOne = [](float high, float low) {
+            return low > 1e-6f ? high / low : 1.0f;
+        };
+        const float minFlatShape = std::max(
+            1.0f, config.prob.celluniverse3_post_pca_flat_restore_min_shape);
+        const float minMidShort = std::max(
+            1.0f,
+            config.prob
+                .celluniverse3_post_pca_flat_restore_min_mid_short_ratio);
+        const float maxLongMid = std::max(
+            1.0f,
+            config.prob
+                .celluniverse3_post_pca_flat_restore_max_long_mid_ratio);
+        const float minElongJump = std::max(
+            1.0f,
+            config.prob
+                .celluniverse3_post_pca_flat_restore_min_elongation_jump);
+        const int minAgeFrames = std::max(
+            0,
+            config.prob
+                .celluniverse3_post_pca_flat_restore_min_age_frames);
+        int flatRestored = 0;
+        for (auto &cell : frame.cells) {
+            if (cell.isTrash()) {
+                continue;
+            }
+            const std::string cellName = cell.getName();
+            auto preIt = preDangerousFitCellsByName.find(cellName);
+            auto snapIt = previousSnapshots.find(cellName);
+            const bool hasPrefitCell =
+                preIt != preDangerousFitCellsByName.end();
+            const bool hasPreviousSnapshot =
+                snapIt != previousSnapshots.end() && snapIt->second.valid;
+            if (!hasPrefitCell && !hasPreviousSnapshot) {
+                continue;
+            }
+            const auto currentR = sortedRadiiDesc(cell);
+            const std::array<float, 3> referenceR =
+                hasPreviousSnapshot
+                    ? [&]() {
+                          std::array<float, 3> radii{
+                              snapIt->second.aRadius,
+                              snapIt->second.bRadius,
+                              snapIt->second.cRadius};
+                          std::sort(radii.begin(), radii.end(),
+                                    std::greater<float>());
+                          return radii;
+                      }()
+                    : sortedRadiiDesc(preIt->second);
+            const float currentLongMid =
+                ratioOrOne(currentR[0], currentR[1]);
+            const float currentMidShort =
+                ratioOrOne(currentR[1], currentR[2]);
+            const float currentLongShort =
+                ratioOrOne(currentR[0], currentR[2]);
+            const float referenceLongShort =
+                ratioOrOne(referenceR[0], referenceR[2]);
+            const float currentElong =
+                std::max(1.0f, cell.shapeElongation());
+            const float referenceElong =
+                hasPreviousSnapshot
+                    ? std::max(1.0f, snapIt->second.shapeElongation)
+                    : std::max(1.0f, preIt->second.shapeElongation());
+            const float elongJump = currentElong / referenceElong;
+            const bool flatCollapse =
+                currentElong >= minFlatShape &&
+                currentMidShort >= minMidShort &&
+                currentLongMid <= maxLongMid &&
+                elongJump >= minElongJump;
+            if (!flatCollapse) {
+                continue;
+            }
+            int ageFrames = minAgeFrames;
+            auto ageIt = cellFirstSeenFrame.find(cellName);
+            if (ageIt != cellFirstSeenFrame.end()) {
+                ageFrames = displayFrame - ageIt->second;
+            }
+            if (ageFrames >= 0 && ageFrames < minAgeFrames) {
+                std::cout << "[Post PCA Flat Restore Skip] frame "
+                          << displayFrame
+                          << " cell=" << cellName
+                          << " reason=recent_daughter_age"
+                          << " age=" << ageFrames
+                          << " minAge=" << minAgeFrames
+                          << " currentElong=" << currentElong
+                          << " referenceElong=" << referenceElong
+                          << " currentLongMid=" << currentLongMid
+                          << " currentMidShort=" << currentMidShort
+                          << " currentLongShort=" << currentLongShort
+                          << " referenceLongShort=" << referenceLongShort
+                          << " elongJump=" << elongJump
+                          << std::endl;
+                continue;
+            }
+            if (hasPreviousSnapshot) {
+                const auto &snap = snapIt->second;
+                cell.setPosition(snap.position.x,
+                                 snap.position.y,
+                                 snap.position.z);
+                cell.setRadii(snap.aRadius, snap.bRadius, snap.cRadius);
+                cell.setRotation(snap.thetaX, snap.thetaY, snap.thetaZ);
+                cell.setBrightness(snap.brightness);
+            } else {
+                cell = preIt->second;
+            }
+            ++flatRestored;
+            std::cout << "[Post PCA Flat Restore] frame " << displayFrame
+                      << " cell=" << cellName
+                      << " reason=flat_post_pca_collapse"
+                      << " currentElong=" << currentElong
+                      << " reference="
+                      << (hasPreviousSnapshot ? "previous_snapshot"
+                                              : "prefit_cell")
+                      << " referenceElong=" << referenceElong
+                      << " currentLongMid=" << currentLongMid
+                      << " currentMidShort=" << currentMidShort
+                      << " currentLongShort=" << currentLongShort
+                      << " referenceLongShort=" << referenceLongShort
+                      << " elongJump=" << elongJump
+                      << " minShape=" << minFlatShape
+                      << " minMidShort=" << minMidShort
+                      << " maxLongMid=" << maxLongMid
+                      << " minElongJump=" << minElongJump
+                      << std::endl;
+        }
+        if (flatRestored > 0) {
+            frame.regenerateSynthFrame();
+            if (voronoiMapNeeded) {
+                frame.rebuildVoronoiMap();
+            }
+            std::cout << "[Post PCA Flat Restore Summary] frame "
+                      << displayFrame
+                      << " restored=" << flatRestored
+                      << " minShape=" << minFlatShape
+                      << " minMidShort=" << minMidShort
+                      << " maxLongMid=" << maxLongMid
+                      << " minElongJump=" << minElongJump
+                      << " minAgeFrames=" << minAgeFrames
+                      << std::endl;
+        }
     }
 
     if (config.cell && config.cell->pcaShapeRatioBoundEnabled) {

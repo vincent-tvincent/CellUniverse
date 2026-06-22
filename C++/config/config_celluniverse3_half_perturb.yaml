@@ -53,6 +53,9 @@ simulation:
   celluniverse3_pre_pca_placement_probe_crowded_move_cap_enabled: true
   celluniverse3_pre_pca_placement_probe_crowded_trigger_units: 1.20
   celluniverse3_pre_pca_placement_probe_crowded_max_move_units: 0.75
+  # Recent daughters can move more than one body length while separating; keep
+  # the sibling halfspace gate, but let the dim daughter reach the paired center.
+  signal_center_rescue_split_daughter_max_distance_body_units: 2.70
   celluniverse3_window_map_split_prior_enabled: true
   celluniverse3_window_map_proposal_enabled: true
   celluniverse3_window_map_direct_od_proposal_enabled: false
@@ -275,11 +278,11 @@ prob:
   celluniverse3_signal_center_future_position_lock_enabled: true
   celluniverse3_signal_center_future_position_lock_min_future_both: 2
   celluniverse3_signal_center_future_position_lock_max_missing: 0
-  celluniverse3_signal_center_future_position_lock_min_future_brightness: 0.18
+  celluniverse3_signal_center_future_position_lock_min_future_brightness: 0.03
   celluniverse3_signal_center_future_position_lock_min_parent_shape: 1.45
-  celluniverse3_signal_center_future_position_lock_min_parent_balance: 0.40
+  celluniverse3_signal_center_future_position_lock_min_parent_balance: 0.25
   celluniverse3_signal_center_future_position_lock_max_snap_distance: 3.0
-  celluniverse3_signal_center_future_position_lock_min_sep_fraction: 1.0
+  celluniverse3_signal_center_future_position_lock_min_sep_fraction: 0.55
   celluniverse3_signal_center_future_position_lock_min_sep_ratio: 1.0
   celluniverse3_signal_center_future_position_lock_min_axis_alignment: 0.60
   celluniverse3_clean_signal_candidate_spacing_gate_enabled: true
@@ -311,8 +314,8 @@ prob:
   celluniverse3_post_pca_low_shape_bridge_gate_max_snapshot_shape: 1.55
   celluniverse3_post_pca_low_shape_bridge_gate_min_future_both: 2
   celluniverse3_post_pca_low_shape_bridge_gate_max_missing: 0
-  celluniverse3_post_pca_low_shape_bridge_gate_min_future_brightness: 0.12
-  celluniverse3_post_pca_low_shape_bridge_gate_min_parent_balance: 0.50
+  celluniverse3_post_pca_low_shape_bridge_gate_min_future_brightness: 0.055
+  celluniverse3_post_pca_low_shape_bridge_gate_min_parent_balance: 0.24
   # Rescue severe rods created by the final PCA pass when the split centers
   # snap cleanly to current-frame signal and stay inside the CellUniverse3
   # tunnel. This keeps the normal low-shape timing gate strict while allowing
@@ -335,9 +338,9 @@ prob:
   celluniverse3_signal_center_future_cost_rescue_max_cost_fraction: 0.09
   celluniverse3_signal_center_future_cost_rescue_max_image_diff_abs: 22000
   celluniverse3_signal_center_future_cost_rescue_max_overlap_diff_abs: 90000
-  celluniverse3_signal_center_future_cost_rescue_min_axis_length_scale: 0.75
+  celluniverse3_signal_center_future_cost_rescue_min_axis_length_scale: 0.50
   celluniverse3_signal_center_future_cost_rescue_max_drift_scale: 0.28
-  celluniverse3_signal_center_future_cost_rescue_max_valley_from_bright: 0.90
+  celluniverse3_signal_center_future_cost_rescue_max_valley_from_bright: 1.05
   celluniverse3_signal_center_future_cost_rescue_max_gap_density: 0.45
   celluniverse3_signal_center_future_cost_rescue_positive_cost_min_parent_shape: 2.15
   celluniverse3_signal_center_future_cost_rescue_positive_cost_max_valley_from_bright: 0.90
@@ -379,14 +382,14 @@ prob:
   celluniverse3_crowded_signal_center_asymmetric_future_rescue_max_parent_balance: 0.35
   celluniverse3_crowded_signal_center_asymmetric_future_rescue_min_axis_alignment: 0.90
   celluniverse3_pca_bridge_near_separation_rescue_enabled: true
-  celluniverse3_pca_bridge_near_separation_fraction: 0.99
+  celluniverse3_pca_bridge_near_separation_fraction: 0.48
   celluniverse3_pca_bridge_near_separation_min_future_both: 2
   celluniverse3_pca_bridge_near_separation_max_missing: 0
-  celluniverse3_pca_bridge_near_separation_min_brightness: 0.15
-  celluniverse3_pca_bridge_near_separation_min_parent_balance: 0.60
+  celluniverse3_pca_bridge_near_separation_min_brightness: 0.03
+  celluniverse3_pca_bridge_near_separation_min_parent_balance: 0.25
   celluniverse3_pca_bridge_near_separation_max_snap_radius_scale: 1.30
-  split_dense_flat_future_min_parent_balance: 0.40
-  split_dense_flat_future_min_brightness: 0.15
+  split_dense_flat_future_min_parent_balance: 0.24
+  split_dense_flat_future_min_brightness: 0.055
   split_dense_flat_future_max_gap_density: 0.26
   pca_bridge_low_balance_future_min_brightness: 0.27
   pca_bridge_low_balance_future_strong_min_shape: 1.90
@@ -394,13 +397,13 @@ prob:
   celluniverse3_weak_pca_bridge_cost_rescue_min_future_both: 2
   celluniverse3_weak_pca_bridge_cost_rescue_max_missing: 0
   celluniverse3_weak_pca_bridge_cost_rescue_min_parent_shape: 1.70
-  celluniverse3_weak_pca_bridge_cost_rescue_min_parent_balance: 0.60
-  celluniverse3_weak_pca_bridge_cost_rescue_min_future_brightness: 0.15
+  celluniverse3_weak_pca_bridge_cost_rescue_min_parent_balance: 0.24
+  celluniverse3_weak_pca_bridge_cost_rescue_min_future_brightness: 0.055
   celluniverse3_weak_pca_bridge_cost_rescue_max_snap_radius_scale: 1.30
   celluniverse3_weak_pca_bridge_cost_rescue_max_cost_abs: 26000
   celluniverse3_weak_pca_bridge_cost_rescue_max_cost_fraction: 0.16
-  celluniverse3_weak_pca_bridge_cost_rescue_max_image_diff_abs: 0
-  celluniverse3_weak_pca_bridge_cost_rescue_max_valley_from_bright: 0.60
+  celluniverse3_weak_pca_bridge_cost_rescue_max_image_diff_abs: 30000
+  celluniverse3_weak_pca_bridge_cost_rescue_max_valley_from_bright: 1.05
   celluniverse3_weak_pca_bridge_cost_rescue_max_gap_density: 0.25
   celluniverse3_axis_place_near_threshold_cost_rescue_enabled: true
   celluniverse3_axis_place_near_threshold_cost_rescue_min_future_both: 2
@@ -492,7 +495,9 @@ prob:
   post_pca_force_rod_split_max_positive_cost: 0.0
   post_pca_force_rod_split_min_cost_improvement_fraction: 0.001
   post_pca_force_rod_split_daughter_cooldown_frames: 0
-  post_pca_force_rod_split_bright_near_miss_rescue_enabled: false
+  post_pca_force_rod_split_bright_near_miss_rescue_enabled: true
+  post_pca_force_rod_split_bright_near_miss_min_fraction: 0.35
+  post_pca_force_rod_split_bright_near_miss_min_seed_brightness: 0.45
   post_pca_force_rod_split_asymmetric_candidates_enabled: true
   post_pca_force_rod_split_asymmetric_tip_scale: 1.0
   post_pca_force_rod_split_cluster_suppression_enabled: true
@@ -509,4 +514,13 @@ prob:
   # evidence for the same parent, so normal compact cells stay protected.
   celluniverse3_post_pca_rod_salvage_prior_evidence_enabled: true
   celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape: 1.70
-  celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio: 1.40
+  celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio: 1.35
+  # CellUniverse3-only safety net for the opposite bad PCA failure mode:
+  # a parent suddenly becomes pancake-flat (large mid/short, ordinary long/mid).
+  # Treat it as a failed probe after split retries, and restore the pre-PCA shape.
+  celluniverse3_post_pca_flat_restore_enabled: true
+  celluniverse3_post_pca_flat_restore_min_shape: 1.60
+  celluniverse3_post_pca_flat_restore_min_mid_short_ratio: 1.35
+  celluniverse3_post_pca_flat_restore_max_long_mid_ratio: 1.45
+  celluniverse3_post_pca_flat_restore_min_elongation_jump: 1.20
+  celluniverse3_post_pca_flat_restore_min_age_frames: 3

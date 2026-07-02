@@ -16,6 +16,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <filesystem>
 #include <thread>
 #ifdef _OPENMP
@@ -55,6 +56,29 @@ void loadConfig(const std::string &path, BaseConfig &config)
 {
     YAML::Node node = CellUniverseConfig::loadConfigYamlNode(path);
     config.explodeConfig(node);
+}
+
+bool parseRuntimeSeed(const std::string &text, std::uint32_t &seed)
+{
+    if (text.empty()) {
+        return false;
+    }
+    try
+    {
+        size_t parsed = 0;
+        const unsigned long long value = std::stoull(text, &parsed, 10);
+        if (parsed != text.size() ||
+            value > static_cast<unsigned long long>(std::numeric_limits<std::uint32_t>::max()))
+        {
+            return false;
+        }
+        seed = static_cast<std::uint32_t>(value);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
 }
 
 void applyRuntimeOverrides(BaseConfig &config)
@@ -97,6 +121,42 @@ void applyRuntimeOverrides(BaseConfig &config)
 #endif
 
     const char *seedEnv = std::getenv("CELLUNIVERSE_SEED");
+    const std::string seedEnvText =
+        (seedEnv != nullptr) ? std::string(seedEnv) : std::string();
+    const std::string configSeedText = config.simulation.random_seed;
+    std::uint32_t runtimeSeed = 0;
+    std::string seedSource;
+    bool deterministicSeed = false;
+
+    if (!seedEnvText.empty()) {
+        if (parseRuntimeSeed(seedEnvText, runtimeSeed)) {
+            seedSource = "CELLUNIVERSE_SEED";
+            deterministicSeed = true;
+        } else {
+            std::cerr << "[WARN] Ignoring invalid CELLUNIVERSE_SEED="
+                      << seedEnvText << "; falling back to random_device." << '\n';
+        }
+    }
+
+    if (seedSource.empty() && !configSeedText.empty() &&
+        configSeedText != "auto" && configSeedText != "random_device")
+    {
+        if (parseRuntimeSeed(configSeedText, runtimeSeed)) {
+            seedSource = "config.random_seed";
+            deterministicSeed = true;
+        } else {
+            std::cerr << "[WARN] Ignoring invalid config random_seed="
+                      << configSeedText << "; falling back to random_device." << '\n';
+        }
+    }
+
+    if (seedSource.empty()) {
+        runtimeSeed = static_cast<std::uint32_t>(std::random_device{}());
+        seedSource = "random_device";
+    }
+    configureCellUniverseRandomSeed(runtimeSeed, seedSource);
+    config.simulation.random_seed = std::to_string(runtimeSeed);
+
     std::cout << "[Runtime Parallelism] mode="
               << (config.simulation.parallel_threads > 1 ? "parallel_z_slices" : "single_thread")
               << " threads=" << config.simulation.parallel_threads
@@ -105,10 +165,16 @@ void applyRuntimeOverrides(BaseConfig &config)
               << " parallel_min_slices=" << config.simulation.parallel_min_slices
               << " opencv_threads=" << cv::getNumThreads()
               << std::endl;
-    if (seedEnv != nullptr && std::string(seedEnv).size() > 0)
-    {
-        std::cout << "[Runtime Random] CELLUNIVERSE_SEED=" << seedEnv << std::endl;
-    }
+    std::cout << "[Runtime Random] seed=" << runtimeSeed
+              << " source=" << seedSource
+              << " deterministic=" << (deterministicSeed ? 1 : 0)
+              << " generator=std::mt19937"
+              << " thread_local=1"
+              << " env_CELLUNIVERSE_SEED="
+              << (seedEnvText.empty() ? "<unset>" : seedEnvText)
+              << " config_random_seed="
+              << (configSeedText.empty() ? "<unset>" : configSeedText)
+              << std::endl;
     std::cout << "[Efficiency Metric] primary=seconds_per_frame"
               << " normalized=seconds_per_cell_iteration"
               << " realtime=iterations_per_second"

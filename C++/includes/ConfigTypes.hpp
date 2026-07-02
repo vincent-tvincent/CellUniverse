@@ -8,24 +8,48 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <filesystem>
 #include "yaml-cpp/yaml.h"
 #include <iostream>
 
+inline std::uint32_t &cellUniverseRandomSeedValue()
+{
+    static std::uint32_t seed = 0;
+    return seed;
+}
+
+inline bool &cellUniverseRandomSeedConfigured()
+{
+    static bool configured = false;
+    return configured;
+}
+
+inline std::string &cellUniverseRandomSeedSource()
+{
+    static std::string source = "unconfigured";
+    return source;
+}
+
+inline void configureCellUniverseRandomSeed(std::uint32_t seed, const std::string &source)
+{
+    cellUniverseRandomSeedValue() = seed;
+    cellUniverseRandomSeedConfigured() = true;
+    cellUniverseRandomSeedSource() = source;
+}
+
 inline std::mt19937 &cellUniverseRandomGenerator()
 {
     static thread_local std::mt19937 gen([] {
-        const char *seedEnv = std::getenv("CELLUNIVERSE_SEED");
-        if (seedEnv != nullptr && seedEnv[0] != '\0') {
-            char *end = nullptr;
-            const unsigned long seed = std::strtoul(seedEnv, &end, 10);
-            if (end != seedEnv && *end == '\0') {
-                return std::mt19937(static_cast<std::mt19937::result_type>(seed));
-            }
+        if (!cellUniverseRandomSeedConfigured()) {
+            configureCellUniverseRandomSeed(
+                static_cast<std::uint32_t>(std::random_device{}()),
+                "random_device_lazy");
         }
-        return std::mt19937(std::random_device{}());
+        return std::mt19937(static_cast<std::mt19937::result_type>(
+            cellUniverseRandomSeedValue()));
     }());
     return gen;
 }
@@ -173,6 +197,7 @@ public:
     int iterations_per_cell;
     int signal_guided_iterations_per_cell = -1;
     int random_iterations_per_cell = -1;
+    std::string random_seed = "";
     float z_scaling;
     float blur_sigma;
     int z_slices;
@@ -399,6 +424,7 @@ public:
         iterations_per_cell = node["iterations_per_cell"].as<int>();
         if (node["signal_guided_iterations_per_cell"]) signal_guided_iterations_per_cell = node["signal_guided_iterations_per_cell"].as<int>();
         if (node["random_iterations_per_cell"]) random_iterations_per_cell = node["random_iterations_per_cell"].as<int>();
+        if (node["random_seed"]) random_seed = node["random_seed"].as<std::string>();
         z_scaling = node["z_scaling"].as<float>();
         blur_sigma = node["blur_sigma"].as<float>();
         if (node["preprocess_mode"]) preprocess_mode = node["preprocess_mode"].as<std::string>();
@@ -545,6 +571,7 @@ public:
         std::cout << "iterations_per_cell: " << iterations_per_cell << '\n';
         std::cout << "signal_guided_iterations_per_cell: " << signal_guided_iterations_per_cell << '\n';
         std::cout << "random_iterations_per_cell: " << random_iterations_per_cell << '\n';
+        std::cout << "random_seed: " << (random_seed.empty() ? "<auto_random_device>" : random_seed) << '\n';
         std::cout << "z_scaling: " << z_scaling << '\n';
         std::cout << "blur_sigma: " << blur_sigma << '\n';
         std::cout << "preprocess_mode: " << preprocess_mode << '\n';

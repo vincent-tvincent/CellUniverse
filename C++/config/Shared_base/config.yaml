@@ -139,6 +139,7 @@ simulation:
   iterations_per_cell: 250
   signal_guided_iterations_per_cell: 50
   random_iterations_per_cell: 50
+  random_seed: 20260702
   z_scaling: 7
   blur_sigma: 1.1 # 0.0
 

@@ -1143,3 +1143,34 @@ A clean build with `-Wall -Wunused-function` flagged compiler-verified file-loca
 | `chooseNearestDivisorSize` + local `struct BrightBox` | `src/ImageHandler.cpp` (cascade — only used by the localizer; note the `BrightBox` in `CellUniverse.cpp` is a *different, active* struct) |
 
 Final `-Wall -Wunused-function` build: **zero unused-function warnings**. Normal build 100%; smoke run confirms the pipeline (Voronoi → PCA-bridge, fusion active) runs unchanged.
+
+---
+
+## 2026-07-02: Phase 0a — offline windowed-ILP validation prototype (Change 17)
+
+**Status: EXPLORATORY — no tracker/C++ change. Go/no-go experiment for Workstream L (windowed ILP), per `docs/plans/2026-07-02-shape-and-ilp-buildplan.md`.**
+
+Offline, Python-only. Validates whether a small sliding-window ILP that selects the globally consistent set of cell hypotheses can fix division-timing / merge errors the per-frame greedy commit gets wrong — *before* committing to the large C++ build.
+
+### New files
+
+- **`scripts/ilp_proto/windowed_ilp_proto.py`** (new, ~460 LOC) — self-contained prototype, four layers:
+  1. **Geometry** — Python ellipsoid voxel membership matching the C++ convention exactly: `R = Rz·Ry·Rx`, `local = Rᵀ·(world−center)`, inside iff `(lx/a)²+(ly/b)²+(lz/c)²≤1`, with `a=majorRadius, b=bRadius, c=minorRadius` (mirrors `Ellipsoid::isPointInsideEllipsoid` / `generateInverseRotationMatrix`, `src/Ellipsoid.cpp:632,~/98`). IoU links + an MDL-style image score `Σ(intensity−bg)`.
+  2. **`solve_window`** — the reusable Ultrack-style selection ILP (PuLP + bundled CBC): nodes `y_p` (select), edges `x_pq` (temporal link), events appear/disappear/divide; objective = detection + link weights − event penalties; constraints = hypothesis disjointness (`Σ y ≤ 1` per conflict) + flow conservation. **Written to mirror the eventual C++ port (Phase L2).**
+  3. **`--selftest`** — synthetic flicker scenario; proves the ILP holds a division that per-frame greedy un-divides.
+  4. **Real-data driver** (`--analyze`, `--case`) over the committed run `outputs/Yiding_1~171_VISUAL_TIF/`, scored against the tracker's own `real/N_real.tif` volumes (never against GT masks — that would be circular). Founder↔GT correspondence baked in (`cell_0↔GT256, cell_1↔GT1, cell_2↔GT511, cell_3↔GT640`), with `readable()` labels replacing raw `Cell type 1_N`.
+- **`scripts/ilp_proto/RESULTS.md`** (new) — findings + verdict.
+
+### Tooling
+
+- `.venv-eval/bin/pip install pulp` → **pulp 3.3.2**; bundled CBC verified solving (`PULP_CBC_CMD.available()` → true, tiny ILP → Optimal). CPU, license-free. No GPU / no learned model added.
+
+### Findings (see `RESULTS.md`)
+
+- **ILP core correct** — `--selftest` PASS (removes a flicker greedy falls for).
+- **On real data, W=1–3 never flipped a known greedy timing error toward GT.** Every real over-split case was either image-supported (f9/GT640: fluorescence bimodal ~2 frames before GT marks the split — annotation-convention gap, not a greedy error), a late split not reconstructible offline (f9/GT511, f4/f7/f18 — the 2-cell hypothesis at the early frame isn't in committed output), or genuinely ambiguous (f34, ~1% image margin) where the window agreed with the per-frame call.
+- **Verdict:** not a green light for L2 on its own, not a red light either — the offline harness is structurally blind to the ILP's real payoff (competing hypotheses greedy *discarded*), which don't exist until Workstream **S2 (metaball)** emits them. **Recommendation:** build S first (S1 superquadric → S2 metaball), then re-run this harness fed by S2's emitted hypotheses. Matches the plan's dependency order (S2 precedes L1).
+
+### Not done (per standing rules)
+
+- No git writes. No change to tracker code, `config.yaml`, or committed run CSVs (run evidence). CSV column rename (`majorRadius/bRadius/minorRadius` → semi-axis + shape-exponent) deferred to S1, where the superquadric changes radii semantics anyway.

@@ -16,25 +16,6 @@
 
 namespace
 {
-std::vector<float> collectSampledValues(const std::vector<cv::Mat> &volume)
-{
-    std::vector<float> values;
-    values.reserve(200000);
-
-    for (const auto &slice : volume)
-    {
-        for (int y = 0; y < slice.rows; ++y)
-        {
-            const float *row = slice.ptr<float>(y);
-            for (int x = 0; x < slice.cols; ++x)
-            {
-                values.push_back(row[x]);
-            }
-        }
-    }
-
-    return values;
-}
 
 float percentileFromValues(std::vector<float> values, float percentileFraction)
 {
@@ -303,13 +284,6 @@ float cellLumenGeometricCenterBlend(const BaseConfig &config,
     return cellLumenGeometricCenterBlend(profileLabel);
 }
 
-float continuousEllipsoidVolume(float aRadius, float bRadius, float cRadius)
-{
-    return static_cast<float>((4.0 / 3.0) * M_PI *
-                              std::max(aRadius, 1e-3f) *
-                              std::max(bRadius, 1e-3f) *
-                              std::max(cRadius, 1e-3f));
-}
 
 float meanOfTopFraction(std::vector<float> values, float fraction)
 {
@@ -741,12 +715,6 @@ CellLumen::DatasetProfile CellLumen::inferDatasetProfile(const fs::path &imageFi
 float CellLumen::effectiveZScaling() const
 {
     return std::max(1.0f, activeProfile.effectiveZScaling);
-}
-
-float CellLumen::estimateBackgroundValue(const std::vector<cv::Mat> &volume) const
-{
-    return percentileFromValues(collectSampledValues(volume),
-                                clampf(config.simulation.post_alignment_black_percentile, 0.0f, 1.0f));
 }
 
 int CellLumen::computeMinComponentVoxels() const

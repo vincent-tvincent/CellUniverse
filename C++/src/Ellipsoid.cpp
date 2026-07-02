@@ -273,18 +273,6 @@ Ellipsoid::Ellipsoid(const EllipsoidParams &init_props)
     }
 }
 
-cv::Point3f Ellipsoid::get_center() const {
-    return _position; // x, y, z position
-}
-
-void Ellipsoid::print() const {
-    std::cout << "Ellipsoid: " << _name
-              << " pos=(" << _position.x << ", " << _position.y << ", " << _position.z << ")"
-              << " a=" << a << " b=" << b << " c=" << c
-              << " theta=(" << _theta_x << ", " << _theta_y << ", " << _theta_z << ")"
-              << '\n';
-}
-
 void Ellipsoid::setBrightness(float brightness)
 {
     _brightness = std::clamp(brightness,
@@ -666,17 +654,6 @@ bool Ellipsoid::isPointInsideEllipsoid(const cv::Point3f &worldPoint,
 }
 
 
-
-bool Ellipsoid::checkConstraints() const {
-    const bool majorOk = (cellConfig.minARadius <= _major_radius) &&
-                         (_major_radius <= cellConfig.maxARadius);
-    const bool minorOk = (cellConfig.minCRadius <= _minor_radius) &&
-                         (_minor_radius <= cellConfig.maxCRadius);
-    const bool bConfigured = (cellConfig.maxBRadius > 0.0);
-    const bool bOk = !bConfigured ||
-        ((cellConfig.minBRadius <= _b_radius) && (_b_radius <= cellConfig.maxBRadius));
-    return majorOk && minorOk && bOk;
-}
 
 EllipsoidParams Ellipsoid::getCellParams() const {
     EllipsoidParams params(_name, _position.x, _position.y, _position.z,

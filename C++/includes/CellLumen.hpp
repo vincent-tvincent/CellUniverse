@@ -64,7 +64,6 @@ private:
 
     DatasetProfile inferDatasetProfile(const fs::path &imageFile) const;
     float effectiveZScaling() const;
-    float estimateBackgroundValue(const std::vector<cv::Mat> &volume) const;
     int computeMinComponentVoxels() const;
     std::vector<DetectedCell> detectCellsInVolume(const std::vector<cv::Mat> &volume,
                                                   const std::string &frameStem);

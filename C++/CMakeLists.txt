@@ -136,26 +136,11 @@ if(IPO_SUPPORTED)
         INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
-add_executable(brightness_volume_analyzer
-        ${cwd}/src/BrightnessVolumeAnalyzer.cpp
-        ${cwd}/src/EmbryoBrightTracker.cpp
-        ${cwd}/src/LineageTreeCreator.cpp
-        ${cwd}/src/LineageViewer.cpp
-)
+# brightness_volume_analyzer (offline analysis) executable was removed in the
+# 2026-06-24 cleanup. Its shared sources (EmbryoBrightTracker, LineageTreeCreator,
+# LineageViewer) remain — they are used by the main celluniverse target.
 
-target_include_directories(brightness_volume_analyzer PRIVATE
-        ${OpenCV_INCLUDE_DIRS}
-        ${cwd}/includes
-        ${cwd}/src
-        lib/yaml-cpp/include
-)
-
-target_link_libraries(brightness_volume_analyzer ${OpenCV_LIBS})
-target_link_libraries(brightness_volume_analyzer yaml-cpp)
-
-# Tests disabled 2026-04-08: they reference SimulationConfig fields
-# (background_color, cell_color) that were removed in the sigmoid-pipeline
-# invariants cleanup. Re-enable after updating the test files to use
-# Frame::_backgroundValue / literal 1.0f seed.
-# add_subdirectory(tests)
+# tests/ was removed in the 2026-06-24 cleanup (it was disabled and referenced
+# the removed Spheroid/SimulationConfig API). Re-add add_subdirectory(tests)
+# here when a test suite targeting the current triaxial Ellipsoid API exists.
 add_subdirectory(lib/yaml-cpp)

@@ -11,6 +11,18 @@ outputs/
 output/
 output_*/
 build/
+build-*/
 cmake-build-*/
 .vscode/
 .codex
+.codex*
+.codex.disabled*/
+
+# Large / generated / local-only trees (never track)
+data/
+.venv/
+.venv-*/
+.cache/
+.pytest_cache/
+__pycache__/
+.DS_Store

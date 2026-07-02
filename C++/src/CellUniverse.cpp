@@ -339,21 +339,6 @@ static void writeNapariFriendlyTiffStack(const std::string &path,
     }
 }
 
-static void scaleStackBrightness(std::vector<cv::Mat> &stack, float scale)
-{
-    if (std::abs(scale - 1.0f) <= 1e-6f) {
-        return;
-    }
-
-    for (auto &slice : stack) {
-        if (slice.empty()) {
-            continue;
-        }
-        slice *= scale;
-        cv::min(slice, 1.0f, slice);
-        cv::max(slice, 0.0f, slice);
-    }
-}
 
 // === Helpers ported from yp_fix_mask_04172026 (commits 25c5923, b575246) ===
 // Used by the per-frame percentile normalization step.

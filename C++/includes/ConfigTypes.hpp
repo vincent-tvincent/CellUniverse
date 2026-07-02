@@ -150,7 +150,6 @@ public:
     bool export_frame_png = true;
     bool export_frame_tiff = false;
     bool quit_after_preprocessing = false;
-    bool enable_lineage_tree_window = false;
     bool prepare_analyze_one_frame = false;
     bool release_analyzed_exported_frames = true;
     bool perturb_oscillation_boost_cells_enabled = false;
@@ -176,7 +175,6 @@ public:
     int resume_from = 0;
     std::string resume_source_dir = "";
     bool cube_pooling_enabled = false;
-    bool cube_pooling_cost_comparison_enabled = true;
     int cube_pooling_cube_size = 5;
     std::string cube_pooling_mode = "mean";
     float cube_pooling_top_fraction = 0.10f;
@@ -365,8 +363,6 @@ public:
         if (node["export_frame_png"]) export_frame_png = node["export_frame_png"].as<bool>();
         if (node["export_frame_tiff"]) export_frame_tiff = node["export_frame_tiff"].as<bool>();
         if (node["quit_after_preprocessing"]) quit_after_preprocessing = node["quit_after_preprocessing"].as<bool>();
-        if (node["enable_lineage_tree_window"]) enable_lineage_tree_window = node["enable_lineage_tree_window"].as<bool>();
-        if (node["lineage_tree_window"]) enable_lineage_tree_window = node["lineage_tree_window"].as<bool>();
         if (node["prepare_analyze_one_frame"]) prepare_analyze_one_frame = node["prepare_analyze_one_frame"].as<bool>();
         if (node["release_analyzed_exported_frames"]) release_analyzed_exported_frames = node["release_analyzed_exported_frames"].as<bool>();
         if (node["perturb_oscillation_boost_cells_enabled"]) perturb_oscillation_boost_cells_enabled = node["perturb_oscillation_boost_cells_enabled"].as<bool>();
@@ -387,7 +383,6 @@ public:
         if (node["resume_from"]) resume_from = node["resume_from"].as<int>();
         if (node["resume_source_dir"]) resume_source_dir = node["resume_source_dir"].as<std::string>();
         if (node["cube_pooling_enabled"]) cube_pooling_enabled = node["cube_pooling_enabled"].as<bool>();
-        if (node["cube_pooling_cost_comparison_enabled"]) cube_pooling_cost_comparison_enabled = node["cube_pooling_cost_comparison_enabled"].as<bool>();
         if (node["cube_pooling_cube_size"]) cube_pooling_cube_size = node["cube_pooling_cube_size"].as<int>();
         if (node["cube_pooling_mode"]) cube_pooling_mode = node["cube_pooling_mode"].as<std::string>();
         if (node["cube_pooling_top_fraction"]) cube_pooling_top_fraction = node["cube_pooling_top_fraction"].as<float>();
@@ -509,7 +504,6 @@ public:
         std::cout << "export_frame_png: " << export_frame_png << '\n';
         std::cout << "export_frame_tiff: " << export_frame_tiff << '\n';
         std::cout << "quit_after_preprocessing: " << quit_after_preprocessing << '\n';
-        std::cout << "enable_lineage_tree_window: " << enable_lineage_tree_window << '\n';
         std::cout << "prepare_analyze_one_frame: " << prepare_analyze_one_frame << '\n';
         std::cout << "release_analyzed_exported_frames: " << release_analyzed_exported_frames << '\n';
         std::cout << "perturb_oscillation_boost_cells_enabled: " << perturb_oscillation_boost_cells_enabled << '\n';
@@ -528,7 +522,6 @@ public:
         std::cout << "perturb_debug_cell_brightness: " << perturb_debug_cell_brightness << '\n';
         std::cout << "perturb_debug_center_cube_radius: " << perturb_debug_center_cube_radius << '\n';
         std::cout << "cube_pooling_enabled: " << cube_pooling_enabled << '\n';
-        std::cout << "cube_pooling_cost_comparison_enabled: " << cube_pooling_cost_comparison_enabled << '\n';
         std::cout << "cube_pooling_cube_size: " << cube_pooling_cube_size << '\n';
         std::cout << "cube_pooling_mode: " << cube_pooling_mode << '\n';
         std::cout << "cube_pooling_top_fraction: " << cube_pooling_top_fraction << '\n';
@@ -719,7 +712,6 @@ public:
     // both signals are flat — high density AND ratio ~1.0. The gate
     // fires only when BOTH signals indicate "flat profile", so real
     // divisions with a partial groove still pass.
-    float bio_bridge_max_gap_density = 0.18f;
     float bio_bridge_max_valley_ratio = 0.85f;
     // Bridge tier-1: hard rejection threshold on the worst per-daughter
     // valley ratio (gap / min edge). When gap brightness equals or exceeds
@@ -807,11 +799,6 @@ public:
     int pca_bridge_profile_bins = 21;
     int pca_bridge_min_gap_bins = 2;
     int pca_bridge_min_side_voxels = 40;
-    float pca_bridge_daughter_radius_scale = 2.236f;
-    float pca_bridge_min_radius_fraction = 0.35f;
-    float pca_bridge_max_radius_fraction = 0.90f;
-    float pca_bridge_min_cost_improvement = 0.0f;
-    float pca_bridge_overlap_weight = -1.0f;
 
     ProbabilityConfig() = default;
 
@@ -860,7 +847,6 @@ public:
         if (node["bio_combined_volume_max_fraction"]) bio_combined_volume_max_fraction = node["bio_combined_volume_max_fraction"].as<float>();
         if (node["bio_min_daughter_separation_parent_fraction"]) bio_min_daughter_separation_parent_fraction = node["bio_min_daughter_separation_parent_fraction"].as<float>();
         if (node["bio_max_single_daughter_volume_fraction"]) bio_max_single_daughter_volume_fraction = node["bio_max_single_daughter_volume_fraction"].as<float>();
-        if (node["bio_bridge_max_gap_density"]) bio_bridge_max_gap_density = node["bio_bridge_max_gap_density"].as<float>();
         if (node["bio_bridge_max_valley_ratio"]) bio_bridge_max_valley_ratio = node["bio_bridge_max_valley_ratio"].as<float>();
         if (node["bio_bridge_no_valley_hard_threshold"]) bio_bridge_no_valley_hard_threshold = node["bio_bridge_no_valley_hard_threshold"].as<float>();
         if (node["bio_bridge_min_edge_brightness_absolute"]) bio_bridge_min_edge_brightness_absolute = node["bio_bridge_min_edge_brightness_absolute"].as<float>();
@@ -881,11 +867,6 @@ public:
         if (node["pca_bridge_profile_bins"]) pca_bridge_profile_bins = node["pca_bridge_profile_bins"].as<int>();
         if (node["pca_bridge_min_gap_bins"]) pca_bridge_min_gap_bins = node["pca_bridge_min_gap_bins"].as<int>();
         if (node["pca_bridge_min_side_voxels"]) pca_bridge_min_side_voxels = node["pca_bridge_min_side_voxels"].as<int>();
-        if (node["pca_bridge_daughter_radius_scale"]) pca_bridge_daughter_radius_scale = node["pca_bridge_daughter_radius_scale"].as<float>();
-        if (node["pca_bridge_min_radius_fraction"]) pca_bridge_min_radius_fraction = node["pca_bridge_min_radius_fraction"].as<float>();
-        if (node["pca_bridge_max_radius_fraction"]) pca_bridge_max_radius_fraction = node["pca_bridge_max_radius_fraction"].as<float>();
-        if (node["pca_bridge_min_cost_improvement"]) pca_bridge_min_cost_improvement = node["pca_bridge_min_cost_improvement"].as<float>();
-        if (node["pca_bridge_overlap_weight"]) pca_bridge_overlap_weight = node["pca_bridge_overlap_weight"].as<float>();
 
         // Legacy YAML aliases — silently map to the new names.
         if (node["split"]) P_split_base = node["split"].as<float>();
@@ -1142,7 +1123,6 @@ public:
     // For each PCA axis, the radius = Nth percentile of |projection of
     // bright pixels onto that axis|. Higher = larger radii (captures more
     // halo). Lower = tighter to core. Default 0.90.
-    float pcaShapeRadiusPercentile{0.90f};
     bool pcaShapeFitGrowthCapEnabled{true};
     float pcaShapeFitGrowthCap{0.10f};
     bool trashPcaShapeFitEnabled{true};
@@ -1246,7 +1226,6 @@ public:
         if (node["pcaShapeCoreFractionLow"]) pcaShapeCoreFractionLow = node["pcaShapeCoreFractionLow"].as<float>();
         if (node["pcaShapeCoreFractionHigh"]) pcaShapeCoreFractionHigh = node["pcaShapeCoreFractionHigh"].as<float>();
         if (node["pcaShapeRadiusInflationBright"]) pcaShapeRadiusInflationBright = node["pcaShapeRadiusInflationBright"].as<float>();
-        if (node["pcaShapeRadiusPercentile"]) pcaShapeRadiusPercentile = node["pcaShapeRadiusPercentile"].as<float>();
         if (node["pcaShapeFitGrowthCapEnabled"]) pcaShapeFitGrowthCapEnabled = node["pcaShapeFitGrowthCapEnabled"].as<bool>();
         if (node["pcaShapeFitGrowthCap"]) pcaShapeFitGrowthCap = node["pcaShapeFitGrowthCap"].as<float>();
         if (node["trashPcaShapeFitEnabled"]) trashPcaShapeFitEnabled = node["trashPcaShapeFitEnabled"].as<bool>();
@@ -1483,8 +1462,6 @@ public:
     bool fusionSplitPriorConflictReplacementEnabled = false;
     float fusionSplitPriorConflictCloseParentRadiusScale = 0.45f;
     float fusionSplitPriorConflictMinNewSeparationRadiusScale = 1.40f;
-    float fusionSplitPriorConflictMinSeparationDrop = 15.0f;
-    float fusionSplitPriorConflictMinOldScoreForReplacement = 10.0f;
     bool fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose = false;
     int fusionSplitPriorMaxPriorsPerFrame = 18;
     bool fusionSplitPriorWindowEnabled = false;
@@ -2062,8 +2039,6 @@ public:
         if (node["fusionSplitPriorConflictReplacementEnabled"]) fusionSplitPriorConflictReplacementEnabled = node["fusionSplitPriorConflictReplacementEnabled"].as<bool>();
         if (node["fusionSplitPriorConflictCloseParentRadiusScale"]) fusionSplitPriorConflictCloseParentRadiusScale = node["fusionSplitPriorConflictCloseParentRadiusScale"].as<float>();
         if (node["fusionSplitPriorConflictMinNewSeparationRadiusScale"]) fusionSplitPriorConflictMinNewSeparationRadiusScale = node["fusionSplitPriorConflictMinNewSeparationRadiusScale"].as<float>();
-        if (node["fusionSplitPriorConflictMinSeparationDrop"]) fusionSplitPriorConflictMinSeparationDrop = node["fusionSplitPriorConflictMinSeparationDrop"].as<float>();
-        if (node["fusionSplitPriorConflictMinOldScoreForReplacement"]) fusionSplitPriorConflictMinOldScoreForReplacement = node["fusionSplitPriorConflictMinOldScoreForReplacement"].as<float>();
         if (node["fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose"]) fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose = node["fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose"].as<bool>();
         if (node["fusionSplitPriorMaxPriorsPerFrame"]) fusionSplitPriorMaxPriorsPerFrame = node["fusionSplitPriorMaxPriorsPerFrame"].as<int>();
         if (node["fusionSplitPriorWindowEnabled"]) fusionSplitPriorWindowEnabled = node["fusionSplitPriorWindowEnabled"].as<bool>();
@@ -2444,8 +2419,6 @@ public:
         std::cout << "fusionSplitPriorConflictReplacementEnabled: " << fusionSplitPriorConflictReplacementEnabled << '\n';
         std::cout << "fusionSplitPriorConflictCloseParentRadiusScale: " << fusionSplitPriorConflictCloseParentRadiusScale << '\n';
         std::cout << "fusionSplitPriorConflictMinNewSeparationRadiusScale: " << fusionSplitPriorConflictMinNewSeparationRadiusScale << '\n';
-        std::cout << "fusionSplitPriorConflictMinSeparationDrop: " << fusionSplitPriorConflictMinSeparationDrop << '\n';
-        std::cout << "fusionSplitPriorConflictMinOldScoreForReplacement: " << fusionSplitPriorConflictMinOldScoreForReplacement << '\n';
         std::cout << "fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose: " << fusionSplitPriorSuppressConflictPenaltiesForAsymmetricClose << '\n';
         std::cout << "fusionSplitPriorWindowEnabled: " << fusionSplitPriorWindowEnabled << '\n';
         std::cout << "fusionSplitPriorWindowSize: " << fusionSplitPriorWindowSize << '\n';
@@ -2746,28 +2719,6 @@ public:
     }
 };
 
-// Optional live visualizer auto-launch (see scripts/cell_viz). When enabled,
-// CellUniverse spawns the read-only napari/mpl viewer pointed at this run's
-// output dir, so the full run command also starts the visualization — no
-// separate command needed.
-struct LiveVizConfig {
-    bool enabled = false;
-    std::string mode = "3d";        // "2d" | "3d"
-    std::string backend = "napari"; // "napari" (live window) | "mpl" (headless video)
-
-    void explodeConfig(const YAML::Node& node) {
-        if (!node) return;
-        if (node["enabled"]) enabled = node["enabled"].as<bool>();
-        if (node["mode"]) mode = node["mode"].as<std::string>();
-        if (node["backend"]) backend = node["backend"].as<std::string>();
-    }
-    void printConfig() const {
-        std::cout << "live_viz.enabled: " << enabled << '\n';
-        std::cout << "live_viz.mode: " << mode << '\n';
-        std::cout << "live_viz.backend: " << backend << '\n';
-    }
-};
-
 class BaseConfig {
 public:
     std::string cellType;
@@ -2775,7 +2726,6 @@ public:
     SimulationConfig simulation;
     ProbabilityConfig prob;
     CellLumenConfig cellLumen;
-    LiveVizConfig liveViz;
 
     BaseConfig() = default;
     ~BaseConfig() = default;
@@ -2786,8 +2736,7 @@ public:
           cell(other.cell ? std::make_unique<EllipsoidConfig>(*other.cell) : nullptr),
           simulation(other.simulation),
           prob(other.prob),
-          cellLumen(other.cellLumen),
-          liveViz(other.liveViz) {}
+          cellLumen(other.cellLumen) {}
 
     BaseConfig& operator=(const BaseConfig& other) {
         if (this != &other) {
@@ -2796,7 +2745,6 @@ public:
             simulation = other.simulation;
             prob = other.prob;
             cellLumen = other.cellLumen;
-            liveViz = other.liveViz;
         }
         return *this;
     }
@@ -2812,14 +2760,12 @@ public:
         simulation.explodeConfig(node["simulation"]);
         prob.explodeConfig(node["prob"]);
         if (node["cell_lumen"]) cellLumen.explodeConfig(node["cell_lumen"]);
-        if (node["live_viz"]) liveViz.explodeConfig(node["live_viz"]);
     }
 
     void printConfig() const {
         simulation.printConfig();
         prob.printConfig();
         cellLumen.printConfig();
-        liveViz.printConfig();
     }
 };
 

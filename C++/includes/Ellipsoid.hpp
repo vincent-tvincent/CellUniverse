@@ -204,17 +204,11 @@ class Ellipsoid
         bool isPointInsideEllipsoid(const cv::Point3f &worldPoint,
                                     float scaleFactor = 1.0f) const;
 
-        bool checkConstraints() const;
-
         EllipsoidParams getCellParams() const;
 
         [[nodiscard]] std::pair<std::vector<float>, std::vector<float>> calculateCorners() const;
 
         std::pair<std::vector<float>, std::vector<float>> calculateMinimumBox(Ellipsoid &perturbed_cell) const;
-
-        cv::Point3f get_center() const;
-
-        void print() const;
 };
 
 #endif

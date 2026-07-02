@@ -8514,9 +8514,3 @@ CostCallbackPair Frame::trySplitCellPhased(
     return {acceptedCostDiff, callback};
 }
 
-// Snapshot-driven daughter placement. Daughters built from previous frame's
-
-std::vector<cv::Mat> Frame::getSynthFrame()
-{
-    return _synthFrame;
-}

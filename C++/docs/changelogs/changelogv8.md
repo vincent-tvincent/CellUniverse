@@ -995,3 +995,151 @@ The log tag is `[PCA Bridge Propose]` (consistent with the discover-only naming 
 ### Open follow-ups
 
 - Tune `pca_bridge_min_long_mid_ratio` and `pca_bridge_max_mid_short_ratio` against fluo runs. 1.35/1.35 may be too tight for asymmetric divisions where one daughter remains larger.
+
+---
+
+## 2026-06-24: Deep repo cleanup — remove live-viz feature, dead code, unused scripts/configs (Change 14)
+
+**Status: ACTIVE — build clean (100%), smoke run verified (frames 0→ tracking pipeline runs, no LiveViz).**
+
+Goal: shrink the repo to the active algorithm (cell lumen, perturbation, split, shape fit). Executed on a fresh branch with a restore point. Anchored on the CMake build graph (all 12 `src/*.cpp` compile — `src/`/`includes/` were already lean) and the `base_config` inheritance closure (so no active config chain was broken).
+
+### A. Live-visualizer feature removed (code)
+
+Removed the optional napari/mpl auto-launch. It was gated on `config.liveViz.enabled` (default `false`), so tracking behavior is unchanged.
+
+- **`src/main.cpp`** — deleted the `maybeLaunchLiveViz(...)` function (was lines 119–174) and its call site.
+
+  Before (call site, ~line 429):
+  ```cpp
+      // Optionally spawn the live visualizer (scripts/cell_viz) now that the
+      // output dir / frame range are known. Backgrounded; non-fatal on failure.
+      maybeLaunchLiveViz(config, args, argv[0]);
+
+      // Run
+  ```
+  After:
+  ```cpp
+      // Run
+  ```
+  Also removed now-unused `#include <sstream>` (only the deleted function used `std::ostringstream`).
+
+- **`includes/ConfigTypes.hpp`** — deleted the `LiveVizConfig` struct (was lines 2753–2769) and its 5 usages in `BaseConfig`: the `LiveVizConfig liveViz;` member, copy-ctor init `liveViz(other.liveViz)`, assignment `liveViz = other.liveViz;`, `if (node["live_viz"]) liveViz.explodeConfig(...)`, and `liveViz.printConfig();`.
+
+- **`config/config.yaml`** — deleted the `live_viz:` block (was lines 3–13) + its comment header. (Unknown YAML keys are silently ignored, so any leftover `live_viz:` in other configs is harmless.)
+
+- **Deleted files:** `scripts/cell_viz/` (dir), `scripts/live_cell_viz.py`, `scripts/live_monitor_napari.py`, `scripts/make_demo_napari.py`, `scripts/play_real_and_synth_same_napari.py`, `scripts/napari_embryo_review.py`, `scripts/run_play_HL60_real_synth_napari.sh`, `config/config_live_napari.yaml`, `config/config_test_live_viz_mpl.yaml`.
+
+### B. Dead code / disabled tests removed
+
+- **`deprecated/`** (whole dir) — pre-triaxial dead code (`Sphere`, `Bacilli`, `Cell`, `args`, `mathhelper`, `pseudo-code`). Nothing includes it.
+- **`tests/`** (whole dir) — disabled in CMake since 2026-04-08 (`# add_subdirectory(tests)`), referenced the removed `Spheroid`/`SimulationConfig` API (would not compile).
+- All `__pycache__/` under `scripts/` (build artifacts).
+
+### C. Unused scripts removed
+
+`scripts/4_Windows_Demo_16-9.py`, `analyze_late_goal_runs.py`, `iterative_brightness_recovery_blur.py`, `make_demo_video.py`, `validate_embryo_centers.py` — verified referenced by nothing (`src/`, run scripts, docs). Kept `image_processor_clean.py`/`measure_brightness.py` (referenced) and `make_lineage_tree_demo.py` (named in a main.cpp user message).
+
+### D. Config archive (moved, not deleted)
+
+Moved 10 experimental CellLumen `config_*.yaml` variants (not in the `config.yaml`/VERIFIED `base_config` closure) + the `BackUp_TuningHistory_CellLumen/` and `cell_lumen_config_tuning/` dirs into new **`config/_archive/`**. `config/` root now holds only the 10 active-chain configs + `config_CastaneumEmbryo.yaml` + 2 INIs.
+
+### Verification
+
+- `cmake --build build -j 8 --target celluniverse` → **100% built**, clean.
+- Smoke run (embryo_data, frames 0–3, `config.yaml`): per-frame pipeline (Voronoi → image-grounded PCA → PCA-bridge split propose) runs normally; **no `LiveViz` output**; no crash.
+
+### Not done here (future)
+
+- Intra-file dead functions in `Frame.cpp`/`CellLumen.cpp`/`Ellipsoid.cpp` — needs a `-Wunused-function` + call-graph pass, deferred to avoid hunting dead code in the active focus files.
+- `brightness_volume_analyzer` executable and `Python/` legacy kept pending explicit decision.
+
+---
+
+## 2026-06-24: Cleanup part 2 — drop 2nd executable, legacy Python, viz venv, and 5 dead functions (Change 15)
+
+**Status: ACTIVE — build clean (100%), celluniverse links without the analyzer target.**
+
+Completes the deferred items from Change 14.
+
+### A. Removed the `brightness_volume_analyzer` executable
+
+- Deleted `src/BrightnessVolumeAnalyzer.cpp`.
+- **`CMakeLists.txt`** — removed the `add_executable(brightness_volume_analyzer ...)` block + its `target_include_directories`/`target_link_libraries` (was lines 139–154). Its shared sources (`EmbryoBrightTracker.cpp`, `LineageTreeCreator.cpp`, `LineageViewer.cpp`) are kept — they are also compiled into the main `celluniverse` target (verified before removal).
+
+### B. Removed large non-source trees
+
+- `Python/` (legacy reference implementation, 16 MB) — not built, not referenced by the C++ pipeline.
+- `.venv-viz/` (905 MB) — the live-viz virtualenv; its only consumers (the napari scripts + `main.cpp` launch) were removed in Change 14. Verified no remaining script references `venv-viz`.
+
+### C. Removed 5 dead member functions (call-site verified, 0 callers)
+
+Found via a `Class::method` definition scan cross-referenced against all call sites in `src/` + `includes/`. Each below had **only** its header declaration + definition (extra grep hits were comments); none are `virtual`.
+
+| Function | Removed from |
+|---|---|
+| `Frame::getSynthFrame()` | `src/Frame.cpp` + `includes/Frame.hpp:437` |
+| `CellLumen::estimateBackgroundValue()` | `src/CellLumen.cpp` + `includes/CellLumen.hpp:67` |
+| `Ellipsoid::get_center()` | `src/Ellipsoid.cpp` + `includes/Ellipsoid.hpp:215` |
+| `Ellipsoid::print()` | `src/Ellipsoid.cpp` + `includes/Ellipsoid.hpp:217` |
+| `Ellipsoid::checkConstraints()` | `src/Ellipsoid.cpp` + `includes/Ellipsoid.hpp:207` |
+
+Example (`Ellipsoid.cpp`):
+```cpp
+// removed — no callers:
+cv::Point3f Ellipsoid::get_center() const { return _position; }
+void Ellipsoid::print() const { std::cout << "Ellipsoid: " << _name << ... ; }
+bool Ellipsoid::checkConstraints() const { /* radius-bound checks */ }
+```
+
+**Kept (scan flagged them but they ARE used — `!method(` call form the regex missed):**
+`CellLumen::componentContainsBrightSeed` (called `CellLumen.cpp:2068`), `Ellipsoid::computeSliceBounds` (called `Ellipsoid.cpp:446, 563`).
+
+### Verification
+
+- `cmake -S . -B build` reconfigure OK; `cmake --build build -j 8 --target celluniverse` → **100% built**, no errors/warnings. All three focus TUs (`Frame`, `Ellipsoid`, `CellLumen`) recompiled clean.
+
+### Still open
+
+- Free-function/static dead code (non-member) in the focus files not yet swept — the scan targeted `Class::method` definitions. A `-Wunused-function` clean-build pass would catch file-local statics next.
+
+---
+
+## 2026-06-24: Cleanup part 3 — collapse to ONE config.yaml + strip 11 dead config knobs (Change 16)
+
+**Status: ACTIVE — build clean (100%), flattened config parses + runs (fusionEnabled=1 confirmed).**
+
+### A. Single config.yaml (flattened from the VERIFIED CellLumen-fusion chain)
+
+The config set was a 10-file `base_config` inheritance chain (`config.yaml` → `config_embryo` → `NoPreprocess` → `deterministicSplit` → … → `VERIFIED_F085-120`). Note: bare `config.yaml` was the *root* and had **no `cell_lumen` block** — the fusion pipeline lived entirely in the chain.
+
+- Resolved the full chain into a single self-contained **`config/config.yaml`** (blocks: `cell` 55, `simulation` 117, `prob` 56, `cell_lumen` 321 knobs), `base_config` removed. The flattener mirrors `mergeYamlNodes` exactly; **verified** the flattened effective config is byte-identical to the recursively-resolved VERIFIED config (`flatten == resolve(VERIFIED)` → True).
+- Deleted **all other yaml**: the 9 remaining chain files, `config/embryo/`, `config/_archive/` (~200 tuning yamls), and `config_CastaneumEmbryo.yaml`. `config/` now holds `config.yaml` + 2 INIs + dataset seed CSV dirs only.
+- The INI launcher already pointed at `config.yaml`, so runs now use the full fusion pipeline. (Per-knob inline comments from the old layered files are in git history.)
+
+### B. Dead config-knob audit — removed 11 knobs (parsed but never used by the algorithm)
+
+Audit: every YAML knob (545) is parsed (0 Level-1 dead). Level-2 (parsed into a struct field the algorithm never reads) found 18 candidates; verified each by extracting the real field and grepping `src/`:
+- **Kept (false positives):** `max_split_probability`, `split_max_parent_overlap_fraction`, `split_parent_overlap_daughter_scale`, `split_parent_overlap_gate_enabled` (legacy alias keys parsing into actively-used `P_split_max` / `split_*daughter*` fields); **`mu`** (used inside `PerturbParams`' own inline `normal_distribution(mu, sigma)` — my `src/`-only grep had excluded `ConfigTypes.hpp`).
+- **Removed 11 dead fields** (decl + parse + print) from `includes/ConfigTypes.hpp` (27 lines) and their keys from `config.yaml`: `bio_bridge_max_gap_density`, `cube_pooling_cost_comparison_enabled`, `enable_lineage_tree_window` (+`lineage_tree_window` alias), `fusionSplitPriorConflictMinOldScoreForReplacement`, `fusionSplitPriorConflictMinSeparationDrop`, `pcaShapeRadiusPercentile`, and 5× `pca_bridge_{daughter_radius_scale,min_radius_fraction,max_radius_fraction,min_cost_improvement,overlap_weight}`.
+
+### Verification
+
+- `cmake --build` → **100%**, no errors/warnings (removing a truly-used field would fail to compile → confirms all 11 were dead).
+- Smoke run (frames 0–1, new `config.yaml`): parses cleanly, prints `CellLumen Config / fusionEnabled: 1`, runs the pipeline.
+
+### C. Free-function / static dead-code sweep (`-Wunused-function`)
+
+A clean build with `-Wall -Wunused-function` flagged compiler-verified file-local dead functions (internal linkage, zero callers). Removed all + cascades, iterating until the flag was clean:
+
+| Function | File |
+|---|---|
+| `scaleStackBrightness` | `src/CellUniverse.cpp` |
+| `continuousEllipsoidVolume` | `src/CellLumen.cpp` |
+| `collectSampledValues` | `src/CellLumen.cpp` (orphaned when `estimateBackgroundValue` went in Change 15) |
+| `isLocalMax3x3x3` | `src/EmbryoBrightTracker.cpp` (was marked `// redudant`) |
+| `refinePeakWeightedCentroid` | `src/EmbryoBrightTracker.cpp` |
+| `localizeSignalCentersInStack` (187 lines) | `src/ImageHandler.cpp` (signal-guided perturbation, unused in our pipeline) |
+| `chooseNearestDivisorSize` + local `struct BrightBox` | `src/ImageHandler.cpp` (cascade — only used by the localizer; note the `BrightBox` in `CellUniverse.cpp` is a *different, active* struct) |
+
+Final `-Wall -Wunused-function` build: **zero unused-function warnings**. Normal build 100%; smoke run confirms the pipeline (Voronoi → PCA-bridge, fusion active) runs unchanged.

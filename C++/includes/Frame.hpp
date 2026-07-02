@@ -434,7 +434,6 @@ public:
         // deterministic cell-index order after the parallel region.
         std::ostream *logSink = nullptr);
 
-    std::vector<cv::Mat> getSynthFrame();
     const std::vector<cv::Mat>& getRealFrame() const { return _realFrame; }
 
     // Memory optimization (M1): release the real + synth image stacks after

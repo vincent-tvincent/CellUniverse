@@ -243,6 +243,11 @@ simulation:
   export_perturb_cell_center_debug_images: false
   export_frame_png: false
   export_frame_tiff: true
+  # Optional lossless TIFF compression for review stacks. This is default off
+  # because older verified runs wrote uncompressed TIFFs. Set enabled true with
+  # compression 5 for LZW; pixels stay identical when the codec is supported.
+  export_frame_tiff_compression_enabled: false
+  export_frame_tiff_compression: 5
   quit_after_preprocessing: false
   prepare_analyze_one_frame: false
   # When true, after a frame has been optimized and exported, release its

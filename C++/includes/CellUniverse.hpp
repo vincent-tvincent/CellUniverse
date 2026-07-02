@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -109,6 +110,10 @@ private:
    // selector may skip a split candidate for count/overlap reasons, while the
    // same single real center can still be valid evidence to move the parent.
    std::unordered_map<int, std::unordered_map<std::string, std::set<int>>> cellLumenCenterReanchorCandidateIds;
+   // Weaker same-parent one-real candidates that were not selected as splits
+   // but may still be valid continuation evidence. This stays switch-gated in
+   // YAML so middle-density repairs do not silently affect other profiles.
+   std::unordered_map<int, std::unordered_map<std::string, std::set<int>>> cellLumenWeakSameParentContinuationCandidateIds;
    // Parents whose best CellLumen split pair looked unsafe. The pre-pass
    // fallback may not resurrect these parents, otherwise a weak Lumen pair can
    // be rejected in ranking and then re-enter through the fallback path.
@@ -132,6 +137,11 @@ private:
 	       float parentZShift = 0.0f;
 	   };
    std::unordered_map<int, std::unordered_map<std::string, CellLumenCenterCandidate>> cellLumenCenterCandidates;
+   // Late dense frames can have one CellLumen center between two very close
+   // sibling daughters. This map reserves that shared center for the stale
+   // sibling in temporal repair instead of letting the closer sibling consume
+   // it during ordinary center-prior perturbation.
+   std::unordered_map<int, std::unordered_map<std::string, std::unordered_set<int>>> cellLumenSiblingSharedCenterReanchorCandidates;
    struct CellLumenLookaheadCandidate {
        cv::Point3f position{0.0f, 0.0f, 0.0f};
        int voxelCount = 0;

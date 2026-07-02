@@ -444,15 +444,51 @@ static std::vector<cv::Mat> makeNapariFriendlyTiffStack(const std::vector<cv::Ma
 }
 
 static void writeNapariFriendlyTiffStack(const std::string &path,
-                                         const std::vector<cv::Mat> &stack)
+                                         const std::vector<cv::Mat> &stack,
+                                         int compression = 1)
 {
     std::vector<cv::Mat> output = makeNapariFriendlyTiffStack(stack);
     const std::vector<int> params = {
-        cv::IMWRITE_TIFF_COMPRESSION, 1 // COMPRESSION_NONE: easiest for TIFF readers.
+        cv::IMWRITE_TIFF_COMPRESSION, compression
     };
 
     if (!cv::imwritemulti(path, output, params)) {
+        if (compression != 1) {
+            // Compression is only a storage optimization. If this OpenCV build
+            // cannot write the requested lossless TIFF codec, keep the run alive
+            // and preserve visual quality by falling back to the old uncompressed path.
+            std::cout << "[TIFF Export] compression_write_failed="
+                      << compression
+                      << " fallback=1 path=" << path
+                      << std::endl;
+            const std::vector<int> fallbackParams = {
+                cv::IMWRITE_TIFF_COMPRESSION, 1
+            };
+            if (cv::imwritemulti(path, output, fallbackParams)) {
+                return;
+            }
+        }
         throw std::runtime_error("Failed to write TIFF stack: " + path);
+    }
+}
+
+static int losslessTiffCompressionOrNone(int requestedCompression)
+{
+    // Keep preview quality identical: allow only lossless TIFF codecs. OpenCV
+    // accepts raw numeric TIFF compression tags; rejecting unknown tags avoids
+    // accidentally writing lossy JPEG-compressed TIFFs from a YAML typo.
+    switch (requestedCompression) {
+        case 1:     // COMPRESSION_NONE
+        case 5:     // COMPRESSION_LZW
+        case 8:     // COMPRESSION_ADOBE_DEFLATE
+        case 32946: // COMPRESSION_DEFLATE
+            return requestedCompression;
+        default:
+            std::cout << "[TIFF Export] unsupported_or_lossy_compression="
+                      << requestedCompression
+                      << " fallback=1 reason=lossless_preview_guard"
+                      << std::endl;
+            return 1;
     }
 }
 
@@ -2279,12 +2315,18 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
     auto &centerReanchorCandidateIdsForFrame =
         cellLumenCenterReanchorCandidateIds[frameIndex];
     centerReanchorCandidateIdsForFrame.clear();
+    auto &weakSameParentContinuationCandidateIdsForFrame =
+        cellLumenWeakSameParentContinuationCandidateIds[frameIndex];
+    weakSameParentContinuationCandidateIdsForFrame.clear();
     auto &badSplitPriorParentsForFrame = cellLumenSplitPriorRejectedBadParents[frameIndex];
     badSplitPriorParentsForFrame.clear();
     auto &collapsedCenterParentsForFrame = cellLumenCollapsedCenterParents[frameIndex];
     collapsedCenterParentsForFrame.clear();
     auto &centerCandidatesForFrame = cellLumenCenterCandidates[frameIndex];
     centerCandidatesForFrame.clear();
+    auto &siblingSharedCenterReanchorForFrame =
+        cellLumenSiblingSharedCenterReanchorCandidates[frameIndex];
+    siblingSharedCenterReanchorForFrame.clear();
 
     EllipsoidConfig savedCellConfig = Ellipsoid::cellConfig;
     std::vector<CellLumen::DetectedCell> candidates;
@@ -2742,6 +2784,181 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                       << std::endl;
         }
     }
+    const bool siblingSharedCenterReanchorEnabled =
+        lumenConfig.fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled &&
+        static_cast<int>(frame.cells.size()) >=
+            std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells);
+    if (siblingSharedCenterReanchorEnabled && !centerCandidatesForFrame.empty()) {
+        auto siblingNameForBinaryDaughter =
+            [](const std::string &name) -> std::string {
+            if (name.empty()) {
+                return {};
+            }
+            const char last = name.back();
+            if (last != '0' && last != '1') {
+                return {};
+            }
+            std::string sibling = name;
+            sibling.back() = (last == '0') ? '1' : '0';
+            return sibling;
+        };
+        std::unordered_map<std::string, size_t> liveCellIndexByName;
+        liveCellIndexByName.reserve(frame.cells.size());
+        for (size_t idx = 0; idx < frame.cells.size(); ++idx) {
+            if (!frame.cells[idx].isTrash()) {
+                liveCellIndexByName[frame.cells[idx].getName()] = idx;
+            }
+        }
+        auto cellAgeFrames = [&](const std::string &name) {
+            auto it = cellFirstSeenFrame.find(name);
+            if (it == cellFirstSeenFrame.end()) {
+                return std::numeric_limits<int>::max() / 4;
+            }
+            return std::max(0, absoluteFrame - it->second);
+        };
+        const int maxSiblingAge =
+            std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames);
+        const float maxCloserDistance =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance);
+        const float minFarDistance =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance);
+        const float maxFarDistance =
+            std::max(
+                minFarDistance,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance);
+        const float minSiblingSeparation =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation);
+        const float maxBetweenSlack =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack);
+        const int minSiblingVoxels =
+            std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMinVoxels);
+        const float minSiblingSignal =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairSiblingSharedCenterMinSignal);
+        std::vector<std::string> centerPriorOwnersToErase;
+        int reservedSiblingSharedCenters = 0;
+        for (const auto &entry : centerCandidatesForFrame) {
+            const std::string &closerName = entry.first;
+            const CellLumenCenterCandidate &centerCandidate = entry.second;
+            if (centerCandidate.candidateId < 0 ||
+                centerCandidate.clusterCollapsed ||
+                centerCandidate.youngFarSingle ||
+                centerCandidate.voxelCount < minSiblingVoxels ||
+                centerCandidate.signal < minSiblingSignal) {
+                continue;
+            }
+            const auto closerIt = liveCellIndexByName.find(closerName);
+            if (closerIt == liveCellIndexByName.end()) {
+                continue;
+            }
+            const std::string fartherName =
+                siblingNameForBinaryDaughter(closerName);
+            const auto fartherIt = liveCellIndexByName.find(fartherName);
+            if (fartherIt == liveCellIndexByName.end()) {
+                continue;
+            }
+            if (cellAgeFrames(closerName) > maxSiblingAge ||
+                cellAgeFrames(fartherName) > maxSiblingAge) {
+                continue;
+            }
+            const Ellipsoid &closerCell =
+                frame.cells[closerIt->second];
+            const Ellipsoid &fartherCell =
+                frame.cells[fartherIt->second];
+            const cv::Point3f closerPos(closerCell.getX(),
+                                        closerCell.getY(),
+                                        closerCell.getZ());
+            const cv::Point3f fartherPos(fartherCell.getX(),
+                                         fartherCell.getY(),
+                                         fartherCell.getZ());
+            const float closerDistance =
+                static_cast<float>(
+                    cv::norm(centerCandidate.position - closerPos));
+            const float fartherDistance =
+                static_cast<float>(
+                    cv::norm(centerCandidate.position - fartherPos));
+            const float siblingSeparation =
+                static_cast<float>(cv::norm(closerPos - fartherPos));
+            const float betweenSlack =
+                closerDistance + fartherDistance - siblingSeparation;
+            if (closerDistance > maxCloserDistance ||
+                fartherDistance < minFarDistance ||
+                fartherDistance > maxFarDistance ||
+                siblingSeparation < minSiblingSeparation ||
+                betweenSlack > maxBetweenSlack ||
+                closerDistance >= fartherDistance) {
+                continue;
+            }
+            siblingSharedCenterReanchorForFrame[fartherName].insert(
+                centerCandidate.candidateId);
+            centerPriorOwnersToErase.push_back(closerName);
+            ++reservedSiblingSharedCenters;
+            if (candidateGraphLog) {
+                CandidateGraphRow row;
+                row.frame = absoluteFrame;
+                row.kind = "center_prior";
+                row.source = "cell_lumen_sibling_shared_center_reserved";
+                row.parent = fartherName;
+                row.candidateA = std::to_string(centerCandidate.candidateId);
+                row.selected = 0;
+                row.score = fartherDistance;
+                row.rawScore = closerDistance;
+                row.sep = siblingSeparation;
+                row.d1 = centerCandidate.position;
+                row.d2 = fartherPos;
+                row.voxA = centerCandidate.voxelCount;
+                row.signalA = centerCandidate.signal;
+                std::ostringstream note;
+                note << "closer_sibling=" << closerName
+                     << ";closer_distance=" << closerDistance
+                     << ";farther_distance=" << fartherDistance
+                     << ";sibling_separation=" << siblingSeparation
+                     << ";between_slack=" << betweenSlack
+                     << ";reason=late_dense_shared_center_kept_for_stale_sibling";
+                row.note = note.str();
+                writeCandidateGraphRow(candidateGraphLog, row);
+            }
+        }
+        for (const std::string &ownerName : centerPriorOwnersToErase) {
+            centerCandidatesForFrame.erase(ownerName);
+        }
+        if (reservedSiblingSharedCenters > 0) {
+            std::cout
+                << "[CellLumen Sibling Shared Center Reserve] frame="
+                << absoluteFrame
+                << " reserved=" << reservedSiblingSharedCenters
+                << " max_closer_distance=" << maxCloserDistance
+                << " min_far_distance=" << minFarDistance
+                << " max_far_distance=" << maxFarDistance
+                << " min_sibling_separation=" << minSiblingSeparation
+                << " max_between_slack=" << maxBetweenSlack
+                << std::endl;
+        }
+    }
     std::unordered_map<int, std::string> centerCandidateOwnerById;
     std::unordered_map<int, float> centerCandidateOwnerDistanceById;
     for (const auto &entry : centerCandidatesForFrame) {
@@ -2808,6 +3025,16 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
     int splitPriorEarlyLargeCatchAssignments = 0;
     int splitPriorRejectedCollapsedCenterCluster = 0;
     int splitPriorSoftAllowedCollapsedCenterCluster = 0;
+    struct ProtectedFutureContinuationOwner {
+        size_t ownerIdx = std::numeric_limits<size_t>::max();
+        float distance = std::numeric_limits<float>::infinity();
+        float oldNearestCurrentDistance =
+            std::numeric_limits<float>::infinity();
+        int oldWindowSupport = 0;
+        int centerWindowSupport = 0;
+    };
+    std::unordered_map<int, ProtectedFutureContinuationOwner>
+        protectedFutureContinuationOwnerById;
     if (lumenConfig.fusionSplitPriorEnabled && frame.cells.size() > 0) {
         int splitPriorLiveCells = 0;
         for (const auto &cell : frame.cells) {
@@ -2980,16 +3207,6 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
             return supported;
         };
 
-        struct ProtectedFutureContinuationOwner {
-            size_t ownerIdx = std::numeric_limits<size_t>::max();
-            float distance = std::numeric_limits<float>::infinity();
-            float oldNearestCurrentDistance =
-                std::numeric_limits<float>::infinity();
-            int oldWindowSupport = 0;
-            int centerWindowSupport = 0;
-        };
-        std::unordered_map<int, ProtectedFutureContinuationOwner>
-            protectedFutureContinuationOwnerById;
         if (lumenConfig
                 .fusionSplitPriorProtectFutureContinuationCandidateEnabled &&
             windowEnabled && !windowCandidatesByOffset.empty()) {
@@ -3233,6 +3450,14 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                 .fusionSplitPriorContinuationClaimTieMargin);
                         if (std::isfinite(ownerDistance) &&
                             ownerDistance + tieMargin < parentDistance) {
+                            const auto protectedOwnerIt =
+                                protectedFutureContinuationOwnerById.find(candidateId);
+                            const bool protectedFutureOwnerAssignment =
+                                lumenConfig
+                                    .fusionSplitPriorProtectedFutureOwnerAssignmentEnabled &&
+                                protectedOwnerIt !=
+                                    protectedFutureContinuationOwnerById.end() &&
+                                protectedOwnerIt->second.ownerIdx == ci;
                             const bool elongatedParentCanCarrySoftConflict =
                                 parentShapeElongation >=
                                     std::max(
@@ -3245,10 +3470,33 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                             // the split graph so the later pair scorer can use
                             // separation, window support, and cost gates to
                             // decide instead of losing it at assignment time.
-                            if (!elongatedParentCanCarrySoftConflict &&
+                            //
+                            // Late dense frames add one more safe exception:
+                            // a center can be nearest to a neighbor now, while
+                            // the future-window owner model says it belongs to
+                            // this parent. That protected owner assignment is
+                            // opt-in from YAML and still goes through global
+                            // split selection and split validation.
+                            if (!protectedFutureOwnerAssignment &&
+                                !elongatedParentCanCarrySoftConflict &&
                                 !insideEarlyLargeSeparationAssignCatch) {
                                 ++splitPriorRejectedContinuationOwner;
                                 continue;
+                            }
+                            if (protectedFutureOwnerAssignment) {
+                                std::cout
+                                    << "[CellLumen Fusion SplitPrior ProtectedOwnerAssignment] frame="
+                                    << absoluteFrame
+                                    << " parent=" << cell.getName()
+                                    << " candidateId=" << candidateId
+                                    << " currentOwner=" << ownerIt->second
+                                    << " currentOwnerDistance="
+                                    << ownerDistance
+                                    << " protectedOwnerDistance="
+                                    << protectedOwnerIt->second.distance
+                                    << " parentDistance="
+                                    << parentDistance
+                                    << std::endl;
                             }
                         }
                     }
@@ -3271,6 +3519,53 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                 }
                 ++splitPriorCandidateAssignments;
                 assignedToAnyParent = true;
+            }
+            const auto protectedOwnerIt =
+                protectedFutureContinuationOwnerById.find(
+                    static_cast<int>(candIdx));
+            if (lumenConfig
+                    .fusionSplitPriorProtectedFutureOwnerAssignmentEnabled &&
+                protectedOwnerIt != protectedFutureContinuationOwnerById.end() &&
+                protectedOwnerIt->second.ownerIdx < frame.cells.size()) {
+                const size_t ownerIdx = protectedOwnerIt->second.ownerIdx;
+                auto &ownerList = candidatesByParent[ownerIdx];
+                const int candidateId = static_cast<int>(candIdx);
+                const bool alreadyAssigned =
+                    std::any_of(ownerList.begin(), ownerList.end(),
+                                [&](const FusionCandidateRef &ref) {
+                                    return ref.candidateId == candidateId;
+                                });
+                if (!alreadyAssigned) {
+                    // Late dense frames can have a real daughter center that is
+                    // currently closer to a neighboring continuation, while the
+                    // future-window owner model still supports the old parent.
+                    // Add only these protected centers back to their future
+                    // owner so two-real split evidence is not lost before the
+                    // global selector can compare it with one-real parent anchors.
+                    ownerList.push_back({
+                        candidateId,
+                        candidate.centerScaled,
+                        candidate.voxelCount,
+                        candidate.top10MinusShell,
+                        candidate.majorRadius,
+                        candidate.bRadius,
+                        candidate.minorRadius,
+                        false});
+                    ++splitPriorCandidateAssignments;
+                    assignedToAnyParent = true;
+                    std::cout
+                        << "[CellLumen Fusion SplitPrior ProtectedOwnerForcedAssignment] frame="
+                        << absoluteFrame
+                        << " parent=" << frame.cells[ownerIdx].getName()
+                        << " candidateId=" << candidateId
+                        << " ownerDistance="
+                        << protectedOwnerIt->second.distance
+                        << " oldNearestCurrent="
+                        << protectedOwnerIt->second.oldNearestCurrentDistance
+                        << " centerWindow="
+                        << protectedOwnerIt->second.centerWindowSupport
+                        << std::endl;
+                }
             }
             if (!assignedToAnyParent) {
                 ++splitPriorRejectedParentDistance;
@@ -3961,17 +4256,31 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     if (parentAnchoredPair) {
                         parentPersistencePenalty = 0.0;
                     }
-                    double neighborClaimPenalty = 0.0;
                     const NeighborClaim nearestOtherA = nearestOtherCellClaim(list[i].center);
                     const NeighborClaim nearestOtherB = nearestOtherCellClaim(list[j].center);
+                    auto protectedFutureOwnerIsCurrentParent =
+                        [&](int candidateId) {
+                            const auto protectedIt =
+                                protectedFutureContinuationOwnerById.find(candidateId);
+                            return protectedIt !=
+                                       protectedFutureContinuationOwnerById.end() &&
+                                   protectedIt->second.ownerIdx == parentIdx;
+                        };
+                    const bool candidateAProtectedForParent =
+                        protectedFutureOwnerIsCurrentParent(list[i].candidateId);
+                    const bool candidateBProtectedForParent =
+                        protectedFutureOwnerIsCurrentParent(list[j].candidateId);
+                    double neighborClaimPenalty = 0.0;
                     const float neighborMargin = std::max(0.0f, lumenConfig.fusionSplitPriorNeighborClaimMargin);
-                    if (std::isfinite(nearestOtherA.distance) &&
+                    if (!candidateAProtectedForParent &&
+                        std::isfinite(nearestOtherA.distance) &&
                         nearestOtherA.distance + neighborMargin < parentDistA) {
                         neighborClaimPenalty +=
                             static_cast<double>(parentDistA - nearestOtherA.distance - neighborMargin) *
                             static_cast<double>(lumenConfig.fusionSplitPriorNeighborClaimPenalty);
                     }
-                    if (std::isfinite(nearestOtherB.distance) &&
+                    if (!candidateBProtectedForParent &&
+                        std::isfinite(nearestOtherB.distance) &&
                         nearestOtherB.distance + neighborMargin < parentDistB) {
                         neighborClaimPenalty +=
                             static_cast<double>(parentDistB - nearestOtherB.distance - neighborMargin) *
@@ -3983,6 +4292,7 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     float closestContinuationClaimDistance =
                         std::numeric_limits<float>::infinity();
                     double protectedFutureContinuationPenalty = 0.0;
+                    double lateZContinuationStealPenalty = 0.0;
                     if (lumenConfig.fusionSplitPriorContinuationClaimGuardEnabled) {
                         const float claimRadiusScale = std::max(
                             0.0f,
@@ -3991,10 +4301,23 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                             0.0f,
                             lumenConfig.fusionSplitPriorContinuationClaimTieMargin);
                         auto maybeAddClaimBlocker =
-                            [&](const NeighborClaim &claim, float parentDist) {
+                            [&](const NeighborClaim &claim,
+                                float parentDist,
+                                bool protectedForThisParent) {
                                 if (claim.index >= frame.cells.size() ||
                                     !std::isfinite(claim.distance) ||
                                     claim.maxRadius <= 0.0f) {
+                                    return;
+                                }
+                                // Dense late frames can have a real daughter
+                                // center closer to a neighbor in the current
+                                // image while the future-window owner model
+                                // still says this lineage owns it. In that
+                                // case, do not let the ordinary same-frame
+                                // claim check block the owner itself. The
+                                // candidate still has to pass global split
+                                // selection and later image/bridge gates.
+                                if (protectedForThisParent) {
                                     return;
                                 }
                                 const bool insideNeighborContinuation =
@@ -4015,8 +4338,12 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                                  claim.distance);
 	                                }
 	                            };
-                        maybeAddClaimBlocker(nearestOtherA, parentDistA);
-                        maybeAddClaimBlocker(nearestOtherB, parentDistB);
+                        maybeAddClaimBlocker(nearestOtherA,
+                                             parentDistA,
+                                             candidateAProtectedForParent);
+                        maybeAddClaimBlocker(nearestOtherB,
+                                             parentDistB,
+                                             candidateBProtectedForParent);
                     }
                     auto maybeAddProtectedFutureContinuation =
                         [&](int candidateId) {
@@ -4060,9 +4387,139 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                              .fusionSplitPriorProtectFutureContinuationPenalty
                                       << std::endl;
                             return true;
-                        };
+                    };
                     maybeAddProtectedFutureContinuation(list[i].candidateId);
                     maybeAddProtectedFutureContinuation(list[j].candidateId);
+                    auto maybeAddLateZContinuationStealBlocker =
+                        [&](const NeighborClaim &claim,
+                            float parentDist,
+                            int candidateId,
+                            const cv::Point3f &candidateCenter,
+                            const char *candidateLabel) {
+                            if (!lumenConfig
+                                     .fusionSplitPriorLateZContinuationStealGuardEnabled ||
+                                !currentFrameTwoRealPair ||
+                                claim.index >= frame.cells.size() ||
+                                !std::isfinite(claim.distance) ||
+                                claim.maxRadius <= 0.0f) {
+                                return;
+                            }
+                            if (splitPriorLiveCells <
+                                std::max(
+                                    0,
+                                    lumenConfig
+                                        .fusionSplitPriorLateZContinuationStealMinLiveCells)) {
+                                return;
+                            }
+                            if (pairLateralSep >
+                                    std::max(
+                                        0.0f,
+                                        lumenConfig
+                                            .fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation) ||
+                                pairZDominance <
+                                    std::clamp(
+                                        lumenConfig
+                                            .fusionSplitPriorLateZContinuationStealMinSeedZDominance,
+                                        0.0f,
+                                        1.0f) ||
+                                parentDistanceBalance >
+                                    std::max(
+                                        0.0f,
+                                        lumenConfig
+                                            .fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance)) {
+                                return;
+                            }
+                            const float midpointLimit =
+                                parentMaxR *
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale);
+                            if (midpointLimit > 0.0f && midpointDist > midpointLimit) {
+                                return;
+                            }
+                            const float maxOtherDistance =
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorLateZContinuationStealMaxOtherDistance);
+                            const float otherRadiusLimit =
+                                claim.maxRadius *
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorLateZContinuationStealOtherRadiusScale);
+                            if (claim.distance > std::max(maxOtherDistance, otherRadiusLimit)) {
+                                return;
+                            }
+                            if (claim.distance - parentDist >
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorLateZContinuationStealMaxParentAdvantage)) {
+                                return;
+                            }
+                            const int candidateWindowSupport =
+                                singlePointWindowSupport(candidateCenter);
+                            if (candidateWindowSupport <
+                                std::max(
+                                    0,
+                                    lumenConfig
+                                        .fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport)) {
+                                return;
+                            }
+                            // In dense late frames, a z-dominant two-real pair
+                            // with a center that is also a plausible nearby
+                            // continuation can steal lineage without changing
+                            // the final cell count. Penalize it before global
+                            // split selection so a true parent-anchor or cleaner
+                            // split can keep the split budget.
+                            appendUniqueBlockerName(continuationClaimBlockers,
+                                                    continuationClaimBlockerNames,
+                                                    claim.index);
+                            closestContinuationClaimDistance =
+                                std::min(closestContinuationClaimDistance,
+                                         claim.distance);
+                            lateZContinuationStealPenalty +=
+                                static_cast<double>(
+                                    std::max(
+                                        0.0f,
+                                        lumenConfig
+                                            .fusionSplitPriorLateZContinuationStealPenalty));
+                            std::cout
+                                << "[CellLumen Fusion SplitPrior LateZContinuationSteal Guard] frame="
+                                << absoluteFrame
+                                << " parent=" << parent.getName()
+                                << " candidate=" << candidateLabel
+                                << " candidateId=" << candidateId
+                                << " blocker="
+                                << frame.cells[claim.index].getName()
+                                << " parentDist=" << parentDist
+                                << " blockerDist=" << claim.distance
+                                << " parentAdvantage="
+                                << (claim.distance - parentDist)
+                                << " pairLateral=" << pairLateralSep
+                                << " pairZDominance=" << pairZDominance
+                                << " parentDistBalance="
+                                << parentDistanceBalance
+                                << " midpointDist=" << midpointDist
+                                << " candidateWindowSupport="
+                                << candidateWindowSupport
+                                << " penalty="
+                                << lumenConfig
+                                       .fusionSplitPriorLateZContinuationStealPenalty
+                                << std::endl;
+                        };
+                    maybeAddLateZContinuationStealBlocker(nearestOtherA,
+                                                          parentDistA,
+                                                          list[i].candidateId,
+                                                          list[i].center,
+                                                          "A");
+                    maybeAddLateZContinuationStealBlocker(nearestOtherB,
+                                                          parentDistB,
+                                                          list[j].candidateId,
+                                                          list[j].center,
+                                                          "B");
                     const bool conflictReplacementEligible =
                         lumenConfig.fusionSplitPriorConflictReplacementEnabled &&
                         nearParentDist <= parentMaxR *
@@ -4141,7 +4598,8 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         }
                     }
                     continuationClaimSoftPenalty +=
-                        protectedFutureContinuationPenalty;
+                        protectedFutureContinuationPenalty +
+                        lateZContinuationStealPenalty;
                     const bool cleanStrongWindowSupported =
                         windowSupport.bothDaughtersSupported >= 2 &&
                         windowSupport.missingDaughterCount == 0 &&
@@ -4250,6 +4708,9 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                 0.0f,
                                 lumenConfig
                                     .fusionSplitPriorTemporalRepairStrongMaxNeighborClaimPenalty));
+                    const bool temporalRepairCatchPair =
+                        list[i].assignedByTemporalRepairCatch ||
+                        list[j].assignedByTemporalRepairCatch;
 	                    const bool strongTemporalDaughterEvidence =
                         currentFrameTwoRealPair &&
                         list[i].voxelCount >=
@@ -4272,13 +4733,56 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                 0.0f,
                                 lumenConfig
                                     .fusionSplitPriorTemporalRepairStrongMinSignal);
+                    // The temporal-catch strong evidence switch was originally
+                    // checked only after a pair reached the ranked list. That
+                    // missed f098-like cases: a real daughter center entered
+                    // through the wider temporal catch radius, but the pair was
+                    // discarded here as asymmetric before the later rescue could
+                    // inspect it. Keep the relaxation opt-in and feature based.
+                    const bool temporalCatchStrongDaughterEvidence =
+                        currentFrameTwoRealPair &&
+                        temporalRepairCatchPair &&
+                        lumenConfig
+                            .fusionSplitPriorTemporalRepairCatchStrongEvidenceEnabled &&
+                        parentShapeElongation >=
+                            std::max(
+                                1.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongMinParentShape) &&
+                        rankingSoftPenalty <=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty) &&
+                        list[i].voxelCount >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongMinVoxels) &&
+                        list[j].voxelCount >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongMinVoxels) &&
+                        list[i].signal >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongMinSignal) &&
+                        list[j].signal >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongMinSignal);
                     const bool temporalBalanceOk =
                         parentDistanceBalance >= temporalMinParentBalance ||
-                        (strongTemporalDaughterEvidence &&
+                        ((strongTemporalDaughterEvidence ||
+                          temporalCatchStrongDaughterEvidence) &&
                          parentDistanceBalance >= temporalStrongMinParentBalance);
                     const bool temporalNeighborClaimOk =
                         neighborClaimPenalty <= temporalMaxNeighborClaim ||
-                        (strongTemporalDaughterEvidence &&
+                        ((strongTemporalDaughterEvidence ||
+                          temporalCatchStrongDaughterEvidence) &&
                          neighborClaimPenalty <= temporalStrongMaxNeighborClaim);
                     const bool temporalAsymmetricPair =
                         parentDistanceBalance <
@@ -4287,7 +4791,9 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                             lumenConfig
                                 .fusionSplitPriorTemporalRepairStrongAsymmetryBalance);
                     const bool temporalAsymmetrySignalOk =
-                        !temporalAsymmetricPair || strongTemporalDaughterEvidence;
+                        !temporalAsymmetricPair ||
+                        strongTemporalDaughterEvidence ||
+                        temporalCatchStrongDaughterEvidence;
                     const bool temporalRepairEligible =
                         temporalRepairEnabled &&
                         !parentAnchoredPair &&
@@ -4312,9 +4818,6 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         (!lumenConfig
                               .fusionSplitPriorTemporalRepairRejectClaimBlockers ||
                          continuationClaimBlockers.empty());
-                    const bool temporalRepairCatchPair =
-                        list[i].assignedByTemporalRepairCatch ||
-                        list[j].assignedByTemporalRepairCatch;
                     const FusionCandidateRef *parentAnchorRealRef = nullptr;
                     if (parentAnchoredPair) {
                         parentAnchorRealRef =
@@ -4396,6 +4899,52 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     }
                     if (temporalRepairCatchPair && !temporalRepairEligible &&
                         !temporalCatchParentAnchorAllowed) {
+                        if (lumenConfig
+                                .fusionSplitPriorDebugTemporalCatchPairRejectsEnabled) {
+                            std::cout
+                                << "[CellLumen Fusion SplitPrior Reject TemporalCatchPair] frame="
+                                << absoluteFrame
+                                << " parent=" << parent.getName()
+                                << " candidateIds=(" << list[i].candidateId
+                                << "," << list[j].candidateId << ")"
+                                << " sep=" << sep
+                                << " midpointDist=" << midpointDist
+                                << " parentDistNearFar=(" << nearParentDist
+                                << "," << farParentDist << ")"
+                                << " parentDistBalance="
+                                << parentDistanceBalance
+                                << " windowBoth="
+                                << windowSupport.bothDaughtersSupported
+                                << " windowMissing="
+                                << windowSupport.missingDaughterCount
+                                << " windowParentPersists="
+                                << windowSupport.parentPersists
+                                << " temporalBalanceOk="
+                                << temporalBalanceOk
+                                << " temporalAsymmetrySignalOk="
+                                << temporalAsymmetrySignalOk
+                                << " temporalNeighborClaimOk="
+                                << temporalNeighborClaimOk
+                                << " continuationClaimSoftPenalty="
+                                << continuationClaimSoftPenalty
+                                << " continuationClaimBlockers="
+                                << (continuationClaimBlockerNames.empty()
+                                        ? std::string("none")
+                                        : continuationClaimBlockerNames)
+                                << " strongGeneric="
+                                << strongTemporalDaughterEvidence
+                                << " strongTemporalCatch="
+                                << temporalCatchStrongDaughterEvidence
+                                << " vox=(" << list[i].voxelCount
+                                << "," << list[j].voxelCount << ")"
+                                << " signal=(" << list[i].signal
+                                << "," << list[j].signal << ")"
+                                << " rankingSoftPenalty="
+                                << rankingSoftPenalty
+                                << " neighborClaimPenalty="
+                                << neighborClaimPenalty
+                                << std::endl;
+                        }
                         ++splitPriorRejectedTemporalCatchPairs;
                         continue;
                     }
@@ -4412,6 +4961,19 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
 	                                         static_cast<double>(windowSupport.score) -
 	                                         balancedWindowBonus -
 	                                         parentAnchorBonus;
+                    if (temporalRepairCatchPair && strongTemporalDaughterEvidence) {
+                        // A true daughter can enter only through the wider
+                        // temporal catch radius when it has moved far from the
+                        // old parent center. Without this opt-in score bonus,
+                        // that two-real pair can lose to a cheaper one-real
+                        // parent-anchor approximation even though both future
+                        // frames support the two real CellLumen centers.
+                        rawScore -= static_cast<double>(
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairCatchStrongScoreBonus));
+                    }
 	                    if (lateWideTwoRealPairRescued) {
 	                        rawScore -=
 	                            static_cast<double>(
@@ -4617,6 +5179,93 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                lumenConfig
                                    .fusionSplitPriorLowShapeZDominantMaxParentShape);
             };
+        auto isStrongTemporalSeedColumnSplitEvidence =
+            [&](const RankedSplitPrior &ranked) {
+                if (!lumenConfig
+                         .fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled ||
+                    ranked.parentAnchored ||
+                    ranked.candidateA < 0 ||
+                    ranked.candidateA >= 1000000 ||
+                    ranked.candidateB < 0 ||
+                    ranked.candidateB >= 1000000 ||
+                    ranked.windowBothDaughtersSupported < 2 ||
+                    ranked.windowMissingDaughterCount != 0 ||
+                    ranked.windowParentPersists != 0 ||
+                    !ranked.temporalRepairEligible) {
+                    return false;
+                }
+                const auto stats = splitPriorAxisStats(ranked);
+                const float maxLateral =
+                    std::max(
+                        0.0f,
+                        lumenConfig
+                            .fusionSplitPriorCleanWindowSeedColumnMaxLateralSeparation);
+                const float minZDominance =
+                    std::clamp(
+                        lumenConfig
+                            .fusionSplitPriorCleanWindowSeedColumnMinZDominance,
+                        0.0f,
+                        1.0f);
+                const float minParentShape =
+                    std::max(
+                        1.0f,
+                        lumenConfig
+                            .fusionSplitPriorCleanWindowSeedColumnMinParentShape);
+                const float maxParentShape =
+                    std::max(
+                        minParentShape,
+                        lumenConfig
+                            .fusionSplitPriorCleanWindowSeedColumnMaxParentShape);
+                const bool seedColumnLike =
+                    stats.first <= maxLateral &&
+                    stats.second >= minZDominance &&
+                    ranked.parentShapeElongation >= minParentShape &&
+                    ranked.parentShapeElongation <= maxParentShape;
+                if (!seedColumnLike) {
+                    return false;
+                }
+                return ranked.sep >=
+                           std::max(
+                               0.0f,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation) &&
+                       ranked.parentDistanceBalance >=
+                           std::max(
+                               0.0f,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance) &&
+                       ranked.midpointDist <=
+                           std::max(
+                               0.0f,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance) &&
+                       ranked.voxA >=
+                           std::max(
+                               0,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels) &&
+                       ranked.voxB >=
+                           std::max(
+                               0,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels) &&
+                       ranked.signalA >=
+                           std::max(
+                               0.0f,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal) &&
+                       ranked.signalB >=
+                           std::max(
+                               0.0f,
+                               lumenConfig
+                                   .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal) &&
+                       ranked.score <=
+                           static_cast<double>(
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore));
+            };
         auto isCleanWindowSeedColumnZStackPair =
             [&](const RankedSplitPrior &ranked) {
                 if (!lumenConfig
@@ -4658,10 +5307,21 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         minParentShape,
                         lumenConfig
                             .fusionSplitPriorCleanWindowSeedColumnMaxParentShape);
-                return stats.first <= maxLateral &&
-                       stats.second >= minZDominance &&
-                       ranked.parentShapeElongation >= minParentShape &&
-                       ranked.parentShapeElongation <= maxParentShape;
+                const bool seedColumnLike =
+                    stats.first <= maxLateral &&
+                    stats.second >= minZDominance &&
+                    ranked.parentShapeElongation >= minParentShape &&
+                    ranked.parentShapeElongation <= maxParentShape;
+                if (!seedColumnLike) {
+                    return false;
+                }
+                // f112 showed the opposite side of this safety guard: a true
+                // division can be almost vertical in z. Keep the reject, but
+                // let a very strong temporal repair pair reach the global
+                // selector so later image and bridge checks still decide.
+                const bool strongTemporalZSplit =
+                    isStrongTemporalSeedColumnSplitEvidence(ranked);
+                return !strongTemporalZSplit;
             };
         auto preferRankedSplitPrior =
             [&](const RankedSplitPrior &a, const RankedSplitPrior &b) {
@@ -4873,6 +5533,7 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                   });
 
         std::set<size_t> selectedRankedPriorIndexes;
+        std::set<size_t> cleanTwoRealClaimRescuedRankedPriorIndexes;
         size_t searchNodes = 0;
         bool searchTruncated = false;
         const double maxSelectableCost =
@@ -4971,6 +5632,14 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                        ranked.score <= hardScoreCeiling;
             };
             auto isWeakAsymmetricElongatedRescue = [&](const RankedSplitPrior &ranked) {
+                if (isStrongTemporalSeedColumnSplitEvidence(ranked)) {
+                    // f112 has a real z-separated division with two strong
+                    // current CellLumen centers. It looks asymmetric only because
+                    // the old parent center sits closer to one daughter. Do not
+                    // reuse the f058 internal-texture guard for this profile-gated
+                    // temporal evidence pattern.
+                    return false;
+                }
                 const bool cleanAsymmetricWindowPair =
                     !ranked.parentAnchored &&
                     hasCleanWindowSupport(ranked) &&
@@ -5188,6 +5857,159 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                            ranked.continuationClaimSoftPenalty <= 1e-5f &&
                            ranked.parentPersistencePenalty <= 1e-5f;
                 };
+            std::set<size_t> lateParentAnchorShortVetoBypassLogged;
+            auto isLateParentAnchorOneRealShortElongatedDuplicate =
+                [&](const RankedSplitPrior &ranked) {
+                    if (!lumenConfig
+                             .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled ||
+                        !ranked.parentAnchored) {
+                        return false;
+                    }
+                    const bool realA =
+                        isCurrentFrameLumenCandidateId(ranked.candidateA);
+                    const bool realB =
+                        isCurrentFrameLumenCandidateId(ranked.candidateB);
+                    if (realA == realB) {
+                        return false;
+                    }
+                    const int realVoxels = realA ? ranked.voxA : ranked.voxB;
+                    const float realSignal = realA ? ranked.signalA : ranked.signalB;
+                    const auto axisStats = splitPriorAxisStats(ranked);
+                    const bool strongNegativeBypass =
+                        lumenConfig
+                            .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled &&
+                        static_cast<int>(frame.cells.size()) >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells) &&
+                        ranked.windowBothDaughtersSupported >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth) &&
+                        ranked.windowMissingDaughterCount == 0 &&
+                        ranked.windowParentPersists == 0 &&
+                        ranked.parentShapeElongation >=
+                            std::max(
+                                1.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape) &&
+                        (lumenConfig
+                                     .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape <=
+                                 0.0f ||
+                         ranked.parentShapeElongation <=
+                             lumenConfig
+                                 .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape) &&
+                        ranked.score <=
+                            static_cast<double>(
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore) &&
+                        realVoxels >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels) &&
+                        realSignal >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal) &&
+                        ranked.farParentDist >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance) &&
+                        ranked.farParentDist <=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance) &&
+                        axisStats.first >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation) &&
+                        axisStats.second <=
+                            std::clamp(
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance,
+                                0.0f, 1.0f) &&
+                        ranked.midpointDist <=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance) &&
+                        ranked.neighborClaimPenalty <=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty) &&
+                        ranked.continuationClaimSoftPenalty <= 1e-5f &&
+                        ranked.parentPersistencePenalty <= 1e-5f;
+                    if (strongNegativeBypass) {
+                        const size_t rankedIndex =
+                            static_cast<size_t>(&ranked - rankedPriors.data());
+                        if (lateParentAnchorShortVetoBypassLogged.insert(rankedIndex)
+                                .second) {
+                            std::cout
+                                << "[CellLumen Fusion LateParentAnchorShortVeto Bypass] frame="
+                                << absoluteFrame
+                                << " parent="
+                                << frame.cells[ranked.parentIdx].getName()
+                                << " score=" << ranked.score
+                                << " voxels=" << realVoxels
+                                << " signal=" << realSignal
+                                << " lateral=" << axisStats.first
+                                << " zDominance=" << axisStats.second
+                                << " farParentDist=" << ranked.farParentDist
+                                << " midpointDist=" << ranked.midpointDist
+                                << " parentShape="
+                                << ranked.parentShapeElongation
+                                << " candidateIds=(" << ranked.candidateA
+                                << "," << ranked.candidateB << ")"
+                                << std::endl;
+                        }
+                        return false;
+                    }
+                    // f172 exposed a dense-frame false split where one daughter
+                    // was just the old parent center and the only real CellLumen
+                    // seed was a short offset on an already elongated
+                    // continuation. Keep this as a late-profile veto so true
+                    // early one-real repairs are untouched.
+                    return static_cast<int>(frame.cells.size()) >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells) &&
+                           ranked.windowBothDaughtersSupported >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth) &&
+                           ranked.parentShapeElongation >=
+                               std::max(
+                                   1.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape) &&
+                           ranked.farParentDist <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance) &&
+                           ranked.midpointDist <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance) &&
+                           ranked.neighborClaimPenalty <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty) &&
+                           ranked.continuationClaimSoftPenalty <= 1e-5f &&
+                           ranked.parentPersistencePenalty <= 1e-5f;
+                };
             auto isWeakParentAnchoredOneReal =
                 [&](const RankedSplitPrior &ranked) {
                     if (!lumenConfig
@@ -5265,9 +6087,9 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                 lumenConfig
                                     .fusionSplitPriorParentAnchorSharedPenaltyBypassMaxZDominance,
                                 0.0f, 1.0f);
-                    const bool widePartialParentAnchorBypass =
-                        lumenConfig
-                            .fusionSplitPriorWeakParentAnchoredPartialBypassEnabled &&
+	                    const bool widePartialParentAnchorBypass =
+	                        lumenConfig
+	                            .fusionSplitPriorWeakParentAnchoredPartialBypassEnabled &&
                         ranked.parentShapeElongation >=
                             std::max(
                                 1.0f,
@@ -5324,27 +6146,107 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                 lumenConfig
                                     .fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance,
                                 0.0f, 1.0f) &&
-                        ranked.midpointDist <=
-                            std::max(
-                                0.0f,
-                                lumenConfig
-                                    .fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance);
-                    // f018 Cell type 1_10 is a real partial parent-anchor
-                    // split: one current Cell Lumen center is dimmer than the
-                    // weak-anchor guard wants, but it is laterally separated
-                    // from the parent anchor and has partial future support.
-                    // Do not classify that geometry as an internal texture peak.
+	                        ranked.midpointDist <=
+	                            std::max(
+	                                0.0f,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance);
+	                    const bool negativeWindowParentAnchorBypass =
+	                        lumenConfig
+	                            .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled &&
+	                        ranked.parentShapeElongation >=
+	                            std::max(
+	                                1.0f,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape) &&
+	                        ranked.score <=
+	                            static_cast<double>(
+	                                std::max(
+	                                    0.0f,
+	                                    lumenConfig
+	                                        .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore)) &&
+	                        realVoxels >=
+	                            std::max(
+	                                0,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels) &&
+	                        realSignal >=
+	                            std::max(
+	                                0.0f,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal) &&
+	                        ranked.windowBothDaughtersSupported >=
+	                            std::max(
+	                                0,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth) &&
+	                        ranked.windowMissingDaughterCount <=
+	                            std::max(
+	                                0,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing) &&
+	                        ranked.windowParentPersists <=
+	                            std::max(
+	                                0,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists) &&
+	                        ranked.continuationClaimBlockers.empty() &&
+	                        ranked.neighborClaimPenalty <= 1e-5f &&
+	                        ranked.continuationClaimSoftPenalty <= 1e-5f &&
+	                        ranked.parentPersistencePenalty <= 1e-5f &&
+	                        ranked.rankingSoftPenalty <= 1e-5f &&
+	                        ranked.sep >=
+	                            ranked.minSep *
+	                                std::max(
+	                                    0.0f,
+	                                    lumenConfig
+	                                        .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale) &&
+	                        ranked.farParentDist >=
+	                            std::max(
+	                                0.0f,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance) &&
+	                        stats.first >=
+	                            std::max(
+	                                0.0f,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation) &&
+	                        stats.second <=
+	                            std::clamp(
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance,
+	                                0.0f, 1.0f) &&
+	                        ranked.midpointDist <=
+	                            std::max(
+	                                0.0f,
+	                                lumenConfig
+	                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance);
+	                    // f018 Cell type 1_10 is a real partial parent-anchor
+	                    // split: one current Cell Lumen center is dimmer than the
+	                    // weak-anchor guard wants, but it is laterally separated
+	                    // from the parent anchor and has partial future support.
+	                    // Do not classify that geometry as an internal texture peak.
                     //
                     // f175 later showed the same idea in a much denser frame:
                     // a true one-real parent-anchor split had clean two-frame
                     // future support but only 1215 current voxels, so the
                     // weak-anchor filter killed it before global selection.
-                    // Keep that bypass density-profile gated instead of
-                    // lowering the general weak filter.
-                    if (widePartialParentAnchorBypass ||
-                        strongFutureParentAnchorBypass) {
-                        return false;
-                    }
+	                    // Keep that bypass density-profile gated instead of
+	                    // lowering the general weak filter.
+	                    //
+	                    // f118 Cell type 1_200110 exposed a cleaner version of
+	                    // the same failure: both future frames support the
+	                    // parent-anchor split and the current real Cell Lumen
+	                    // seed is strong, but parent elongation was just below
+	                    // the broad partial-window shape threshold. Let only
+	                    // this negative-cost, two-frame-supported pattern reach
+	                    // global selection so temporal center repair cannot turn
+	                    // the true split into a one-frame-late continuation move.
+	                    if (widePartialParentAnchorBypass ||
+	                        strongFutureParentAnchorBypass ||
+	                        negativeWindowParentAnchorBypass) {
+	                        return false;
+	                    }
                     // Sparse large cells often keep one stable internal bright
                     // peak while the old parent center remains valid. That
                     // looks like one real CellLumen center plus the synthetic
@@ -5621,11 +6523,62 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                             0.0f,
                             lumenConfig
                                 .fusionSplitPriorWeakAsymmetricCleanWindowMinSignal);
-	                    return ranked.voxA < minVoxels ||
-	                           ranked.voxB < minVoxels ||
-	                           ranked.signalA < minSignal ||
-	                           ranked.signalB < minSignal;
-	                };
+		                    return ranked.voxA < minVoxels ||
+		                           ranked.voxB < minVoxels ||
+		                           ranked.signalA < minSignal ||
+		                           ranked.signalB < minSignal;
+		                };
+            auto isLowShapeUnbalancedPositiveCleanWindowPair =
+                [&](const RankedSplitPrior &ranked) {
+                    if (!lumenConfig
+                             .fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled ||
+                        ranked.parentAnchored ||
+                        !isCurrentFrameLumenCandidateId(ranked.candidateA) ||
+                        !isCurrentFrameLumenCandidateId(ranked.candidateB) ||
+                        !hasCleanWindowSupport(ranked)) {
+                        return false;
+                    }
+                    if (lumenConfig
+                            .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair &&
+                        !ranked.temporalRepairEligible) {
+                        return false;
+                    }
+                    // f099 showed a clean two-frame window can still repeat two
+                    // non-daughter bright regions inside a low-shape parent. The
+                    // key signature is positive rank cost, no balanced daughter
+                    // bonus, a very unbalanced parent-distance layout, and a
+                    // parent that is not an obvious elongated bridge. Keep the
+                    // centers for continuation evidence, but do not commit the
+                    // lineage split when this profile-gated pattern appears.
+                    return ranked.balancedWindowBonus <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus) &&
+                           ranked.parentShapeElongation <=
+                               std::max(
+                                   1.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape) &&
+                           ranked.parentDistanceBalance <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance) &&
+                           ranked.score >=
+                               static_cast<double>(
+                                   lumenConfig
+                                       .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore) &&
+                           ranked.rawScore >=
+                               static_cast<double>(
+                                   lumenConfig
+                                       .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore) &&
+                           ranked.sep >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation);
+                };
             auto isTriaxialNoBalancedCleanWindowPair =
                 [&](const RankedSplitPrior &ranked) {
                     if (!lumenConfig
@@ -6140,10 +7093,25 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         !isCurrentFrameLumenCandidateId(ranked.candidateB) ||
                         !hasCleanWindowSupport(ranked) ||
                         ranked.continuationClaimBlockers.size() != 1 ||
-                        ranked.neighborClaimPenalty > 1e-5f ||
+                        ranked.parentShapeElongation <
+                            std::max(
+                                1.0f,
+                                lumenConfig
+                                    .fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape) ||
+                        ranked.neighborClaimPenalty >
+                            std::max(
+                                1e-5f,
+                                lumenConfig
+                                    .fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty) ||
                         ranked.parentPersistencePenalty > 1e-5f) {
                         return false;
                     }
+                    // Late dense f172 can have a real two-center split where
+                    // one Cell Lumen center is temporarily claimed by a nearby
+                    // continuation. Keep this as a single-blocker rescue with
+                    // explicit parent-shape and neighbor-claim limits, so a
+                    // round continuation cannot steal the same center from the
+                    // elongated parent that is actually dividing.
                     return ranked.voxA >=
                                std::max(0,
                                         lumenConfig
@@ -6301,6 +7269,184 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                        lumenConfig
                                            .fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore));
                 };
+            auto isCleanTwoRealSharedClaimRescue =
+                [&](const RankedSplitPrior &ranked) {
+                    if (!lumenConfig
+                             .fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled ||
+                        ranked.parentAnchored ||
+                        !isCurrentFrameLumenCandidateId(ranked.candidateA) ||
+                        !isCurrentFrameLumenCandidateId(ranked.candidateB) ||
+                        !hasCleanWindowSupport(ranked) ||
+                        ranked.continuationClaimBlockers.empty() ||
+                        ranked.continuationClaimBlockers.size() >
+                            static_cast<size_t>(
+                                std::max(
+                                    0,
+                                    lumenConfig
+                                        .fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers)) ||
+                        ranked.parentPersistencePenalty > 1e-5f) {
+                        return false;
+                    }
+                    // This late dense rescue handles the case where both
+                    // daughters have strong future evidence, but current-frame
+                    // continuation claims make the normal high-neighbor rescue
+                    // unavailable. It stays narrow by requiring two real
+                    // candidates, clean future support, bounded claim pressure,
+                    // and balanced geometry around the parent.
+                    return ranked.parentShapeElongation >=
+                               std::max(
+                                   1.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealSharedClaimMinParentShape) &&
+                           ranked.voxA >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMinVoxels) &&
+                           ranked.voxB >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMinVoxels) &&
+                           ranked.signalA >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMinSignal) &&
+                           ranked.signalB >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMinSignal) &&
+                           ranked.neighborClaimPenalty >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty) &&
+                           ranked.neighborClaimPenalty <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty) &&
+                           ranked.continuationClaimSoftPenalty <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty) &&
+                           ranked.parentDistanceBalance >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance) &&
+                           ranked.nearParentDist >=
+                               std::max(10.0f, ranked.minSep * 1.35f) &&
+                           ranked.sep >= ranked.minSep * 2.0f &&
+                           ranked.midpointDist <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance) &&
+                           ranked.score <=
+                               static_cast<double>(
+                                   std::max(
+                                       0.0f,
+                                       lumenConfig
+                                           .fusionSplitPriorCleanTwoRealSharedClaimMaxScore));
+                };
+            auto isCleanTwoRealAsymmetricClaimRescue =
+                [&](const RankedSplitPrior &ranked) {
+                    if (!lumenConfig
+                             .fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled ||
+                        ranked.parentAnchored ||
+                        !isCurrentFrameLumenCandidateId(ranked.candidateA) ||
+                        !isCurrentFrameLumenCandidateId(ranked.candidateB) ||
+                        !hasCleanWindowSupport(ranked) ||
+                        ranked.continuationClaimBlockers.size() != 1 ||
+                        ranked.parentPersistencePenalty > 1e-5f) {
+                        return false;
+                    }
+                    const size_t blockerIdx = ranked.continuationClaimBlockers.front();
+                    if (blockerIdx >= frame.cells.size() ||
+                        frame.cells[blockerIdx].isTrash()) {
+                        return false;
+                    }
+                    const float blockerShape =
+                        frame.cells[blockerIdx].shapeElongation();
+                    // Late dense f171 exposed an asymmetric shared-claim case:
+                    // one lower-shape continuation claimed a true daughter
+                    // center, so the real two-center split looked expensive and
+                    // a false neighbor split won the global assignment. This
+                    // remains a selector rescue only; downstream image, bridge,
+                    // overlap, and refit gates still validate the split.
+                    return ranked.parentShapeElongation >=
+                               std::max(
+                                   1.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape) &&
+                           blockerShape <=
+                               std::max(
+                                   1.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape) &&
+                           ranked.parentShapeElongation >=
+                               blockerShape +
+                                   std::max(
+                                       0.0f,
+                                       lumenConfig
+                                           .fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage) &&
+                           ranked.voxA >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels) &&
+                           ranked.voxB >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels) &&
+                           ranked.signalA >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal) &&
+                           ranked.signalB >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal) &&
+                           ranked.parentDistanceBalance >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance) &&
+                           ranked.continuationClaimSoftPenalty <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty) &&
+                           ranked.midpointDist <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance) &&
+                           ranked.farParentDist >=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance) &&
+                           ranked.sep >=
+                               ranked.minSep *
+                                   std::max(
+                                       0.0f,
+                                       lumenConfig
+                                           .fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale) &&
+                           ranked.score <=
+                               static_cast<double>(
+                                   std::max(
+                                       0.0f,
+                                       lumenConfig
+                                           .fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore));
+                };
             auto isCleanTwoRealCompactRescue =
                 [&](const RankedSplitPrior &ranked) {
                     if (!lumenConfig
@@ -6367,6 +7513,44 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                        lumenConfig
                                            .fusionSplitPriorCleanTwoRealCompactMaxScore));
                 };
+            auto hasParentAnchorReplacementWindowEvidence =
+                [&](const RankedSplitPrior &ranked) {
+                    const int minWindowBoth =
+                        std::max(
+                            0,
+                            lumenConfig
+                                .fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth);
+                    const int maxWindowMissing =
+                        std::max(
+                            0,
+                            lumenConfig
+                                .fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing);
+                    const int maxParentPersists =
+                        std::max(
+                            0,
+                            lumenConfig
+                                .fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists);
+                    if (ranked.windowBothDaughtersSupported >= minWindowBoth &&
+                        ranked.windowMissingDaughterCount <= maxWindowMissing &&
+                        ranked.windowParentPersists <= maxParentPersists) {
+                        return true;
+                    }
+                    if (!lumenConfig
+                             .fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence) {
+                        return false;
+                    }
+                    // The f086 clean-run failure shows a real split can have
+                    // one future frame with both daughters and one future frame
+                    // where the parent still appears because the daughters are
+                    // extremely close. Keep this opt-in path narrow: geometry,
+                    // signal, voxel, claim, and score checks below must still
+                    // pass before this can become a selected split.
+                    return ranked.windowBothDaughtersSupported >= 1 &&
+                           ranked.windowMissingDaughterCount <=
+                               maxWindowMissing &&
+                           ranked.windowParentPersists > 0 &&
+                           ranked.windowParentPersists <= maxParentPersists;
+                };
             auto sharesParentAnchorAlternative =
                 [&](const RankedSplitPrior &ranked) {
                     const double maxAnchorScoreDelta =
@@ -6386,21 +7570,7 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         const bool otherRealB =
                             isCurrentFrameLumenCandidateId(other.candidateB);
                         if (otherRealA == otherRealB ||
-                            other.windowBothDaughtersSupported <
-                                std::max(
-                                    0,
-                                    lumenConfig
-                                        .fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth) ||
-                            other.windowMissingDaughterCount >
-                                std::max(
-                                    0,
-                                    lumenConfig
-                                        .fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing) ||
-                            other.windowParentPersists >
-                                std::max(
-                                    0,
-                                    lumenConfig
-                                        .fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists)) {
+                            !hasParentAnchorReplacementWindowEvidence(other)) {
                             continue;
                         }
                         const int otherRealId =
@@ -6422,21 +7592,7 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         ranked.parentAnchored ||
                         !isCurrentFrameLumenCandidateId(ranked.candidateA) ||
                         !isCurrentFrameLumenCandidateId(ranked.candidateB) ||
-                        ranked.windowBothDaughtersSupported <
-                            std::max(
-                                0,
-                                lumenConfig
-                                    .fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth) ||
-                        ranked.windowMissingDaughterCount >
-                            std::max(
-                                0,
-                                lumenConfig
-                                    .fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing) ||
-                        ranked.windowParentPersists >
-                            std::max(
-                                0,
-                                lumenConfig
-                                    .fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists) ||
+                        !hasParentAnchorReplacementWindowEvidence(ranked) ||
                         !ranked.continuationClaimBlockers.empty() ||
                         ranked.neighborClaimPenalty > 1e-5f ||
                         ranked.parentPersistencePenalty >
@@ -6659,6 +7815,86 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         return false;
                     }
                     const auto axisStats = splitPriorAxisStats(ranked);
+                    const int realVoxels = realA ? ranked.voxA : ranked.voxB;
+                    const float realSignal =
+                        realA ? ranked.signalA : ranked.signalB;
+                    const bool strongNegativeWindowParentAnchorSplit =
+                        lumenConfig
+                            .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled &&
+                        ranked.parentShapeElongation >=
+                            std::max(
+                                1.0f,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape) &&
+                        ranked.score <=
+                            static_cast<double>(
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore)) &&
+                        realVoxels >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels) &&
+                        realSignal >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal) &&
+                        ranked.windowBothDaughtersSupported >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth) &&
+                        ranked.windowMissingDaughterCount <=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing) &&
+                        ranked.windowParentPersists <=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists) &&
+                        ranked.continuationClaimBlockers.empty() &&
+                        ranked.neighborClaimPenalty <= 1e-5f &&
+                        ranked.continuationClaimSoftPenalty <= 1e-5f &&
+                        ranked.parentPersistencePenalty <= 1e-5f &&
+                        ranked.rankingSoftPenalty <= 1e-5f &&
+                        ranked.sep >=
+                            ranked.minSep *
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale) &&
+                        ranked.farParentDist >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance) &&
+                        axisStats.first >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation) &&
+                        axisStats.second <=
+                            std::clamp(
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance,
+                                0.0f, 1.0f) &&
+                        ranked.midpointDist <=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance);
+                    // f118 showed that a true parent-anchor split can look like
+                    // the f098 low-z duplicate pattern in broad geometry. Keep
+                    // the duplicate guard, but let a strong current seed plus
+                    // clean two-frame future evidence reach global selection.
+                    if (strongNegativeWindowParentAnchorSplit) {
+                        return false;
+                    }
                     return ranked.windowBothDaughtersSupported >=
                                std::max(
                                    0,
@@ -6693,6 +7929,74 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                static_cast<double>(
                                    lumenConfig
                                        .fusionSplitPriorParentAnchorCleanWindowLowZMaxScore) &&
+                           ranked.neighborClaimPenalty <= 1e-5f &&
+                           ranked.continuationClaimSoftPenalty <= 1e-5f &&
+                           ranked.parentPersistencePenalty <= 1e-5f;
+                };
+            auto isParentAnchorCleanWindowHighZDuplicate =
+                [&](const RankedSplitPrior &ranked) {
+                    if (!lumenConfig
+                             .fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate ||
+                        !ranked.parentAnchored) {
+                        return false;
+                    }
+                    const bool realA =
+                        isCurrentFrameLumenCandidateId(ranked.candidateA);
+                    const bool realB =
+                        isCurrentFrameLumenCandidateId(ranked.candidateB);
+                    if (realA == realB) {
+                        return false;
+                    }
+                    const float realSignal = realA ? ranked.signalA : ranked.signalB;
+                    const auto axisStats = splitPriorAxisStats(ranked);
+                    // This middle-density guard targets z-stack duplicate
+                    // splits: one weak real lumen point lies mostly above or
+                    // below a parent anchor, so the future window looks clean
+                    // even though there is little lateral daughter separation.
+                    return ranked.windowBothDaughtersSupported >=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth) &&
+                           ranked.windowMissingDaughterCount <=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing) &&
+                           ranked.windowParentPersists <=
+                               std::max(
+                                   0,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists) &&
+                           ranked.parentShapeElongation >=
+                               std::max(
+                                   1.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape) &&
+                           ranked.sep <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation) &&
+                           axisStats.first <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation) &&
+                           axisStats.second >=
+                               std::clamp(
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance,
+                                   0.0f, 1.0f) &&
+                           realSignal <=
+                               std::max(
+                                   0.0f,
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal) &&
+                           ranked.score <=
+                               static_cast<double>(
+                                   lumenConfig
+                                       .fusionSplitPriorParentAnchorCleanWindowHighZMaxScore) &&
                            ranked.neighborClaimPenalty <= 1e-5f &&
                            ranked.continuationClaimSoftPenalty <= 1e-5f &&
                            ranked.parentPersistencePenalty <= 1e-5f;
@@ -7059,6 +8363,46 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     const bool strongTemporalCatchEvidence =
                         ranked.temporalRepairCatchExpanded &&
                         hasStrongTemporalDaughterEvidence(ranked);
+                    // f109 had two strong current-frame CellLumen centers with
+                    // clean future support, but the pair was not catch-expanded,
+                    // so the old high-penalty rule rejected it and a later
+                    // continuation repair kept only one daughter. Keep this
+                    // opt-in and evidence based so other density profiles do
+                    // not inherit a broader split preference.
+                    const bool strongCurrentPairHighPenaltyEvidence =
+                        lumenConfig
+                            .fusionSplitPriorTemporalRepairStrongHighPenaltyRescueEnabled &&
+                        !ranked.temporalRepairCatchExpanded &&
+                        ranked.parentShapeElongation >=
+                            std::max(
+                                1.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairStrongHighPenaltyMinParentShape) &&
+                        ranked.rankingSoftPenalty <=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairStrongHighPenaltyMaxRankingSoftPenalty) &&
+                        ranked.voxA >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairStrongHighPenaltyMinVoxels) &&
+                        ranked.voxB >=
+                            std::max(
+                                0,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairStrongHighPenaltyMinVoxels) &&
+                        ranked.signalA >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairStrongHighPenaltyMinSignal) &&
+                        ranked.signalB >=
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairStrongHighPenaltyMinSignal);
 	                    if (!hasCleanWindowSupport(ranked) ||
 	                        !hasTolerableContinuationClaim(ranked) ||
 	                        ranked.neighborClaimPenalty >
@@ -7066,7 +8410,8 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
 	                                     lumenConfig
 	                                         .fusionSplitPriorMaxNeighborClaimPenalty) ||
 	                        (ranked.rankingSoftPenalty > 12.0f &&
-	                         !strongTemporalCatchEvidence) ||
+	                         !strongTemporalCatchEvidence &&
+                                 !strongCurrentPairHighPenaltyEvidence) ||
 	                        ranked.parentDistanceBalance <
 	                            (hasStrongTemporalDaughterEvidence(ranked)
 	                                 ? std::max(
@@ -7101,13 +8446,16 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     isCleanWindowSeedColumnZStackPair(ranked) ||
                     isParentAnchoredSeedColumnDuplicate(ranked) ||
                     isFutureOnlyParentAnchorPositiveRaw(ranked) ||
+                    isLateParentAnchorOneRealShortElongatedDuplicate(ranked) ||
                     isWeakParentAnchoredOneReal(ranked) ||
                     isTightCleanWindowInternalPair(ranked) ||
                     isWeakBalancedCleanWindowPair(ranked) ||
                     isWeakAsymmetricCleanWindowPair(ranked) ||
+                    isLowShapeUnbalancedPositiveCleanWindowPair(ranked) ||
                     isTriaxialNoBalancedCleanWindowPair(ranked) ||
                     isShortUnbalancedCleanWindowDuplicate(ranked) ||
-                    isParentAnchorCleanWindowLowZDuplicate(ranked)) {
+                    isParentAnchorCleanWindowLowZDuplicate(ranked) ||
+                    isParentAnchorCleanWindowHighZDuplicate(ranked)) {
                     return false;
                 }
                 if (minParentAge > 0 &&
@@ -7134,7 +8482,9 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                 if (lumenConfig
                         .fusionSplitPriorCleanTwoRealRescueBeforeDefaultNegativeGate &&
                     (isCleanTwoRealAsymmetricRescue(ranked) ||
-                     isCleanTwoRealHighNeighborClaimRescue(ranked))) {
+                     isCleanTwoRealHighNeighborClaimRescue(ranked) ||
+                     isCleanTwoRealSharedClaimRescue(ranked) ||
+                     isCleanTwoRealAsymmetricClaimRescue(ranked))) {
                     return true;
                 }
                 if (isWeakAsymmetricElongatedRescue(ranked)) {
@@ -7181,6 +8531,12 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     return true;
                 }
                 if (isCleanTwoRealHighNeighborClaimRescue(ranked)) {
+                    return true;
+                }
+                if (isCleanTwoRealSharedClaimRescue(ranked)) {
+                    return true;
+                }
+                if (isCleanTwoRealAsymmetricClaimRescue(ranked)) {
                     return true;
                 }
                 if (isTemporalRepairWindowRescue(ranked)) {
@@ -7231,6 +8587,8 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         isCleanTwoRealCompactRescue(ranked) ||
                         isCleanTwoRealParentAnchorReplacementRescue(ranked) ||
                         isCleanTwoRealHighNeighborClaimRescue(ranked) ||
+                        isCleanTwoRealSharedClaimRescue(ranked) ||
+                        isCleanTwoRealAsymmetricClaimRescue(ranked) ||
                         isPartialWindowWideLateralRescue(ranked) ||
                         isPartialWindowZReplacementRescue(ranked) ||
                         windowPairWouldImproveSelection) {
@@ -7558,6 +8916,28 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                     lumenConfig
                                         .fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus))));
                 }
+                if (isCleanTwoRealSharedClaimRescue(ranked)) {
+                    return withZTieBreakPenalty(
+                        ranked.score -
+                        std::min(
+                            140.0,
+                            static_cast<double>(
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus))));
+                }
+                if (isCleanTwoRealAsymmetricClaimRescue(ranked)) {
+                    return withZTieBreakPenalty(
+                        ranked.score -
+                        std::min(
+                            140.0,
+                            static_cast<double>(
+                                std::max(
+                                    0.0f,
+                                    lumenConfig
+                                        .fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus))));
+                }
                 if (isTemporalRepairWindowRescue(ranked)) {
                     return withZTieBreakPenalty(
                         ranked.score -
@@ -7738,6 +9118,17 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
 
             search(0, 0, 0.0);
             selectedRankedPriorIndexes.insert(bestSelection.begin(), bestSelection.end());
+            for (const size_t rankedIdx : selectedRankedPriorIndexes) {
+                if (rankedIdx >= rankedPriors.size()) {
+                    continue;
+                }
+                const RankedSplitPrior &ranked = rankedPriors[rankedIdx];
+                if (isCleanTwoRealHighNeighborClaimRescue(ranked) ||
+                    isCleanTwoRealSharedClaimRescue(ranked) ||
+                    isCleanTwoRealAsymmetricClaimRescue(ranked)) {
+                    cleanTwoRealClaimRescuedRankedPriorIndexes.insert(rankedIdx);
+                }
+            }
             for (const size_t rankedIdx : selectedRankedPriorIndexes) {
                 if (rankedIdx >= rankedPriors.size()) {
                     continue;
@@ -8191,8 +9582,16 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                 continue;
             }
 	            const std::string parentName = frame.cells[ranked.parentIdx].getName();
-	            BridgeSplitProposal proposal = ranked.proposal;
-	            if (promotedRankedPriorIndexes.count(rankedIdx) > 0) {
+		            BridgeSplitProposal proposal = ranked.proposal;
+                proposal.rankedScore = static_cast<float>(ranked.score);
+                proposal.voxA = ranked.voxA;
+                proposal.voxB = ranked.voxB;
+                proposal.signalA = ranked.signalA;
+                proposal.signalB = ranked.signalB;
+                proposal.cleanTwoRealClaimRescued =
+                    cleanTwoRealClaimRescuedRankedPriorIndexes.count(rankedIdx) > 0 ||
+                    cleanTwoRealClaimRescuedRankedPriorIndexes.count(effectiveRankedIdx) > 0;
+		            if (promotedRankedPriorIndexes.count(rankedIdx) > 0) {
 	                proposal.zStackDaughterPromotion = true;
 	                auto promotedIdIt = promotedCandidateIdBySource.find(rankedIdx);
 	                if (promotedIdIt != promotedCandidateIdBySource.end()) {
@@ -8234,6 +9633,36 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                 1.0f,
                 lumenConfig
                     .fusionTemporalCenterRepairParentAnchorReanchorMinShape);
+            const bool strongLowShapeReanchorEnabled =
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled;
+            const float strongLowShapeMinShape = std::max(
+                1.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape);
+            const int strongLowShapeMinVoxels = std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels);
+            const float strongLowShapeMinSignal = std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal);
+            const int strongLowShapeMinWindowBoth = std::max(
+                1,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth);
+            const int strongLowShapeMaxWindowMissing = std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing);
+            const int strongLowShapeMaxWindowParentPersists = std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists);
+            const float strongLowShapeMaxScore =
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore;
             for (const RankedSplitPrior &ranked : rankedPriors) {
                 if (ranked.parentIdx >= frame.cells.size()) {
                     continue;
@@ -8242,6 +9671,8 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                                    ranked.candidateA < 1000000000;
                 const bool realB = ranked.candidateB >= 0 &&
                                    ranked.candidateB < 1000000000;
+                const int realVoxels = realA ? ranked.voxA : ranked.voxB;
+                const float realSignal = realA ? ranked.signalA : ranked.signalB;
                 const bool cleanOneRealParentAnchor =
                     ranked.parentAnchored &&
                     ranked.parentShapeElongation >= reanchorMinShape &&
@@ -8253,7 +9684,31 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     ranked.neighborClaimPenalty <= 1e-5f &&
                     ranked.continuationClaimSoftPenalty <= 1e-5f &&
                     ranked.continuationClaimBlockers.empty();
-                if (!cleanOneRealParentAnchor) {
+                // f089 clean-run regression: a real daughter center was a
+                // one-real parent-anchor prior with strong voxels/signal and
+                // two-frame future support, but the parent shape was below the
+                // generic elongation threshold. Keep this exception narrow so
+                // low-shape noisy parent anchors are still rejected.
+                const bool strongLowShapeOneRealParentAnchor =
+                    strongLowShapeReanchorEnabled &&
+                    ranked.parentAnchored &&
+                    ranked.parentShapeElongation >= strongLowShapeMinShape &&
+                    ranked.parentShapeElongation < reanchorMinShape &&
+                    (realA != realB) &&
+                    ranked.windowBothDaughtersSupported >=
+                        strongLowShapeMinWindowBoth &&
+                    ranked.windowMissingDaughterCount <=
+                        strongLowShapeMaxWindowMissing &&
+                    ranked.windowParentPersists <=
+                        strongLowShapeMaxWindowParentPersists &&
+                    realVoxels >= strongLowShapeMinVoxels &&
+                    realSignal >= strongLowShapeMinSignal &&
+                    ranked.score <= strongLowShapeMaxScore &&
+                    ranked.neighborClaimPenalty <= 1e-5f &&
+                    ranked.continuationClaimSoftPenalty <= 1e-5f &&
+                    ranked.continuationClaimBlockers.empty();
+                if (!cleanOneRealParentAnchor &&
+                    !strongLowShapeOneRealParentAnchor) {
                     continue;
                 }
                 const std::string parentName =
@@ -8266,6 +9721,67 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                     centerReanchorCandidateIdsForFrame[parentName].insert(
                         ranked.candidateB);
                 }
+            }
+        }
+
+        if (lumenConfig
+                .fusionTemporalCenterRepairWeakSameParentContinuationEnabled) {
+            const int weakMinWindowSupport = std::max(
+                1,
+                lumenConfig
+                    .fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport);
+            const int weakMinVoxels = std::max(
+                0,
+                lumenConfig
+                    .fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels);
+            const float weakMinSignal = std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairWeakSameParentContinuationMinSignal);
+            for (const RankedSplitPrior &ranked : rankedPriors) {
+                if (ranked.parentIdx >= frame.cells.size()) {
+                    continue;
+                }
+                const bool realA = ranked.candidateA >= 0 &&
+                                   ranked.candidateA < 1000000000;
+                const bool realB = ranked.candidateB >= 0 &&
+                                   ranked.candidateB < 1000000000;
+                if (!ranked.parentAnchored || realA == realB) {
+                    continue;
+                }
+                const int realCandidateId =
+                    realA ? ranked.candidateA : ranked.candidateB;
+                const int realVoxels = realA ? ranked.voxA : ranked.voxB;
+                const float realSignal = realA ? ranked.signalA : ranked.signalB;
+                // f110 exposed a middle-density continuation case where a weak
+                // one-real parent-anchor proposal was the right center movement,
+                // but the global split selector correctly skipped the split. Keep
+                // this as a registered repair hint, not as a split acceptance.
+                if (realVoxels < weakMinVoxels ||
+                    realSignal < weakMinSignal ||
+                    ranked.windowBothDaughtersSupported < weakMinWindowSupport ||
+                    ranked.windowMissingDaughterCount > 1 ||
+                    ranked.windowParentPersists > 0 ||
+                    ranked.neighborClaimPenalty > 1e-5f ||
+                    ranked.continuationClaimSoftPenalty > 1e-5f ||
+                    !ranked.continuationClaimBlockers.empty()) {
+                    continue;
+                }
+                const std::string parentName =
+                    frame.cells[ranked.parentIdx].getName();
+                weakSameParentContinuationCandidateIdsForFrame[parentName].insert(
+                    realCandidateId);
+                std::cout
+                    << "[CellLumen WeakSameParentContinuationCandidate] frame="
+                    << absoluteFrame
+                    << " parent=" << parentName
+                    << " candidate=" << realCandidateId
+                    << " voxels=" << realVoxels
+                    << " signal=" << realSignal
+                    << " window_both=" << ranked.windowBothDaughtersSupported
+                    << " window_missing=" << ranked.windowMissingDaughterCount
+                    << " score=" << ranked.score
+                    << std::endl;
             }
         }
 
@@ -8889,6 +10405,28 @@ void CellUniverse::applyRuntimeDensityProfileForFrame(
               << " weakParentAnchoredReject="
               << config.cellLumen
                      .fusionSplitPriorRejectWeakParentAnchoredOneRealEnabled
+              // f087 showed that parent-anchor overlap/no-gap settings must be
+              // visible in the per-frame profile audit. Without these values in
+              // the run log, it is too easy to tune the human-readable profile
+              // block while the active expanded profile keeps older thresholds.
+              << " parentAnchorOverlapNoGap="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorOneRealOverlapNoGapDuplicateEnabled
+              << " parentAnchorOverlapNoGapMinOverlap="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorOneRealOverlapNoGapDuplicateMinOverlapCost
+              << " parentAnchorOverlapNoGapMaxGap="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorOneRealOverlapNoGapDuplicateMaxBridgeGapWidth
+              << " parentAnchorOverlapNoGapMinValley="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorOneRealOverlapNoGapDuplicateMinBridgeValleyRatio
+              << " parentAnchorOverlapNoGapMaxShape="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorOneRealOverlapNoGapDuplicateMaxParentShape
+              << " parentAnchorOverlapNoGapMinImageGain="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorOneRealOverlapNoGapDuplicateMinImageGain
               << " prepassOverrideWeakExisting="
               << config.cellLumen
                      .fusionSplitPriorPrepassFallbackOverrideWeakExistingPriorEnabled
@@ -8907,6 +10445,73 @@ void CellUniverse::applyRuntimeDensityProfileForFrame(
               << " weakParentAnchorFutureBypass="
               << config.cellLumen
                      .fusionSplitPriorWeakParentAnchoredFutureBypassEnabled
+              << " weakParentAnchorNegativeWindowBypass="
+              << config.cellLumen
+                     .fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled
+              << " lateParentAnchorShortElongatedVeto="
+              << config.cellLumen
+                     .fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled
+              << " asymClaimTwoRealRescue="
+              << config.cellLumen
+                     .fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled
+              << " asymClaimMaxContinuationPenalty="
+              << config.cellLumen
+                     .fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty
+              // Keep the middle-density one-frame-early split guards in the
+              // runtime profile audit log. These switches are profile-specific,
+              // so seeing their active values is the fastest way to detect a
+              // wrong density profile or a missing YAML merge during f085-f120.
+              << " rejectShortUnbalancedCleanWindow="
+              << config.cellLumen
+                     .fusionSplitPriorRejectShortUnbalancedCleanWindowDuplicate
+              << " shortUnbalancedMaxSep="
+              << config.cellLumen
+                     .fusionSplitPriorShortUnbalancedCleanWindowMaxSeparation
+              << " shortUnbalancedMaxRaw="
+              << config.cellLumen
+                     .fusionSplitPriorShortUnbalancedCleanWindowMaxRawScore
+              << " rejectParentAnchorLowZCleanWindow="
+              << config.cellLumen
+                     .fusionSplitPriorRejectParentAnchorCleanWindowLowZDuplicate
+              << " parentAnchorLowZMaxSep="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation
+              << " parentAnchorLowZMaxZDominance="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance
+              << " rejectParentAnchorHighZCleanWindow="
+              << config.cellLumen
+                     .fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate
+              << " parentAnchorHighZMaxLateralSep="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation
+              << " parentAnchorHighZMinZDominance="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance
+              << " parentAnchorHighZMaxSignal="
+              << config.cellLumen
+                     .fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal
+              << " seedColumnReject="
+              << config.cellLumen
+                     .fusionSplitPriorRejectCleanWindowSeedColumnZStack
+              << " seedColumnBypass="
+              << config.cellLumen
+                     .fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled
+              << " seedColumnMinSep="
+              << config.cellLumen
+                     .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation
+              << " seedColumnMinBalance="
+              << config.cellLumen
+                     .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance
+              << " seedColumnMinVox="
+              << config.cellLumen
+                     .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels
+              << " seedColumnMinSignal="
+              << config.cellLumen
+                     .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal
+              << " seedColumnMaxScore="
+              << config.cellLumen
+                     .fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore
               << " pcaRelaxRequireOwnClaim="
               << config.cellLumen
                      .fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled
@@ -8925,6 +10530,105 @@ void CellUniverse::applyRuntimeDensityProfileForFrame(
               << " staleGuardedFutureReanchor="
               << config.cellLumen
                      .fusionStaleContinuationPruneGuardedFutureReanchorEnabled
+              << " staleGuardedFutureOwnerOverride="
+              << config.cellLumen
+                     .fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled
+              << " staleCrowdedBridgeMaxFutureSupport="
+              << config.cellLumen
+                     .fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport
+              << " sameParentReanchor="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSameParentSplitReanchorEnabled
+              << " sameParentReanchorMinSignal="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSameParentSplitMinSignal
+              << " sameParentReanchorMinVoxels="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSameParentSplitMinVoxels
+              << " sameParentRequireSupportGain="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported
+              << " weakSameParentContinuation="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairWeakSameParentContinuationEnabled
+              << " weakSameParentContinuationMinSignal="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairWeakSameParentContinuationMinSignal
+              << " weakSameParentContinuationMinVoxels="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels
+              << " weakSameParentContinuationMinWindow="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport
+              << " weakSameParentContinuationMaxMove="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairWeakSameParentContinuationMaxMove
+              << " siblingClaimOverride="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSiblingClaimOverrideEnabled
+              << " siblingSharedCenterReanchor="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled
+              << " siblingSharedMinFar="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance
+              << " siblingSharedMaxFar="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance
+              << " parentAnchorStrongLowShapeReanchor="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled
+              << " parentAnchorStrongLowShapeMinSignal="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal
+              << " parentAnchorStrongLowShapeMinVoxels="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels
+              << " parentAnchorPreserveOldSupportedZStack="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled
+              << " parentAnchorPreserveOldSupportedZStackMinZDominance="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance
+              << " parentAnchorPreserveOldSupportedZStackMaxLateralMove="
+              << config.cellLumen
+                     .fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove
+              << " prepassPositiveOverlapGuard="
+              << config.cellLumen
+                     .fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled
+              << " prepassPositiveOverlapMinRatio="
+              << config.cellLumen
+                     .fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio
+	              << " prepassPositiveOverlapMaxGap="
+	              << config.cellLumen
+	                     .fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth
+	              << " prepassLowShapeOverlapGuard="
+	              << config.cellLumen
+	                     .fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled
+	              << " prepassLowShapeMaxParentShape="
+	              << config.cellLumen
+	                     .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape
+	              << " prepassLowShapeMinRatio="
+	              << config.cellLumen
+	                     .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio
+	              << " windowOverlapGuard="
+	              << config.cellLumen
+	                     .fusionSplitPriorRejectWindowNoValleyOverlapDominatedDuplicate
+              << " windowOverlapMinRatio="
+              << config.cellLumen
+                     .fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio
+              << " windowOverlapMaxGap="
+              << config.cellLumen
+                     .fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth
+              << " windowSoftPositiveSmallGainGuard="
+              << config.cellLumen
+                     .fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate
+              << " windowSoftPositiveMaxImageGain="
+              << config.cellLumen
+                     .fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain
+              << " windowSoftPositiveMinPenaltyRatio="
+              << config.cellLumen
+                     .fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio
               << std::endl;
 }
 
@@ -10779,6 +12483,7 @@ void CellUniverse::optimize(int frameIndex)
             int existingWindowMissing = -1;
             int existingWindowParentPersists = -1;
             bool lowKeptRescue = false;
+            bool badLumenLowKeptRescue = false;
             std::string source = "prepass_pca";
         };
 
@@ -10875,9 +12580,14 @@ void CellUniverse::optimize(int frameIndex)
                 ++fallbackRejectedExistingPrior;
                 continue;
             }
-            if (config.cellLumen.fusionSplitPriorPrepassFallbackRejectBadLumenParent &&
+            const bool badLumenParent =
+                config.cellLumen.fusionSplitPriorPrepassFallbackRejectBadLumenParent &&
                 badLumenParentsForFrame != nullptr &&
-                badLumenParentsForFrame->count(parentName) > 0) {
+                badLumenParentsForFrame->count(parentName) > 0;
+            const bool allowBadLumenLowKeptRescue =
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled;
+            if (badLumenParent && !allowBadLumenLowKeptRescue) {
                 ++fallbackRejectedBadLumenParent;
                 continue;
             }
@@ -10914,7 +12624,24 @@ void CellUniverse::optimize(int frameIndex)
 
             const auto &snap = snapIt->second;
             const float parentShape = std::max(cell.shapeElongation(), snap.shapeElongation);
-            if (parentShape < config.cellLumen.fusionSplitPriorPrepassFallbackMinShape) {
+            const bool lowKeptShapeGateBypass =
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled &&
+                config.cellLumen.fusionSplitPriorPrepassFallbackLowKeptRescueEnabled &&
+                belowNormalKept &&
+                (!hasExistingPrior || existingPriorCanBeOverridden) &&
+                keptPixels >=
+                    std::max(
+                        0,
+                        config.cellLumen
+                            .fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels) &&
+                parentShape >=
+                    std::max(
+                        1.0f,
+                        config.cellLumen
+                            .fusionSplitPriorPrepassFallbackLowKeptRescueMinShape);
+            if (parentShape < config.cellLumen.fusionSplitPriorPrepassFallbackMinShape &&
+                !lowKeptShapeGateBypass) {
                 ++fallbackRejectedShape;
                 continue;
             }
@@ -11033,6 +12760,38 @@ void CellUniverse::optimize(int frameIndex)
                 }
                 source += "_low_kept_rescue";
             }
+            bool badLumenLowKeptRescue = false;
+            if (badLumenParent) {
+                // Late dense f176 showed a real split where the generic Cell
+                // Lumen prior for the parent was unsafe, but image-grounded PCA
+                // still produced a compact, low-kept two-daughter proposal. Do
+                // not disable the bad-parent guard globally; only this explicit
+                // opt-in path can rescue it, and normal split validation still
+                // runs after scheduling.
+                badLumenLowKeptRescue =
+                    allowBadLumenLowKeptRescue &&
+                    lowKeptRescue &&
+                    keptPixels >=
+                        std::max(
+                            0,
+                            config.cellLumen
+                                .fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels) &&
+                    parentShape >=
+                        std::max(
+                            1.0f,
+                            config.cellLumen
+                                .fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape) &&
+                    score <=
+                        std::max(
+                            0.0f,
+                            config.cellLumen
+                                .fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore);
+                if (!badLumenLowKeptRescue) {
+                    ++fallbackRejectedBadLumenParent;
+                    continue;
+                }
+                source += "_bad_lumen_parent_rescue";
+            }
             bool overridesExistingPrior = false;
             int existingWindowBoth = -1;
             int existingWindowMissing = -1;
@@ -11095,6 +12854,7 @@ void CellUniverse::optimize(int frameIndex)
                 existingWindowMissing,
                 existingWindowParentPersists,
                 lowKeptRescue,
+                badLumenLowKeptRescue,
                 source
             });
         }
@@ -11149,6 +12909,8 @@ void CellUniverse::optimize(int frameIndex)
                       << " kept=" << candidate.keptPixels
                       << " lowKeptRescue="
                       << (candidate.lowKeptRescue ? 1 : 0)
+                      << " badLumenLowKeptRescue="
+                      << (candidate.badLumenLowKeptRescue ? 1 : 0)
                       << " d1ParentMargin=" << candidate.d1ParentMargin
                       << " d2ParentMargin=" << candidate.d2ParentMargin
                       << " source=" << candidate.source
@@ -11828,6 +13590,8 @@ void CellUniverse::optimize(int frameIndex)
                 config.cellLumen
                     .fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain,
                 config.cellLumen
+                    .fusionSplitPriorParentAnchorRejectReanchorMinImageGain,
+                config.cellLumen
                     .fusionSplitPriorParentAnchorWeakGainDuplicateRescueEnabled,
                 config.cellLumen
                     .fusionSplitPriorParentAnchorWeakGainCleanMinShape,
@@ -11950,6 +13714,30 @@ void CellUniverse::optimize(int frameIndex)
                 config.cellLumen
                     .fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMinRealVoxels,
                 config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels,
+                config.cellLumen
+                    .fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal,
+                config.cellLumen
                     .fusionSplitPriorCleanTwoRealDuplicateBypassEnabled,
                 config.cellLumen
                     .fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain,
@@ -12014,6 +13802,24 @@ void CellUniverse::optimize(int frameIndex)
                 config.cellLumen
                     .fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen,
                 config.cellLumen
+                    .fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth,
+                config.cellLumen
+                    .fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth,
+                config.cellLumen
+                    .fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio,
+                config.cellLumen
                     .fusionSplitPriorRejectWeakWindowNoValleyOverlapDuplicate,
                 config.cellLumen
                     .fusionSplitPriorWeakWindowNoValleyMaxImageGain,
@@ -12049,6 +13855,16 @@ void CellUniverse::optimize(int frameIndex)
                     .fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth,
                 config.cellLumen
                     .fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio,
+                config.cellLumen
+                    .fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate,
+                config.cellLumen
+                    .fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth,
+                config.cellLumen
+                    .fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain,
+                config.cellLumen
+                    .fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio,
+                config.cellLumen
+                    .fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff,
                 config.cellLumen
                     .fusionSplitPriorRejectSeedZColumnNoValleyOverlapDuplicate,
                 config.cellLumen
@@ -13509,6 +15325,10 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
         }
+        const auto weakSameParentContinuationIt =
+            cellLumenWeakSameParentContinuationCandidateIds.find(frameIndex);
+        const auto siblingSharedCenterReanchorIt =
+            cellLumenSiblingSharedCenterReanchorCandidates.find(frameIndex);
 
         const int minVoxels =
             lumenConfig.fusionSplitPriorMinVoxels >= 0
@@ -13545,6 +15365,49 @@ void CellUniverse::optimize(int frameIndex)
         const float parentAnchorReanchorMinMove = std::max(
             0.0f,
             lumenConfig.fusionTemporalCenterRepairParentAnchorReanchorMinDistance);
+        const bool parentAnchorPreserveOldSupportedZStackEnabled =
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled;
+        const float parentAnchorPreserveOldSupportedZStackMinZDominance =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance);
+        const float parentAnchorPreserveOldSupportedZStackMaxLateralMove =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove);
+        const bool parentAnchorStrongLowShapeReanchorEnabled =
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled;
+        const float parentAnchorStrongLowShapeMinShape = std::max(
+            1.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape);
+        const int parentAnchorStrongLowShapeMinVoxels = std::max(
+            0,
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels);
+        const float parentAnchorStrongLowShapeMinSignal = std::max(
+            0.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal);
+        const int parentAnchorStrongLowShapeMinWindowBoth = std::max(
+            1,
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth);
+        const int parentAnchorStrongLowShapeMaxWindowMissing = std::max(
+            0,
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing);
+        const int parentAnchorStrongLowShapeMaxWindowParentPersists = std::max(
+            0,
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists);
+        const float parentAnchorStrongLowShapeMaxScore =
+            lumenConfig
+                .fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore;
         const bool sameParentSplitReanchorEnabled =
             lumenConfig.fusionTemporalCenterRepairSameParentSplitReanchorEnabled;
         const float sameParentSplitReanchorMinMove = std::max(
@@ -13562,6 +15425,191 @@ void CellUniverse::optimize(int frameIndex)
         const bool sameParentRequireSupportGainWhenOldSupported =
             lumenConfig
                 .fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported;
+        const bool weakSameParentContinuationEnabled =
+            lumenConfig
+                .fusionTemporalCenterRepairWeakSameParentContinuationEnabled;
+        const int weakSameParentContinuationMinVoxels = std::max(
+            0,
+            lumenConfig
+                .fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels);
+        const float weakSameParentContinuationMinSignal = std::max(
+            0.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairWeakSameParentContinuationMinSignal);
+        const int weakSameParentContinuationMinWindowSupport = std::max(
+            1,
+            lumenConfig
+                .fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport);
+        const float weakSameParentContinuationMaxMove = std::max(
+            0.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairWeakSameParentContinuationMaxMove);
+        const bool sameParentCloserFutureOverrideEnabled =
+            lumenConfig
+                .fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled;
+        const float sameParentCloserFutureOverrideMinGain = std::max(
+            0.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain);
+        const bool siblingClaimOverrideEnabled =
+            lumenConfig.fusionTemporalCenterRepairSiblingClaimOverrideEnabled;
+        const bool siblingSharedCenterReanchorEnabled =
+            lumenConfig
+                .fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled;
+        const int siblingSharedCenterMinVoxels = std::max(
+            0,
+            lumenConfig
+                .fusionTemporalCenterRepairSiblingSharedCenterMinVoxels);
+        const float siblingSharedCenterMinSignal = std::max(
+            0.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairSiblingSharedCenterMinSignal);
+        const float siblingSharedCenterScoreBonus = std::max(
+            0.0f,
+            lumenConfig
+                .fusionTemporalCenterRepairSiblingSharedCenterScoreBonus);
+        const bool protectedFutureOwnerReanchorEnabled =
+            lumenConfig
+                .fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled;
+        const float protectedFutureOwnerMinOldCurrentDistance =
+            std::max(
+                0.0f,
+                lumenConfig
+                    .fusionSplitPriorProtectFutureContinuationMinOldNearestCurrentDistance);
+        struct TemporalProtectedFutureContinuationOwner {
+            size_t ownerIdx = std::numeric_limits<size_t>::max();
+            float distance = std::numeric_limits<float>::infinity();
+            float oldNearestCurrentDistance =
+                std::numeric_limits<float>::infinity();
+            int oldWindowSupport = 0;
+            int centerWindowSupport = 0;
+        };
+        std::unordered_map<int, TemporalProtectedFutureContinuationOwner>
+            temporalProtectedFutureOwnerById;
+        if (protectedFutureOwnerReanchorEnabled) {
+            const float protectMinDistance =
+                std::max(
+                    0.0f,
+                    lumenConfig
+                        .fusionSplitPriorProtectFutureContinuationMinDistance);
+            const float protectMaxDistance =
+                std::max(
+                    protectMinDistance,
+                    lumenConfig
+                        .fusionSplitPriorProtectFutureContinuationMaxDistance);
+            const int protectMinOldSupport =
+                std::max(
+                    0,
+                    lumenConfig
+                        .fusionSplitPriorProtectFutureContinuationMinOldWindowSupport);
+            const int protectMinCenterSupport =
+                std::max(
+                    minWindowSupport,
+                    lumenConfig
+                        .fusionSplitPriorProtectFutureContinuationMinCenterWindowSupport);
+            std::vector<int> oldWindowSupportByCell(frame.cells.size(), 0);
+            std::vector<float> oldNearestCurrentDistanceByCell(
+                frame.cells.size(),
+                std::numeric_limits<float>::infinity());
+            for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+                if (frame.cells[ci].isTrash()) {
+                    continue;
+                }
+                const cv::Point3f cellPos(frame.cells[ci].getX(),
+                                          frame.cells[ci].getY(),
+                                          frame.cells[ci].getZ());
+                oldWindowSupportByCell[ci] =
+                    pointWindowSupport(cellPos).supported;
+                for (const auto &center : centers) {
+                    if (center.voxelCount < minVoxels ||
+                        center.signal < minSignal) {
+                        continue;
+                    }
+                    oldNearestCurrentDistanceByCell[ci] =
+                        std::min(
+                            oldNearestCurrentDistanceByCell[ci],
+                            static_cast<float>(
+                                cv::norm(cellPos - center.position)));
+                }
+            }
+            for (const auto &center : centers) {
+                if (center.candidateId < 0 ||
+                    center.voxelCount < minVoxels ||
+                    center.signal < minSignal) {
+                    continue;
+                }
+                const PointWindowSupport centerSupport =
+                    pointWindowSupport(center.position);
+                if (centerSupport.supported < protectMinCenterSupport) {
+                    continue;
+                }
+                TemporalProtectedFutureContinuationOwner bestOwner;
+                for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+                    const Ellipsoid &cell = frame.cells[ci];
+                    if (cell.isTrash() ||
+                        oldWindowSupportByCell[ci] < protectMinOldSupport ||
+                        oldNearestCurrentDistanceByCell[ci] <
+                            protectedFutureOwnerMinOldCurrentDistance) {
+                        continue;
+                    }
+                    const cv::Point3f cellPos(cell.getX(),
+                                              cell.getY(),
+                                              cell.getZ());
+                    const float distance =
+                        static_cast<float>(
+                            cv::norm(cellPos - center.position));
+                    if (distance < protectMinDistance ||
+                        distance > protectMaxDistance ||
+                        distance >= bestOwner.distance) {
+                        continue;
+                    }
+                    bestOwner.ownerIdx = ci;
+                    bestOwner.distance = distance;
+                    bestOwner.oldNearestCurrentDistance =
+                        oldNearestCurrentDistanceByCell[ci];
+                    bestOwner.oldWindowSupport = oldWindowSupportByCell[ci];
+                    bestOwner.centerWindowSupport = centerSupport.supported;
+                }
+                if (bestOwner.ownerIdx !=
+                    std::numeric_limits<size_t>::max()) {
+                    temporalProtectedFutureOwnerById[center.candidateId] =
+                        bestOwner;
+                }
+            }
+            if (!temporalProtectedFutureOwnerById.empty()) {
+                std::cout << "[CellLumen Temporal Center Repair ProtectedFutureOwner] frame "
+                          << displayFrame
+                          << " protected_candidates="
+                          << temporalProtectedFutureOwnerById.size()
+                          << " min_distance=" << protectMinDistance
+                          << " max_distance=" << protectMaxDistance
+                          << " min_old_current_distance="
+                          << protectedFutureOwnerMinOldCurrentDistance
+                          << " min_center_window="
+                          << protectMinCenterSupport
+                          << std::endl;
+            }
+        }
+        std::unordered_map<std::string, size_t> liveCellIndexByName;
+        liveCellIndexByName.reserve(frame.cells.size());
+        for (size_t idx = 0; idx < frame.cells.size(); ++idx) {
+            if (!frame.cells[idx].isTrash()) {
+                liveCellIndexByName[frame.cells[idx].getName()] = idx;
+            }
+        }
+        auto siblingNameForBinaryDaughter =
+            [](const std::string &name) -> std::string {
+            if (name.empty()) {
+                return {};
+            }
+            const char last = name.back();
+            if (last != '0' && last != '1') {
+                return {};
+            }
+            std::string sibling = name;
+            sibling.back() = (last == '0') ? '1' : '0';
+            return sibling;
+        };
         std::unordered_map<std::string, std::unordered_set<int>>
             parentAnchorReanchorCandidateIdsByParent;
         const auto centerReanchorIt =
@@ -13582,6 +15630,9 @@ void CellUniverse::optimize(int frameIndex)
                 const BridgeSplitProposal &proposal = entry.second;
                 const bool realA = isRealLumenCandidateId(proposal.candidateIdA);
                 const bool realB = isRealLumenCandidateId(proposal.candidateIdB);
+                const int realVoxels = realA ? proposal.voxA : proposal.voxB;
+                const float realSignal =
+                    realA ? proposal.signalA : proposal.signalB;
                 const bool oneRealParentAnchor =
                     proposal.parentAnchored &&
                     proposal.parentShapeElongation >=
@@ -13590,7 +15641,25 @@ void CellUniverse::optimize(int frameIndex)
                     proposal.windowBothDaughtersSupported >= minWindowSupport &&
                     proposal.windowMissingDaughterCount == 0 &&
                     proposal.windowParentPersists == 0;
-                if (!oneRealParentAnchor) {
+                const bool strongLowShapeOneRealParentAnchor =
+                    parentAnchorStrongLowShapeReanchorEnabled &&
+                    proposal.parentAnchored &&
+                    proposal.parentShapeElongation >=
+                        parentAnchorStrongLowShapeMinShape &&
+                    proposal.parentShapeElongation <
+                        parentAnchorReanchorMinShape &&
+                    (realA != realB) &&
+                    proposal.windowBothDaughtersSupported >=
+                        parentAnchorStrongLowShapeMinWindowBoth &&
+                    proposal.windowMissingDaughterCount <=
+                        parentAnchorStrongLowShapeMaxWindowMissing &&
+                    proposal.windowParentPersists <=
+                        parentAnchorStrongLowShapeMaxWindowParentPersists &&
+                    realVoxels >= parentAnchorStrongLowShapeMinVoxels &&
+                    realSignal >= parentAnchorStrongLowShapeMinSignal &&
+                    proposal.rankedScore <= parentAnchorStrongLowShapeMaxScore;
+                if (!oneRealParentAnchor &&
+                    !strongLowShapeOneRealParentAnchor) {
                     continue;
                 }
                 if (realA) {
@@ -13613,6 +15682,10 @@ void CellUniverse::optimize(int frameIndex)
             PointWindowSupport oldSupport;
             float score = 0.0f;
             bool parentAnchorReanchor = false;
+            bool siblingClaimOverride = false;
+            bool siblingSharedCenterReanchor = false;
+            bool weakSameParentContinuation = false;
+            bool protectedFutureOwnerReanchor = false;
         };
 
         std::vector<RepairEdge> edges;
@@ -13626,8 +15699,12 @@ void CellUniverse::optimize(int frameIndex)
         int rejectedWindow = 0;
         int rejectedClaim = 0;
         int rejectedRiskySplitCandidate = 0;
+        int rejectedParentAnchorOldSupportedZStack = 0;
         int allowedRejectedSplitCenterRepair = 0;
         int allowedClaimByOtherOwnSupport = 0;
+        int allowedSiblingClaimOverride = 0;
+        int allowedSiblingSharedCenterReanchor = 0;
+        int allowedProtectedFutureOwnerReanchor = 0;
         const float currentFrameSupportDistance = std::max(
             0.0f,
             std::min(minMove, lumenConfig.fusionSplitPriorWindowMatchDistance));
@@ -13653,6 +15730,7 @@ void CellUniverse::optimize(int frameIndex)
             float oldNearestCurrentFrameCenterDistance =
                 std::numeric_limits<float>::infinity();
             int oldNearestCurrentFrameCandidateId = -1;
+            cv::Point3f oldNearestCurrentFrameCenterPosition(0.0f, 0.0f, 0.0f);
             for (const auto &center : centers) {
                 if (center.voxelCount < minVoxels || center.signal < minSignal) {
                     continue;
@@ -13666,19 +15744,38 @@ void CellUniverse::optimize(int frameIndex)
                 if (oldCenterDistance < oldNearestCurrentFrameCenterDistance) {
                     oldNearestCurrentFrameCenterDistance = oldCenterDistance;
                     oldNearestCurrentFrameCandidateId = center.candidateId;
+                    oldNearestCurrentFrameCenterPosition = center.position;
                 }
             }
             const bool oldHasCurrentFrameCenterSupport =
                 std::isfinite(oldNearestCurrentFrameCenterDistance) &&
                 oldNearestCurrentFrameCenterDistance <= currentFrameSupportDistance;
+            bool oldSupportLikelyClaimedBySibling = false;
+            if (siblingClaimOverrideEnabled && oldHasCurrentFrameCenterSupport) {
+                const std::string siblingName =
+                    siblingNameForBinaryDaughter(cellName);
+                const auto siblingIt = liveCellIndexByName.find(siblingName);
+                if (siblingIt != liveCellIndexByName.end() &&
+                    siblingIt->second < frame.cells.size()) {
+                    const Ellipsoid &sibling =
+                        frame.cells[siblingIt->second];
+                    if (!sibling.isTrash()) {
+                        const cv::Point3f siblingPos(
+                            sibling.getX(), sibling.getY(), sibling.getZ());
+                        const float siblingDistanceToOldSupport =
+                            static_cast<float>(cv::norm(
+                                siblingPos -
+                                oldNearestCurrentFrameCenterPosition));
+                        oldSupportLikelyClaimedBySibling =
+                            siblingDistanceToOldSupport + claimMargin <
+                            oldNearestCurrentFrameCenterDistance;
+                    }
+                }
+            }
 
             for (size_t centerIdx = 0; centerIdx < centers.size(); ++centerIdx) {
                 const auto &center = centers[centerIdx];
                 ++considered;
-                if (center.voxelCount < minVoxels || center.signal < minSignal) {
-                    ++rejectedSignal;
-                    continue;
-                }
                 if (center.candidateId >= 0 &&
                     acceptedSplitCandidateIds.count(center.candidateId) > 0) {
                     ++rejectedReserved;
@@ -13697,6 +15794,8 @@ void CellUniverse::optimize(int frameIndex)
                         reanchorIt->second.count(center.candidateId) > 0;
                 }
                 bool sameParentSplitCandidate = false;
+                bool weakSameParentRegisteredCandidate = false;
+                bool siblingSharedRegisteredCandidate = false;
                 if (!parentAnchorReanchorCandidate && center.candidateId >= 0) {
                     const auto splitCandidateIt =
                         splitCandidateIdsByParentForRepair.find(cellName);
@@ -13705,6 +15804,76 @@ void CellUniverse::optimize(int frameIndex)
                         splitCandidateIt->second.count(center.candidateId) > 0) {
                         sameParentSplitCandidate = true;
                     }
+                    if (weakSameParentContinuationIt !=
+                        cellLumenWeakSameParentContinuationCandidateIds.end()) {
+                        const auto weakCandidateIt =
+                            weakSameParentContinuationIt->second.find(cellName);
+                        if (weakCandidateIt !=
+                                weakSameParentContinuationIt->second.end() &&
+                            weakCandidateIt->second.count(center.candidateId) > 0) {
+                            sameParentSplitCandidate = true;
+                            weakSameParentRegisteredCandidate = true;
+                        }
+                    }
+                    if (siblingSharedCenterReanchorIt !=
+                        cellLumenSiblingSharedCenterReanchorCandidates.end()) {
+                        const auto siblingSharedIt =
+                            siblingSharedCenterReanchorIt->second.find(cellName);
+                        if (siblingSharedIt !=
+                                siblingSharedCenterReanchorIt->second.end() &&
+                            siblingSharedIt->second.count(center.candidateId) > 0) {
+                            siblingSharedRegisteredCandidate = true;
+                        }
+                    }
+                }
+                const float moveDistance =
+                    static_cast<float>(cv::norm(oldPos - center.position));
+                const TemporalProtectedFutureContinuationOwner *protectedFutureOwner =
+                    nullptr;
+                bool protectedFutureOwnerReanchorCandidate = false;
+                if (protectedFutureOwnerReanchorEnabled &&
+                    center.candidateId >= 0) {
+                    const auto protectedIt =
+                        temporalProtectedFutureOwnerById.find(
+                            center.candidateId);
+                    if (protectedIt !=
+                            temporalProtectedFutureOwnerById.end() &&
+                        protectedIt->second.ownerIdx == ci &&
+                        protectedIt->second.centerWindowSupport >=
+                            minWindowSupport &&
+                        protectedIt->second.oldNearestCurrentDistance >=
+                            protectedFutureOwnerMinOldCurrentDistance) {
+                        protectedFutureOwner = &protectedIt->second;
+                        protectedFutureOwnerReanchorCandidate = true;
+                    }
+                }
+                // f110 showed a narrow middle-density continuation failure:
+                // the correct lumen center was a same-parent split candidate,
+                // but it was below the generic "strong repair" thresholds and
+                // the split itself was not selected. This opt-in path admits
+                // only that weak same-parent continuation pattern instead of
+                // lowering the global temporal repair signal and voxel gates.
+                const bool weakSameParentContinuationCandidate =
+                    weakSameParentContinuationEnabled &&
+                    weakSameParentRegisteredCandidate &&
+                    !parentAnchorReanchorCandidate &&
+                    !oldHasCurrentFrameCenterSupport &&
+                    center.voxelCount >= weakSameParentContinuationMinVoxels &&
+                    center.signal >= weakSameParentContinuationMinSignal &&
+                    moveDistance <= weakSameParentContinuationMaxMove;
+                const bool siblingSharedCenterReanchorCandidate =
+                    siblingSharedCenterReanchorEnabled &&
+                    siblingSharedRegisteredCandidate &&
+                    !parentAnchorReanchorCandidate &&
+                    center.voxelCount >= siblingSharedCenterMinVoxels &&
+                    center.signal >= siblingSharedCenterMinSignal;
+                if ((center.voxelCount < minVoxels ||
+                     center.signal < minSignal) &&
+                    !weakSameParentContinuationCandidate &&
+                    !siblingSharedCenterReanchorCandidate &&
+                    !protectedFutureOwnerReanchorCandidate) {
+                    ++rejectedSignal;
+                    continue;
                 }
                 const bool strongNearestCurrentSupportForReanchor =
                     sameParentSplitReanchorEnabled &&
@@ -13725,18 +15894,25 @@ void CellUniverse::optimize(int frameIndex)
                      center.candidateId == oldNearestCurrentFrameCandidateId);
                 if (!parentAnchorReanchorCandidate &&
                     !sameParentSplitReanchorCandidate &&
+                    !protectedFutureOwnerReanchorCandidate &&
+                    !siblingSharedCenterReanchorCandidate &&
                     oldHasCurrentFrameCenterSupport &&
+                    !oldSupportLikelyClaimedBySibling &&
                     center.candidateId != oldNearestCurrentFrameCandidateId) {
                     ++rejectedCurrentFrameSupport;
                     continue;
                 }
-                const float moveDistance =
-                    static_cast<float>(cv::norm(oldPos - center.position));
                 const float effectiveMinMove =
                     parentAnchorReanchorCandidate
                         ? std::min(minMove, parentAnchorReanchorMinMove)
                         : sameParentSplitReanchorCandidate
                             ? std::min(minMove, sameParentSplitReanchorMinMove)
+                        : weakSameParentContinuationCandidate
+                            ? std::min(minMove, sameParentSplitReanchorMinMove)
+                        : siblingSharedCenterReanchorCandidate
+                            ? minMove
+                        : protectedFutureOwnerReanchorCandidate
+                            ? minMove
                         : minMove;
                 if (moveDistance < effectiveMinMove || moveDistance > maxMove) {
                     ++rejectedDistance;
@@ -13759,7 +15935,9 @@ void CellUniverse::optimize(int frameIndex)
                         nearestOtherIdx = static_cast<int>(oi);
                     }
                 }
-                if (std::isfinite(nearestOtherDistance) &&
+                if (!protectedFutureOwnerReanchorCandidate &&
+                    !siblingSharedCenterReanchorCandidate &&
+                    std::isfinite(nearestOtherDistance) &&
                     nearestOtherDistance + claimMargin < moveDistance) {
                     bool nearestOtherHasOwnSupportedCenter = false;
                     if (nearestOtherIdx >= 0 &&
@@ -13808,25 +15986,116 @@ void CellUniverse::optimize(int frameIndex)
                 const PointWindowSupport newSupport =
                     pointWindowSupport(center.position);
                 const int requiredWindowSupport =
-                    sameParentSplitReanchorCandidate
+                    weakSameParentContinuationCandidate
+                        ? std::min(minWindowSupport,
+                                   weakSameParentContinuationMinWindowSupport)
+                        : sameParentSplitReanchorCandidate
                         ? std::min(minWindowSupport,
                                    sameParentSplitReanchorMinWindowSupport)
+                        : protectedFutureOwnerReanchorCandidate
+                        ? minWindowSupport
                         : minWindowSupport;
                 if (newSupport.supported < requiredWindowSupport) {
                     ++rejectedWindow;
                     continue;
                 }
+                const float oldAverageDistance =
+                    oldSupport.supported > 0
+                        ? oldSupport.bestDistanceSum /
+                              static_cast<float>(oldSupport.supported)
+                        : std::numeric_limits<float>::infinity();
+                const float newAverageDistance =
+                    newSupport.supported > 0
+                        ? newSupport.bestDistanceSum /
+                              static_cast<float>(newSupport.supported)
+                        : std::numeric_limits<float>::infinity();
+                const bool newHasMoreSupport =
+                    newSupport.supported > oldSupport.supported;
+                const bool newIsClearlyCloser =
+                    newSupport.supported >= oldSupport.supported &&
+                    newAverageDistance + minWindowDistanceGain <
+                        oldAverageDistance;
+                const cv::Point3f moveVec = center.position - oldPos;
+                const float lateralMove = std::sqrt(
+                    moveVec.x * moveVec.x + moveVec.y * moveVec.y);
+                const float zDominance =
+                    moveDistance > 1e-5f
+                        ? std::abs(moveVec.z) / moveDistance
+                        : 0.0f;
+                // f112 exposed a parent-anchor reanchor failure: the old cell
+                // already sat on a current-frame Cell Lumen center and had
+                // future support, while another z-separated daughter center
+                // pulled the same track downward. Keep this opt-in and require
+                // a mostly-z move with no future-support gain so normal
+                // parent-anchor repairs still work.
+                const bool parentAnchorOldSupportedZStackBlocked =
+                    parentAnchorPreserveOldSupportedZStackEnabled &&
+                    parentAnchorReanchorCandidate &&
+                    oldHasCurrentFrameCenterSupport &&
+                    oldSupport.supported >= minWindowSupport &&
+                    newSupport.supported >= minWindowSupport &&
+                    !newHasMoreSupport &&
+                    !newIsClearlyCloser &&
+                    lateralMove <=
+                        parentAnchorPreserveOldSupportedZStackMaxLateralMove &&
+                    zDominance >=
+                        parentAnchorPreserveOldSupportedZStackMinZDominance;
+                if (parentAnchorOldSupportedZStackBlocked) {
+                    ++rejectedParentAnchorOldSupportedZStack;
+                    std::cout
+                        << "[CellLumen Temporal Center Repair Reject ParentAnchor OldSupportedZStack] frame "
+                        << displayFrame
+                        << " cell=" << cellName
+                        << " candidate=" << center.candidateId
+                        << " move=" << moveDistance
+                        << " lateralMove=" << lateralMove
+                        << " zDominance=" << zDominance
+                        << " old_window_support=" << oldSupport.supported
+                        << " new_window_support=" << newSupport.supported
+                        << " old_current_candidate="
+                        << oldNearestCurrentFrameCandidateId
+                        << " old_current_distance="
+                        << oldNearestCurrentFrameCenterDistance
+                        << std::endl;
+                    continue;
+                }
                 const bool strongRejectedSplitCenter =
                     center.voxelCount >= std::max(minVoxels * 2, 1000) &&
                     center.signal >= std::max(minSignal, 60.0f);
+                // A same-parent split candidate can be selected because it is
+                // a strong future-supported center, then the split itself can
+                // be rejected as unsafe. f089 showed that the old position may
+                // still pass a loose future-window check while the new center is
+                // much closer to the same future evidence. Keep this opt-in and
+                // require no current-frame support at the old position so we do
+                // not steal stable continuations.
+                const bool sameParentCloserFutureOverride =
+                    sameParentCloserFutureOverrideEnabled &&
+                    sameParentSplitCandidate &&
+                    !parentAnchorReanchorCandidate &&
+                    !oldHasCurrentFrameCenterSupport &&
+                    strongRejectedSplitCenter &&
+                    oldSupport.supported >= minWindowSupport &&
+                    newSupport.supported >= minWindowSupport &&
+                    newAverageDistance + sameParentCloserFutureOverrideMinGain <
+                        oldAverageDistance;
                 const bool sameParentRejectedSplitCenterRepair =
                     sameParentSplitCandidate &&
                     !parentAnchorReanchorCandidate &&
-                    oldSupport.supported <= maxOldWindowSupport &&
-                    (strongRejectedSplitCenter ||
-                     sameParentSplitReanchorCandidate);
+                    ((oldSupport.supported <= maxOldWindowSupport &&
+                      strongRejectedSplitCenter) ||
+                     sameParentCloserFutureOverride ||
+                     sameParentSplitReanchorCandidate ||
+                     weakSameParentContinuationCandidate);
+                const bool siblingClaimOverrideReanchor =
+                    siblingClaimOverrideEnabled &&
+                    oldSupportLikelyClaimedBySibling &&
+                    !sameParentRejectedSplitCenterRepair;
                 if (riskySplitCandidate &&
-                    !sameParentRejectedSplitCenterRepair) {
+                    !sameParentRejectedSplitCenterRepair &&
+                    !parentAnchorReanchorCandidate &&
+                    !protectedFutureOwnerReanchorCandidate &&
+                    !siblingClaimOverrideReanchor) {
                     ++rejectedRiskySplitCandidate;
                     continue;
                 }
@@ -13840,22 +16109,6 @@ void CellUniverse::optimize(int frameIndex)
                     ++allowedRejectedSplitCenterRepair;
                 }
                 if (oldSupport.supported > maxOldWindowSupport) {
-                    const float oldAverageDistance =
-                        oldSupport.supported > 0
-                            ? oldSupport.bestDistanceSum /
-                                  static_cast<float>(oldSupport.supported)
-                            : std::numeric_limits<float>::infinity();
-                    const float newAverageDistance =
-                        newSupport.supported > 0
-                            ? newSupport.bestDistanceSum /
-                                  static_cast<float>(newSupport.supported)
-                            : std::numeric_limits<float>::infinity();
-                    const bool newHasMoreSupport =
-                        newSupport.supported > oldSupport.supported;
-                    const bool newIsClearlyCloser =
-                        newSupport.supported >= oldSupport.supported &&
-                        newAverageDistance + minWindowDistanceGain <
-                            oldAverageDistance;
                     const bool strongEnoughToOverrideOldSupport =
                         (oldSupportedMinVoxels < 0 ||
                          center.voxelCount >= oldSupportedMinVoxels) &&
@@ -13864,7 +16117,15 @@ void CellUniverse::optimize(int frameIndex)
                     const bool parentAnchorReanchorOverridesOldSupport =
                         parentAnchorReanchorCandidate &&
                         strongEnoughToOverrideOldSupport &&
-                        newHasMoreSupport;
+                        newSupport.supported >= minWindowSupport &&
+                        (newHasMoreSupport || newIsClearlyCloser ||
+                         center.signal >= std::max(minSignal, 100.0f));
+                    const bool siblingClaimOverridesOldSupport =
+                        siblingClaimOverrideReanchor &&
+                        strongEnoughToOverrideOldSupport &&
+                        newSupport.supported >= minWindowSupport &&
+                        (newHasMoreSupport || newIsClearlyCloser ||
+                         center.signal >= std::max(minSignal, 100.0f));
                     const bool oldCenterStillFullySupported =
                         oldSupport.supported >= minWindowSupport;
                     // f034 showed that same-parent reanchor can be too eager:
@@ -13880,16 +16141,58 @@ void CellUniverse::optimize(int frameIndex)
                         sameParentSplitReanchorCandidate &&
                         oldSupport.supported > 0 &&
                         !newHasMoreSupport;
+                    const bool weakSameParentOverridesOldSupport =
+                        weakSameParentContinuationCandidate &&
+                        newSupport.supported >= requiredWindowSupport &&
+                        (oldSupport.supported <= maxOldWindowSupport ||
+                         newHasMoreSupport || newIsClearlyCloser);
+                    const bool siblingSharedOverridesOldSupport =
+                        siblingSharedCenterReanchorCandidate &&
+                        strongEnoughToOverrideOldSupport &&
+                        newSupport.supported >= requiredWindowSupport &&
+                        (oldSupport.supported <= maxOldWindowSupport ||
+                         newHasMoreSupport || newIsClearlyCloser ||
+                         !oldHasCurrentFrameCenterSupport);
+                    // The protected future-owner path is narrower than the
+                    // ordinary same-parent repair: split-prior scoring already
+                    // identified this Cell Lumen center as belonging to the
+                    // current lineage, while the old position lacks nearby
+                    // same-frame Cell Lumen support. This prevents the
+                    // protection from only blocking a steal without actually
+                    // moving the stale owner back onto its own center.
+                    const bool protectedFutureOwnerOverridesOldSupport =
+                        protectedFutureOwnerReanchorCandidate &&
+                        protectedFutureOwner != nullptr &&
+                        strongEnoughToOverrideOldSupport &&
+                        newSupport.supported >= minWindowSupport &&
+                        protectedFutureOwner->oldNearestCurrentDistance >=
+                            protectedFutureOwnerMinOldCurrentDistance &&
+                        (newHasMoreSupport || newIsClearlyCloser ||
+                         !oldCenterStillFullySupported);
                     const bool futureEvidenceOverridesOldSupport =
                         !sameParentNoSupportGainFromOldSupported &&
                         !oldCenterStillFullySupported &&
                         strongEnoughToOverrideOldSupport &&
                         (newHasMoreSupport || newIsClearlyCloser);
                     if (!futureEvidenceOverridesOldSupport &&
-                        !parentAnchorReanchorOverridesOldSupport) {
+                        !parentAnchorReanchorOverridesOldSupport &&
+                        !siblingClaimOverridesOldSupport &&
+                        !sameParentCloserFutureOverride &&
+                        !weakSameParentOverridesOldSupport &&
+                        !siblingSharedOverridesOldSupport &&
+                        !protectedFutureOwnerOverridesOldSupport) {
                         ++rejectedOldSupport;
                         continue;
                     }
+                    if (siblingClaimOverridesOldSupport) {
+                        ++allowedSiblingClaimOverride;
+                    }
+                    if (protectedFutureOwnerOverridesOldSupport) {
+                        ++allowedProtectedFutureOwnerReanchor;
+                    }
+                }
+                if (siblingSharedCenterReanchorCandidate) {
+                    ++allowedSiblingSharedCenterReanchor;
                 }
 
                 RepairEdge edge;
@@ -13900,11 +16203,30 @@ void CellUniverse::optimize(int frameIndex)
                 edge.newSupport = newSupport;
                 edge.oldSupport = oldSupport;
                 edge.parentAnchorReanchor = parentAnchorReanchorCandidate;
+                edge.siblingClaimOverride = siblingClaimOverrideReanchor;
+                edge.siblingSharedCenterReanchor =
+                    siblingSharedCenterReanchorCandidate;
+                edge.weakSameParentContinuation =
+                    weakSameParentContinuationCandidate;
+                edge.protectedFutureOwnerReanchor =
+                    protectedFutureOwnerReanchorCandidate;
                 edge.score =
                     moveDistance -
                     static_cast<float>(newSupport.supported) * 12.0f +
                     oldSupport.bestDistanceSum * 0.05f -
                     std::min(6.0f, std::max(0.0f, center.signal - minSignal) * 0.03f);
+                if (weakSameParentContinuationCandidate) {
+                    edge.score -= 10.0f;
+                }
+                if (siblingClaimOverrideReanchor) {
+                    edge.score -= 18.0f;
+                }
+                if (siblingSharedCenterReanchorCandidate) {
+                    edge.score -= siblingSharedCenterScoreBonus;
+                }
+                if (protectedFutureOwnerReanchorCandidate) {
+                    edge.score -= 22.0f;
+                }
                 edges.push_back(edge);
             }
         }
@@ -13926,10 +16248,18 @@ void CellUniverse::optimize(int frameIndex)
                       << " rejected_claim=" << rejectedClaim
                       << " rejected_risky_split_candidate="
                       << rejectedRiskySplitCandidate
+                      << " rejected_parent_anchor_old_supported_z_stack="
+                      << rejectedParentAnchorOldSupportedZStack
                       << " allowed_rejected_split_center_repair="
                       << allowedRejectedSplitCenterRepair
                       << " allowed_claim_by_other_own_support="
                       << allowedClaimByOtherOwnSupport
+                      << " allowed_sibling_claim_override="
+                      << allowedSiblingClaimOverride
+                      << " allowed_sibling_shared_center_reanchor="
+                      << allowedSiblingSharedCenterReanchor
+                      << " allowed_protected_future_owner_reanchor="
+                      << allowedProtectedFutureOwnerReanchor
                       << " min_move=" << minMove
                       << " max_move=" << maxMove
                       << " min_window_support=" << minWindowSupport
@@ -13955,15 +16285,18 @@ void CellUniverse::optimize(int frameIndex)
                   });
 
         std::vector<int> assignedCenterForCell(frame.cells.size(), -1);
+        std::vector<int> assignedEdgeForCell(frame.cells.size(), -1);
         std::vector<char> usedCenter(centers.size(), 0);
         int selected = 0;
-        for (const RepairEdge &edge : edges) {
+        for (size_t edgeIdx = 0; edgeIdx < edges.size(); ++edgeIdx) {
+            const RepairEdge &edge = edges[edgeIdx];
             if (assignedCenterForCell[edge.cellIdx] >= 0 ||
                 usedCenter[edge.centerIdx]) {
                 continue;
             }
             assignedCenterForCell[edge.cellIdx] =
                 static_cast<int>(edge.centerIdx);
+            assignedEdgeForCell[edge.cellIdx] = static_cast<int>(edgeIdx);
             usedCenter[edge.centerIdx] = 1;
             ++selected;
         }
@@ -13973,6 +16306,13 @@ void CellUniverse::optimize(int frameIndex)
             const int assignedCenterIdx = assignedCenterForCell[ci];
             if (assignedCenterIdx < 0) {
                 continue;
+            }
+            const RepairEdge *assignedEdge = nullptr;
+            if (ci < assignedEdgeForCell.size() &&
+                assignedEdgeForCell[ci] >= 0 &&
+                static_cast<size_t>(assignedEdgeForCell[ci]) < edges.size()) {
+                assignedEdge =
+                    &edges[static_cast<size_t>(assignedEdgeForCell[ci])];
             }
             Ellipsoid &cell = frame.cells[ci];
             const auto &center = centers[static_cast<size_t>(assignedCenterIdx)];
@@ -14016,7 +16356,22 @@ void CellUniverse::optimize(int frameIndex)
                      << ";min_signal=" << minSignal
                      << ";min_voxels=" << minVoxels
                      << ";old_supported_min_signal=" << oldSupportedMinSignal
-                     << ";old_supported_min_voxels=" << oldSupportedMinVoxels;
+                     << ";old_supported_min_voxels=" << oldSupportedMinVoxels
+                     << ";sibling_claim_override="
+                     << (assignedEdge && assignedEdge->siblingClaimOverride ? 1 : 0)
+                     << ";sibling_shared_center_reanchor="
+                     << (assignedEdge &&
+                         assignedEdge->siblingSharedCenterReanchor ? 1 : 0)
+                     << ";parent_anchor_reanchor="
+                     << (assignedEdge && assignedEdge->parentAnchorReanchor ? 1 : 0)
+                     << ";weak_same_parent_continuation="
+                     << (assignedEdge &&
+                         assignedEdge->weakSameParentContinuation ? 1 : 0)
+                     << ";protected_future_owner_reanchor="
+                     << (assignedEdge &&
+                         assignedEdge->protectedFutureOwnerReanchor ? 1 : 0)
+                     << ";same_parent_closer_future_override="
+                     << (sameParentCloserFutureOverrideEnabled ? 1 : 0);
                 row.note = note.str();
                 writeCandidateGraphRow(candidateGraphLog, row);
             }
@@ -14033,6 +16388,19 @@ void CellUniverse::optimize(int frameIndex)
                      << " new_window_support=" << newSupport.supported
                      << " signal=" << center.signal
                      << " voxels=" << center.voxelCount
+                     << " sibling_claim_override="
+                     << (assignedEdge && assignedEdge->siblingClaimOverride ? 1 : 0)
+                     << " sibling_shared_center_reanchor="
+                     << (assignedEdge &&
+                         assignedEdge->siblingSharedCenterReanchor ? 1 : 0)
+                     << " parent_anchor_reanchor="
+                     << (assignedEdge && assignedEdge->parentAnchorReanchor ? 1 : 0)
+                     << " weak_same_parent_continuation="
+                     << (assignedEdge &&
+                         assignedEdge->weakSameParentContinuation ? 1 : 0)
+                     << " protected_future_owner_reanchor="
+                     << (assignedEdge &&
+                         assignedEdge->protectedFutureOwnerReanchor ? 1 : 0)
                       << std::endl;
         }
 
@@ -14061,10 +16429,18 @@ void CellUniverse::optimize(int frameIndex)
                   << " rejected_claim=" << rejectedClaim
                   << " rejected_risky_split_candidate="
                   << rejectedRiskySplitCandidate
+                  << " rejected_parent_anchor_old_supported_z_stack="
+                  << rejectedParentAnchorOldSupportedZStack
                   << " allowed_rejected_split_center_repair="
                   << allowedRejectedSplitCenterRepair
                   << " allowed_claim_by_other_own_support="
                   << allowedClaimByOtherOwnSupport
+                  << " allowed_sibling_claim_override="
+                  << allowedSiblingClaimOverride
+                  << " allowed_sibling_shared_center_reanchor="
+                  << allowedSiblingSharedCenterReanchor
+                  << " allowed_protected_future_owner_reanchor="
+                  << allowedProtectedFutureOwnerReanchor
                   << " min_move=" << minMove
                   << " max_move=" << maxMove
                   << " min_window_support=" << minWindowSupport
@@ -14180,9 +16556,29 @@ void CellUniverse::optimize(int frameIndex)
                 0.0f,
                 config.cellLumen
                     .fusionTemporalCenterRepairPcaRelaxOwnClaimMargin);
+        const bool requireSupportGainForLowShapeOldSupported =
+            config.cellLumen
+                .fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled;
+        const float lowShapeOldSupportedMaxShape =
+            std::max(
+                1.0f,
+                config.cellLumen
+                    .fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape);
+        const float lowShapeOldSupportedMinMove =
+            std::max(
+                0.0f,
+                config.cellLumen
+                    .fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove);
+        const int lowShapeOldSupportedMinOldWindowSupport =
+            std::max(
+                1,
+                config.cellLumen
+                    .fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport);
         int relaxed = 0;
         int ownClaimRejected = 0;
         int ownClaimRejectLogged = 0;
+        int lowShapeOldSupportedRejected = 0;
+        int lowShapeOldSupportedRejectLogged = 0;
         for (const auto &cell : frame.cells) {
             if (cell.isTrash()) {
                 continue;
@@ -14218,6 +16614,41 @@ void CellUniverse::optimize(int frameIndex)
                 const PointWindowSupport newSupport =
                     pointWindowSupport(center.position);
                 if (newSupport.supported < minWindowSupport) {
+                    continue;
+                }
+
+                if (requireSupportGainForLowShapeOldSupported &&
+                    cellShapeElongation <= lowShapeOldSupportedMaxShape &&
+                    moveDistance >= lowShapeOldSupportedMinMove &&
+                    oldSupport.supported >=
+                        lowShapeOldSupportedMinOldWindowSupport &&
+                    newSupport.supported <= oldSupport.supported) {
+                    // Dense late frames can have two future-supported bright
+                    // centers close enough that "closer future average" alone
+                    // swaps lineage identity. Low-shape cells are especially
+                    // risky because their PCA direction does not strongly
+                    // justify a long jump. Only this opt-in guard requires an
+                    // actual future support count gain before allowing such a
+                    // wide relax.
+                    ++lowShapeOldSupportedRejected;
+                    if (lowShapeOldSupportedRejectLogged < 20) {
+                        ++lowShapeOldSupportedRejectLogged;
+                        std::cout
+                            << "[PCA Shape Position Guard Relax Reject] frame "
+                            << displayFrame
+                            << " cell=" << cellName
+                            << " reason=low_shape_old_future_supported"
+                            << " moveDistance=" << moveDistance
+                            << " shape=" << cellShapeElongation
+                            << " maxShape=" << lowShapeOldSupportedMaxShape
+                            << " oldWindowSupport="
+                            << oldSupport.supported
+                            << " newWindowSupport="
+                            << newSupport.supported
+                            << " signal=" << center.signal
+                            << " voxels=" << center.voxelCount
+                            << std::endl;
+                    }
                     continue;
                 }
 
@@ -14323,13 +16754,18 @@ void CellUniverse::optimize(int frameIndex)
                       << " cells=" << relaxed
                       << " reason=strong_lumen_future_motion"
                       << " ownClaimRejected=" << ownClaimRejected
+                      << " lowShapeOldSupportedRejected="
+                      << lowShapeOldSupportedRejected
                       << std::endl;
-        } else if (ownClaimRejected > 0) {
+        } else if (ownClaimRejected > 0 ||
+                   lowShapeOldSupportedRejected > 0) {
             std::cout << "[PCA Shape Position Guard Relax] frame "
                       << displayFrame
                       << " cells=0"
                       << " reason=strong_lumen_future_motion"
                       << " ownClaimRejected=" << ownClaimRejected
+                      << " lowShapeOldSupportedRejected="
+                      << lowShapeOldSupportedRejected
                       << std::endl;
         }
     };
@@ -14527,6 +16963,9 @@ void CellUniverse::optimize(int frameIndex)
             const bool staleGuardedFutureReanchorEnabled =
                 config.cellLumen
                     .fusionStaleContinuationPruneGuardedFutureReanchorEnabled;
+            const bool staleGuardedFutureReanchorTrustProtectedOwner =
+                config.cellLumen
+                    .fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled;
             const float staleGuardedFutureReanchorMaxDistance =
                 std::max(
                     maxCurrentDistance,
@@ -14592,6 +17031,9 @@ void CellUniverse::optimize(int frameIndex)
                 0.0f,
                 config.cellLumen
                     .fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness);
+            const int staleCrowdedBridgeMaxFutureSupport =
+                config.cellLumen
+                    .fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport;
             const bool staleProtectedOneRealSyntheticEnabled =
                 config.cellLumen
                     .fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled;
@@ -14620,6 +17062,37 @@ void CellUniverse::optimize(int frameIndex)
                     0.0f,
                     config.cellLumen
                         .fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance);
+            const bool staleKeepStrongAcceptedOneRealSynthetic =
+                config.cellLumen
+                    .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled;
+            const float staleKeepStrongAcceptedOneRealSyntheticMaxScore =
+                config.cellLumen
+                    .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore;
+            const int staleKeepStrongAcceptedOneRealSyntheticMinWindowBoth =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth);
+            const int staleKeepStrongAcceptedOneRealSyntheticMaxWindowMissing =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing);
+            const int staleKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists);
+            const int staleKeepStrongAcceptedOneRealSyntheticMinRealVoxels =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels);
+            const float staleKeepStrongAcceptedOneRealSyntheticMinRealSignal =
+                std::max(
+                    0.0f,
+                    config.cellLumen
+                        .fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal);
 
             auto findCurrentLumenCenterById =
                 [&](int candidateId) -> const CellLumenLookaheadCandidate * {
@@ -14649,6 +17122,133 @@ void CellUniverse::optimize(int frameIndex)
                     }
                 }
                 return bestCenter;
+            };
+            const bool staleProtectedOwnerOverrideEnabled =
+                staleGuardedFutureReanchorTrustProtectedOwner &&
+                config.cellLumen
+                    .fusionSplitPriorProtectFutureContinuationCandidateEnabled;
+            const float protectOwnerMinDistance =
+                std::max(
+                    0.0f,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMinDistance);
+            const float protectOwnerMaxDistance =
+                std::max(
+                    protectOwnerMinDistance,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMaxDistance);
+            const float protectOwnerMinOldNearestCurrentDistance =
+                std::max(
+                    0.0f,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMinOldNearestCurrentDistance);
+            const int protectOwnerMinOldWindowSupport =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMinOldWindowSupport);
+            const int protectOwnerMinCenterWindowSupport =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMinCenterWindowSupport);
+            const int protectOwnerMinVoxels =
+                std::max(
+                    0,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMinVoxels);
+            const float protectOwnerMinSignal =
+                std::max(
+                    0.0f,
+                    config.cellLumen
+                        .fusionSplitPriorProtectFutureContinuationMinSignal);
+            auto splitPriorWindowSupportForPoint =
+                [&](const cv::Point3f &point) {
+                int support = 0;
+                for (int offset = 1; offset < windowSize; ++offset) {
+                    const int lookaheadFrameIndex = frameIndex + offset;
+                    if (lookaheadFrameIndex < 0 ||
+                        static_cast<size_t>(lookaheadFrameIndex) >= frames.size()) {
+                        break;
+                    }
+                    const auto &futureCandidates =
+                        getCellLumenLookaheadCandidates(lookaheadFrameIndex);
+                    if (futureCandidates.empty()) {
+                        continue;
+                    }
+                    const float matchDistance =
+                        std::max(
+                            0.0f,
+                            config.cellLumen
+                                .fusionSplitPriorWindowMatchDistance) +
+                        std::max(
+                            0.0f,
+                            config.cellLumen
+                                .fusionSplitPriorWindowMatchDistancePerFrame) *
+                            static_cast<float>(std::max(0, offset - 1));
+                    if (bestDistanceToCenters(point, futureCandidates) <=
+                        matchDistance) {
+                        ++support;
+                    }
+                }
+                return support;
+            };
+            auto protectedFutureOwnerMatchesCell =
+                [&](const CellLumenLookaheadCandidate &candidate,
+                    const std::string &targetCellName) {
+                if (!staleProtectedOwnerOverrideEnabled ||
+                    candidate.voxelCount < protectOwnerMinVoxels ||
+                    candidate.signal < protectOwnerMinSignal) {
+                    return false;
+                }
+                if (splitPriorWindowSupportForPoint(candidate.position) <
+                    protectOwnerMinCenterWindowSupport) {
+                    return false;
+                }
+                std::string bestOwnerName;
+                float bestOwnerDistance =
+                    std::numeric_limits<float>::infinity();
+                for (const Ellipsoid &ownerCell : frame.cells) {
+                    if (ownerCell.isTrash()) {
+                        continue;
+                    }
+                    const cv::Point3f ownerPos(
+                        ownerCell.getX(),
+                        ownerCell.getY(),
+                        ownerCell.getZ());
+                    if (splitPriorWindowSupportForPoint(ownerPos) <
+                        protectOwnerMinOldWindowSupport) {
+                        continue;
+                    }
+                    float ownerNearestCurrent =
+                        std::numeric_limits<float>::infinity();
+                    for (const auto &center : centers) {
+                        if (center.voxelCount < protectOwnerMinVoxels ||
+                            center.signal < protectOwnerMinSignal) {
+                            continue;
+                        }
+                        ownerNearestCurrent =
+                            std::min(
+                                ownerNearestCurrent,
+                                static_cast<float>(
+                                    cv::norm(center.position - ownerPos)));
+                    }
+                    if (ownerNearestCurrent <
+                        protectOwnerMinOldNearestCurrentDistance) {
+                        continue;
+                    }
+                    const float ownerDistance =
+                        static_cast<float>(
+                            cv::norm(candidate.position - ownerPos));
+                    if (ownerDistance < protectOwnerMinDistance ||
+                        ownerDistance > protectOwnerMaxDistance ||
+                        ownerDistance >= bestOwnerDistance) {
+                        continue;
+                    }
+                    bestOwnerDistance = ownerDistance;
+                    bestOwnerName = ownerCell.getName();
+                }
+                return bestOwnerName == targetCellName;
             };
             auto closestOtherCellDistanceToPoint =
                 [&](const cv::Point3f &point,
@@ -14817,6 +17417,47 @@ void CellUniverse::optimize(int frameIndex)
                         continue;
                     }
 
+                    const int realVoxels =
+                        realA ? proposal.voxA : proposal.voxB;
+                    const float realSignal =
+                        realA ? proposal.signalA : proposal.signalB;
+                    if (staleKeepStrongAcceptedOneRealSynthetic &&
+                        proposal.rankedScore <=
+                            staleKeepStrongAcceptedOneRealSyntheticMaxScore &&
+                        proposal.windowBothDaughtersSupported >=
+                            staleKeepStrongAcceptedOneRealSyntheticMinWindowBoth &&
+                        proposal.windowMissingDaughterCount <=
+                            staleKeepStrongAcceptedOneRealSyntheticMaxWindowMissing &&
+                        proposal.windowParentPersists <=
+                            staleKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists &&
+                        realVoxels >=
+                            staleKeepStrongAcceptedOneRealSyntheticMinRealVoxels &&
+                        realSignal >=
+                            staleKeepStrongAcceptedOneRealSyntheticMinRealSignal) {
+                        // f173 regression guard: a strong accepted one-real
+                        // split may need a synthetic daughter because Cell
+                        // Lumen only supplied one real center. The stale
+                        // cleanup must not immediately delete that newborn.
+                        std::cout << "[CellLumen Stale Continuation Keep Strong Accepted OneReal Synthetic] frame "
+                                  << displayFrame
+                                  << " cell=" << cellName
+                                  << " parent=" << record.parentName
+                                  << " realDaughter=" << realDaughterName
+                                  << " score=" << proposal.rankedScore
+                                  << " windowBoth="
+                                  << proposal.windowBothDaughtersSupported
+                                  << " windowMissing="
+                                  << proposal.windowMissingDaughterCount
+                                  << " windowParentPersists="
+                                  << proposal.windowParentPersists
+                                  << " realVoxels=" << realVoxels
+                                  << " realSignal=" << realSignal
+                                  << " siblingDistance="
+                                  << siblingDistance
+                                  << std::endl;
+                        return false;
+                    }
+
                     std::set<int> excludedIds;
                     if (realA) {
                         excludedIds.insert(proposal.candidateIdA);
@@ -14965,28 +17606,60 @@ void CellUniverse::optimize(int frameIndex)
                         pos,
                         cell.getBrightness());
                     if (brightNeighbors >= 2) {
-                        staleRemoveNames.insert(cellName);
-                        std::cout << "[CellLumen Stale Continuation CrowdedBridge Prune Candidate] frame "
+                        const int crowdedFutureSupport =
+                            futureSupportForPoint(pos);
+                        const bool crowdedFutureAllowsPrune =
+                            staleCrowdedBridgeMaxFutureSupport < 0 ||
+                            crowdedFutureSupport <=
+                                staleCrowdedBridgeMaxFutureSupport;
+                        if (crowdedFutureAllowsPrune) {
+                            staleRemoveNames.insert(cellName);
+                            std::cout << "[CellLumen Stale Continuation CrowdedBridge Prune Candidate] frame "
+                                      << displayFrame
+                                      << " cell=" << cellName
+                                      << " brightness=" << cell.getBrightness()
+                                      << " majorRadius=" << cellMajorRadius
+                                      << " minorRadius=" << cellMinorRadius
+                                      << " brightNeighbors="
+                                      << brightNeighbors
+                                      << " maxNeighborDistance="
+                                      << staleCrowdedBridgeMaxNeighborDistance
+                                      << " brightnessAdvantage="
+                                      << staleCrowdedBridgeMinBrightnessAdvantage
+                                      << " protectedOneRealSynthetic="
+                                      << (crowdedBridgeWeakSynthetic ? 1 : 0)
+                                      << " acceptedSplitPcaLocked="
+                                      << (isAcceptedSplitPcaLocked(cellName) ? 1
+                                                                            : 0)
+                                      << " pcaGuardReverted="
+                                      << (guardReverted ? 1 : 0)
+                                      << " futureSupport="
+                                      << crowdedFutureSupport
+                                      << " maxFutureSupport="
+                                      << staleCrowdedBridgeMaxFutureSupport
+                                      << std::endl;
+                            continue;
+                        }
+                        // f172 exposed a real dense continuation that looked
+                        // like a crowded bridge after PCA guard rollback, but
+                        // future frames still supported the same center. Keep
+                        // this as a density-profile switch so earlier cleanup
+                        // behavior is unchanged unless explicitly enabled.
+                        std::cout << "[CellLumen Stale Continuation CrowdedBridge Keep] frame "
                                   << displayFrame
                                   << " cell=" << cellName
                                   << " brightness=" << cell.getBrightness()
                                   << " majorRadius=" << cellMajorRadius
                                   << " minorRadius=" << cellMinorRadius
-                                  << " brightNeighbors="
-                                  << brightNeighbors
-                                  << " maxNeighborDistance="
-                                  << staleCrowdedBridgeMaxNeighborDistance
-                                  << " brightnessAdvantage="
-                                  << staleCrowdedBridgeMinBrightnessAdvantage
-                                  << " protectedOneRealSynthetic="
-                                  << (crowdedBridgeWeakSynthetic ? 1 : 0)
-                                  << " acceptedSplitPcaLocked="
-                                  << (isAcceptedSplitPcaLocked(cellName) ? 1
-                                                                        : 0)
+                                  << " brightNeighbors=" << brightNeighbors
+                                  << " futureSupport="
+                                  << crowdedFutureSupport
+                                  << " maxFutureSupport="
+                                  << staleCrowdedBridgeMaxFutureSupport
+                                  << " reason=future_support"
                                   << " pcaGuardReverted="
                                   << (guardReverted ? 1 : 0)
                                   << std::endl;
-                        continue;
                     }
                 }
                 if (staleLowQualityEnabled &&
@@ -15101,15 +17774,23 @@ void CellUniverse::optimize(int frameIndex)
                             closestOtherDistance +
                                     staleGuardedFutureReanchorClaimMargin <
                                 guardedCenterDistance;
+                        const bool protectedOwnerMatchesCell =
+                            protectedFutureOwnerMatchesCell(
+                                *guardedCenter,
+                                cellName);
                         if (centerFutureSupport >=
                                 staleGuardedFutureReanchorMinFutureSupport &&
-                            !claimedByOther) {
+                            (!claimedByOther || protectedOwnerMatchesCell)) {
                             // f177 showed that simply keeping a future-supported
                             // PCA-guarded cell can preserve the old wrong
                             // position. This switch-gated repair only reanchors
                             // to a nearby current CellLumen center when the
                             // center is also visible in the future window and is
-                            // not clearly owned by another live cell.
+                            // not clearly owned by another live cell. f172 then
+                            // showed the opposite dense-frame case: same-frame
+                            // geometry can say a neighbor is closer while the
+                            // split-prior future-owner model already proved this
+                            // candidate belongs to the stale continuation.
                             reanchorRecord.position = guardedCenter->position;
                             reanchorRecord.candidateId =
                                 guardedCenter->candidateId;
@@ -15142,6 +17823,8 @@ void CellUniverse::optimize(int frameIndex)
                                       << closestOtherDistance
                                       << " claimMargin="
                                       << staleGuardedFutureReanchorClaimMargin
+                                      << " protectedOwnerOverride="
+                                      << (protectedOwnerMatchesCell ? 1 : 0)
                                       << " pcaGuardReverted=1"
                                       << std::endl;
                             continue;
@@ -15164,6 +17847,8 @@ void CellUniverse::optimize(int frameIndex)
                                   << " closestOther=" << closestCellName
                                   << " closestOtherDistance="
                                   << closestOtherDistance
+                                  << " protectedOwnerOverride="
+                                  << (protectedOwnerMatchesCell ? 1 : 0)
                                   << std::endl;
                     }
                 }
@@ -15642,11 +18327,14 @@ void CellUniverse::releaseFrameImages(int frameIndex)
 
     const int erasedSplitPriors = pruneFrameCache(cellLumenSplitPriors);
     const int erasedReanchors = pruneFrameCache(cellLumenCenterReanchorCandidateIds);
+    const int erasedWeakContinuation =
+        pruneFrameCache(cellLumenWeakSameParentContinuationCandidateIds);
     const int erasedBadParents = pruneFrameCache(cellLumenSplitPriorRejectedBadParents);
     const int erasedCollapsedParents = pruneFrameCache(cellLumenCollapsedCenterParents);
     const int erasedCenterCandidates = pruneFrameCache(cellLumenCenterCandidates);
     const int erasedLookahead = pruneFrameCache(cellLumenLookaheadCandidates);
-    const int totalErased = erasedSplitPriors + erasedReanchors + erasedBadParents +
+    const int totalErased = erasedSplitPriors + erasedReanchors +
+                            erasedWeakContinuation + erasedBadParents +
                             erasedCollapsedParents + erasedCenterCandidates +
                             erasedLookahead;
     if (totalErased > 0) {
@@ -15654,6 +18342,8 @@ void CellUniverse::releaseFrameImages(int frameIndex)
                   << " keep_from_frame=" << (firstFrame + keepFromFrame)
                   << " split_priors=" << erasedSplitPriors
                   << " reanchors=" << erasedReanchors
+                  << " weak_same_parent_continuations="
+                  << erasedWeakContinuation
                   << " bad_parents=" << erasedBadParents
                   << " collapsed_parents=" << erasedCollapsedParents
                   << " center_candidates=" << erasedCenterCandidates
@@ -15714,10 +18404,19 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
     {
         std::filesystem::create_directories(exportRoot);
 
+        const int tiffCompression = config.simulation.export_frame_tiff_compression_enabled
+            ? losslessTiffCompressionOrNone(config.simulation.export_frame_tiff_compression)
+            : 1;
+        std::cout << "[TIFF Export] compression=" << tiffCompression
+                  << " enabled=" << config.simulation.export_frame_tiff_compression_enabled
+                  << std::endl;
+
         writeNapariFriendlyTiffStack(exportRoot + "/" + std::to_string(displayFrame) + "_real.tif",
-                                     realImages);
+                                     realImages,
+                                     tiffCompression);
         writeNapariFriendlyTiffStack(exportRoot + "/" + std::to_string(displayFrame) + "_synth.tif",
-                                     synthImages);
+                                     synthImages,
+                                     tiffCompression);
     }
 
     std::cout << "Done" << '\n';
@@ -15964,6 +18663,7 @@ bool CellUniverse::loadCheckpoint(int checkpointFrameIndex,
     cellFirstSeenFrame.clear();
     cellLumenSplitPriors.clear();
     cellLumenCenterReanchorCandidateIds.clear();
+    cellLumenWeakSameParentContinuationCandidateIds.clear();
     cellLumenSplitPriorRejectedBadParents.clear();
     cellLumenCollapsedCenterParents.clear();
     cellLumenCenterCandidates.clear();

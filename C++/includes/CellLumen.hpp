@@ -132,6 +132,9 @@ private:
         const std::vector<cv::Mat> &volume,
         const std::vector<DetectedCell> &cells,
         const std::vector<int> &members) const;
+    void exportFineShapeMasks(const fs::path &imageFile,
+                              const std::vector<cv::Mat> &volume,
+                              const std::vector<DetectedCell> &cells) const;
     std::vector<DetectedCell> collapseClusteredCandidates(const std::vector<cv::Mat> &volume,
                                                           const std::vector<DetectedCell> &cells,
                                                           const std::string &frameStem) const;

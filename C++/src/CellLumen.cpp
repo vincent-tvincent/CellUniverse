@@ -411,7 +411,9 @@ cv::Mat makeTiffReadySlice(const cv::Mat &slice)
     return output;
 }
 
-void writeCellLumenTiffStack(const fs::path &path, const std::vector<cv::Mat> &stack)
+void writeCellLumenTiffStack(const fs::path &path,
+                             const std::vector<cv::Mat> &stack,
+                             int compression = 1)
 {
     std::vector<cv::Mat> output;
     output.reserve(stack.size());
@@ -443,12 +445,79 @@ void writeCellLumenTiffStack(const fs::path &path, const std::vector<cv::Mat> &s
     }
 
     const std::vector<int> params = {
-        cv::IMWRITE_TIFF_COMPRESSION, 1
+        cv::IMWRITE_TIFF_COMPRESSION, compression
     };
     if (!cv::imwritemulti(path.string(), output, params))
     {
+        if (compression != 1)
+        {
+            // This preview TIFF must remain review-safe. Compression is optional,
+            // so unsupported OpenCV codecs fall back to the historical uncompressed
+            // writer instead of changing pixels or stopping a long run.
+            std::cout << "[CellLumen Output] compression_write_failed="
+                      << compression
+                      << " fallback=1 path=" << path.string()
+                      << std::endl;
+            const std::vector<int> fallbackParams = {
+                cv::IMWRITE_TIFF_COMPRESSION, 1
+            };
+            if (cv::imwritemulti(path.string(), output, fallbackParams))
+            {
+                return;
+            }
+        }
         throw std::runtime_error("Failed to write CellLumen TIFF stack: " + path.string());
     }
+}
+
+int losslessTiffCompressionOrNone(int requestedCompression)
+{
+    // Keep CellLumen review previews visually identical. The value is a raw
+    // TIFF compression tag, so only known lossless tags are accepted here.
+    switch (requestedCompression)
+    {
+        case 1:     // COMPRESSION_NONE
+        case 5:     // COMPRESSION_LZW
+        case 8:     // COMPRESSION_ADOBE_DEFLATE
+        case 32946: // COMPRESSION_DEFLATE
+            return requestedCompression;
+        default:
+            std::cout << "[CellLumen Output] unsupported_or_lossy_tiff_compression="
+                      << requestedCompression
+                      << " fallback=1 reason=lossless_preview_guard"
+                      << std::endl;
+            return 1;
+    }
+}
+
+struct FineShapeMaskRun
+{
+    int z = 0;
+    int y = 0;
+    int x0 = 0;
+    int x1 = 0;
+};
+
+std::string csvCell(const std::string &value)
+{
+    if (value.find_first_of(",\"\n\r") == std::string::npos)
+    {
+        return value;
+    }
+    std::string escaped = "\"";
+    for (char c : value)
+    {
+        if (c == '"')
+        {
+            escaped += "\"\"";
+        }
+        else
+        {
+            escaped += c;
+        }
+    }
+    escaped += "\"";
+    return escaped;
 }
 
 float squaredDistance(const cv::Point3f &lhs, const cv::Point3f &rhs)
@@ -6821,6 +6890,321 @@ std::vector<Ellipsoid> CellLumen::makeEllipsoids(const std::vector<DetectedCell>
     return ellipsoids;
 }
 
+void CellLumen::exportFineShapeMasks(const fs::path &imageFile,
+                                     const std::vector<cv::Mat> &volume,
+                                     const std::vector<DetectedCell> &cells) const
+{
+    if (!config.cellLumen.fineShapeModelEnabled ||
+        !config.cellLumen.fineShapeModelExportCsv)
+    {
+        return;
+    }
+    if (volume.empty() || cells.empty())
+    {
+        return;
+    }
+
+    const int zCount = static_cast<int>(volume.size());
+    const int rows = volume.front().rows;
+    const int cols = volume.front().cols;
+    if (zCount <= 0 || rows <= 0 || cols <= 0)
+    {
+        return;
+    }
+
+    const float zScale = std::max(1.0e-6f, effectiveZScaling());
+    const float radiusScale = std::max(0.1f, config.cellLumen.fineShapeModelRadiusScale);
+    const float minRadius = std::max(1.0f, config.cellLumen.fineShapeModelMinRadius);
+    const float maxRadius = std::max(minRadius, config.cellLumen.fineShapeModelMaxRadius);
+    const float thresholdQuantile = std::clamp(config.cellLumen.fineShapeModelThresholdQuantile,
+                                               0.0f,
+                                               1.0f);
+    const float thresholdFloor = std::max(0.0f, config.cellLumen.fineShapeModelThresholdFloor);
+    const float seedSearchRadius = std::max(1.0f, config.cellLumen.fineShapeModelSeedSearchRadius);
+    const float seedFallbackFraction = std::clamp(config.cellLumen.fineShapeModelSeedFallbackFraction,
+                                                  0.05f,
+                                                  1.0f);
+    const int maxVoxelsPerCell = config.cellLumen.fineShapeModelMaxVoxelsPerCell;
+
+    const fs::path maskDir = outputDir / "fine_shape_masks";
+    fs::create_directories(maskDir);
+    const std::string frameStem = imageFile.stem().string();
+    const fs::path summaryPath = maskDir / (frameStem + "_fine_shape_summary.csv");
+    const fs::path runsPath = maskDir / (frameStem + "_fine_shape_runs.csv");
+
+    std::ofstream summary(summaryPath);
+    std::ofstream runs(runsPath);
+    if (!summary.is_open() || !runs.is_open())
+    {
+        throw std::runtime_error("Failed to open fine shape CSV outputs in " + maskDir.string());
+    }
+
+    summary << "frame,cell_name,center_x,center_y,center_z_scaled,radius_scaled,"
+            << "threshold,seed_value,voxels,mean_intensity,truncated,"
+            << "bbox_x0,bbox_y0,bbox_z0,bbox_x1,bbox_y1,bbox_z1\n";
+    runs << "frame,cell_name,z,y,x0,x1\n";
+    summary << std::setprecision(9);
+
+    size_t exportedCells = 0;
+    size_t totalMaskVoxels = 0;
+
+    for (const auto &cell : cells)
+    {
+        const float baseRadius = std::max({cell.majorRadius,
+                                           cell.bRadius,
+                                           cell.minorRadius,
+                                           minRadius});
+        const float radiusScaled = std::clamp(baseRadius * radiusScale, minRadius, maxRadius);
+        const float radiusSq = radiusScaled * radiusScaled;
+
+        const int x0 = std::max(0, static_cast<int>(std::floor(cell.centerScaled.x - radiusScaled)));
+        const int x1 = std::min(cols - 1, static_cast<int>(std::ceil(cell.centerScaled.x + radiusScaled)));
+        const int y0 = std::max(0, static_cast<int>(std::floor(cell.centerScaled.y - radiusScaled)));
+        const int y1 = std::min(rows - 1, static_cast<int>(std::ceil(cell.centerScaled.y + radiusScaled)));
+        const int z0 = std::max(0, static_cast<int>(std::floor((cell.centerScaled.z - radiusScaled) / zScale)));
+        const int z1 = std::min(zCount - 1, static_cast<int>(std::ceil((cell.centerScaled.z + radiusScaled) / zScale)));
+
+        if (x0 > x1 || y0 > y1 || z0 > z1)
+        {
+            continue;
+        }
+
+        std::vector<float> localValues;
+        localValues.reserve(static_cast<size_t>(std::max(1, x1 - x0 + 1)) *
+                            static_cast<size_t>(std::max(1, y1 - y0 + 1)));
+        for (int z = z0; z <= z1; ++z)
+        {
+            const cv::Mat &slice = volume[static_cast<size_t>(z)];
+            for (int y = y0; y <= y1; ++y)
+            {
+                const float *row = slice.ptr<float>(y);
+                for (int x = x0; x <= x1; ++x)
+                {
+                    const float dx = static_cast<float>(x) - cell.centerScaled.x;
+                    const float dy = static_cast<float>(y) - cell.centerScaled.y;
+                    const float dz = static_cast<float>(z) * zScale - cell.centerScaled.z;
+                    if (dx * dx + dy * dy + dz * dz <= radiusSq)
+                    {
+                        const float value = row[x];
+                        if (std::isfinite(value))
+                        {
+                            localValues.push_back(value);
+                        }
+                    }
+                }
+            }
+        }
+        if (localValues.empty())
+        {
+            continue;
+        }
+
+        float threshold = std::max(thresholdFloor,
+                                   percentileFromValues(localValues, thresholdQuantile));
+
+        cv::Point3i seed(-1, -1, -1);
+        float seedValue = -std::numeric_limits<float>::infinity();
+        const float seedRadiusSq = seedSearchRadius * seedSearchRadius;
+        for (int z = z0; z <= z1; ++z)
+        {
+            const cv::Mat &slice = volume[static_cast<size_t>(z)];
+            for (int y = y0; y <= y1; ++y)
+            {
+                const float *row = slice.ptr<float>(y);
+                for (int x = x0; x <= x1; ++x)
+                {
+                    const float dx = static_cast<float>(x) - cell.centerScaled.x;
+                    const float dy = static_cast<float>(y) - cell.centerScaled.y;
+                    const float dz = static_cast<float>(z) * zScale - cell.centerScaled.z;
+                    const float distSq = dx * dx + dy * dy + dz * dz;
+                    if (distSq > seedRadiusSq || distSq > radiusSq)
+                    {
+                        continue;
+                    }
+                    const float value = row[x];
+                    if (std::isfinite(value) && value > seedValue)
+                    {
+                        seedValue = value;
+                        seed = cv::Point3i(x, y, z);
+                    }
+                }
+            }
+        }
+        if (seed.x < 0)
+        {
+            continue;
+        }
+        if (seedValue < threshold)
+        {
+            threshold = std::max(thresholdFloor, seedValue * seedFallbackFraction);
+        }
+
+        const int localX = x1 - x0 + 1;
+        const int localY = y1 - y0 + 1;
+        const int localZ = z1 - z0 + 1;
+        const size_t localSize = static_cast<size_t>(localX) *
+                                 static_cast<size_t>(localY) *
+                                 static_cast<size_t>(localZ);
+        std::vector<unsigned char> visited(localSize, 0);
+        std::vector<unsigned char> mask(localSize, 0);
+        std::queue<cv::Point3i> q;
+
+        auto localIndex = [&](int x, int y, int z) -> size_t {
+            return (static_cast<size_t>(z - z0) * static_cast<size_t>(localY) +
+                    static_cast<size_t>(y - y0)) * static_cast<size_t>(localX) +
+                   static_cast<size_t>(x - x0);
+        };
+        auto insideLocalShape = [&](int x, int y, int z) -> bool {
+            if (x < x0 || x > x1 || y < y0 || y > y1 || z < z0 || z > z1)
+            {
+                return false;
+            }
+            const float dx = static_cast<float>(x) - cell.centerScaled.x;
+            const float dy = static_cast<float>(y) - cell.centerScaled.y;
+            const float dz = static_cast<float>(z) * zScale - cell.centerScaled.z;
+            return dx * dx + dy * dy + dz * dz <= radiusSq;
+        };
+        auto voxelValue = [&](int x, int y, int z) -> float {
+            return volume[static_cast<size_t>(z)].ptr<float>(y)[x];
+        };
+
+        const size_t seedIdx = localIndex(seed.x, seed.y, seed.z);
+        visited[seedIdx] = 1;
+        q.push(seed);
+
+        int voxelCount = 0;
+        double intensitySum = 0.0;
+        bool truncated = false;
+        int bx0 = cols;
+        int by0 = rows;
+        int bz0 = zCount;
+        int bx1 = -1;
+        int by1 = -1;
+        int bz1 = -1;
+
+        const std::array<cv::Point3i, 6> neighbors = {
+            cv::Point3i(1, 0, 0),
+            cv::Point3i(-1, 0, 0),
+            cv::Point3i(0, 1, 0),
+            cv::Point3i(0, -1, 0),
+            cv::Point3i(0, 0, 1),
+            cv::Point3i(0, 0, -1)
+        };
+
+        while (!q.empty())
+        {
+            const cv::Point3i p = q.front();
+            q.pop();
+            const float value = voxelValue(p.x, p.y, p.z);
+            if (!std::isfinite(value) || value < threshold)
+            {
+                continue;
+            }
+
+            const size_t pIdx = localIndex(p.x, p.y, p.z);
+            mask[pIdx] = 1;
+            ++voxelCount;
+            intensitySum += static_cast<double>(value);
+            bx0 = std::min(bx0, p.x);
+            by0 = std::min(by0, p.y);
+            bz0 = std::min(bz0, p.z);
+            bx1 = std::max(bx1, p.x);
+            by1 = std::max(by1, p.y);
+            bz1 = std::max(bz1, p.z);
+
+            if (maxVoxelsPerCell > 0 && voxelCount >= maxVoxelsPerCell)
+            {
+                truncated = true;
+                break;
+            }
+
+            for (const auto &delta : neighbors)
+            {
+                const int nx = p.x + delta.x;
+                const int ny = p.y + delta.y;
+                const int nz = p.z + delta.z;
+                if (!insideLocalShape(nx, ny, nz))
+                {
+                    continue;
+                }
+                const size_t nIdx = localIndex(nx, ny, nz);
+                if (visited[nIdx])
+                {
+                    continue;
+                }
+                visited[nIdx] = 1;
+                q.emplace(nx, ny, nz);
+            }
+        }
+
+        if (voxelCount <= 0)
+        {
+            continue;
+        }
+
+        const double meanIntensity = intensitySum / static_cast<double>(voxelCount);
+        for (int z = z0; z <= z1; ++z)
+        {
+            for (int y = y0; y <= y1; ++y)
+            {
+                int runStart = -1;
+                for (int x = x0; x <= x1; ++x)
+                {
+                    const bool inMask = mask[localIndex(x, y, z)] != 0;
+                    if (inMask && runStart < 0)
+                    {
+                        runStart = x;
+                    }
+                    if ((!inMask || x == x1) && runStart >= 0)
+                    {
+                        const int runEnd = inMask && x == x1 ? x : x - 1;
+                        runs << csvCell(frameStem) << ","
+                             << csvCell(cell.name) << ","
+                             << z << ","
+                             << y << ","
+                             << runStart << ","
+                             << runEnd << "\n";
+                        runStart = -1;
+                    }
+                }
+            }
+        }
+
+        summary << csvCell(frameStem) << ","
+                << csvCell(cell.name) << ","
+                << cell.centerScaled.x << ","
+                << cell.centerScaled.y << ","
+                << cell.centerScaled.z << ","
+                << radiusScaled << ","
+                << threshold << ","
+                << seedValue << ","
+                << voxelCount << ","
+                << meanIntensity << ","
+                << (truncated ? 1 : 0) << ","
+                << bx0 << ","
+                << by0 << ","
+                << bz0 << ","
+                << bx1 << ","
+                << by1 << ","
+                << bz1 << "\n";
+
+        ++exportedCells;
+        totalMaskVoxels += static_cast<size_t>(voxelCount);
+    }
+
+    std::cout << "[CellLumen FineShapeModel]"
+              << " enabled=1"
+              << " frame=" << imageFile.filename().string()
+              << " cells=" << cells.size()
+              << " exported_cells=" << exportedCells
+              << " total_mask_voxels=" << totalMaskVoxels
+              << " summary_csv=" << summaryPath
+              << " runs_csv=" << runsPath
+              << " mode=center_anchored_brightness_rle"
+              << " note=export_only_pca_not_replaced"
+              << std::endl;
+}
+
 void CellLumen::saveInitialCsv(const fs::path &csvOutputPath,
                                             const std::string &frameFileName,
                                             const std::vector<DetectedCell> &cells) const
@@ -6897,10 +7281,15 @@ void CellLumen::saveFrameOutputs(const fs::path &imageFile,
     fs::create_directories(outputDir);
     const fs::path realTiffPath = outputDir / (frameDirName + "_real.tif");
     const fs::path synthTiffPath = outputDir / (frameDirName + "_synth.tif");
-    writeCellLumenTiffStack(realTiffPath, realImages);
-    writeCellLumenTiffStack(synthTiffPath, synthImages);
+    const int tiffCompression = config.simulation.export_frame_tiff_compression_enabled
+        ? losslessTiffCompressionOrNone(config.simulation.export_frame_tiff_compression)
+        : 1;
+    writeCellLumenTiffStack(realTiffPath, realImages, tiffCompression);
+    writeCellLumenTiffStack(synthTiffPath, synthImages, tiffCompression);
     std::cout << "[CellLumen Output] real_tif=" << realTiffPath
               << " synth_tif=" << synthTiffPath
+              << " tiff_compression=" << tiffCompression
+              << " compression_enabled=" << config.simulation.export_frame_tiff_compression_enabled
               << std::endl;
 }
 
@@ -6988,6 +7377,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::buildInitialCsvForFrame(
     }
 
     saveInitialCsv(csvOutputPath, imageFile.filename().string(), cells);
+    exportFineShapeMasks(imageFile, realFrame, cells);
     saveFrameOutputs(imageFile, realFrame, cells);
     logElapsed("save_csv_and_preview_images");
     std::cout << "[CellLumen Timing Summary] frame=" << imageFile.filename().string()
@@ -7059,5 +7449,6 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsForFrame(
         }
     }
 
+    exportFineShapeMasks(imageFile, realFrame, cells);
     return cells;
 }

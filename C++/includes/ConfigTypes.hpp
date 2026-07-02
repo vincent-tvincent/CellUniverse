@@ -246,6 +246,12 @@ public:
     bool export_perturb_cell_center_debug_images = false;
     bool export_frame_png = true;
     bool export_frame_tiff = false;
+    // Default-off TIFF compression. Historical preview TIFFs were written
+    // uncompressed for reader compatibility, but long embryo runs can create
+    // very large review outputs. YAML must explicitly opt in so verified runs
+    // keep identical image bytes unless a run asks for smaller files.
+    bool export_frame_tiff_compression_enabled = false;
+    int export_frame_tiff_compression = 1;
     bool quit_after_preprocessing = false;
     bool enable_lineage_tree_window = false;
     bool prepare_analyze_one_frame = false;
@@ -461,6 +467,8 @@ public:
         if (node["export_perturb_cell_center_debug_images"]) export_perturb_cell_center_debug_images = node["export_perturb_cell_center_debug_images"].as<bool>();
         if (node["export_frame_png"]) export_frame_png = node["export_frame_png"].as<bool>();
         if (node["export_frame_tiff"]) export_frame_tiff = node["export_frame_tiff"].as<bool>();
+        if (node["export_frame_tiff_compression_enabled"]) export_frame_tiff_compression_enabled = node["export_frame_tiff_compression_enabled"].as<bool>();
+        if (node["export_frame_tiff_compression"]) export_frame_tiff_compression = std::max(1, node["export_frame_tiff_compression"].as<int>());
         if (node["quit_after_preprocessing"]) quit_after_preprocessing = node["quit_after_preprocessing"].as<bool>();
         if (node["enable_lineage_tree_window"]) enable_lineage_tree_window = node["enable_lineage_tree_window"].as<bool>();
         if (node["lineage_tree_window"]) enable_lineage_tree_window = node["lineage_tree_window"].as<bool>();
@@ -605,6 +613,8 @@ public:
         std::cout << "export_perturb_cell_center_debug_images: " << export_perturb_cell_center_debug_images << '\n';
         std::cout << "export_frame_png: " << export_frame_png << '\n';
         std::cout << "export_frame_tiff: " << export_frame_tiff << '\n';
+        std::cout << "export_frame_tiff_compression_enabled: " << export_frame_tiff_compression_enabled << '\n';
+        std::cout << "export_frame_tiff_compression: " << export_frame_tiff_compression << '\n';
         std::cout << "quit_after_preprocessing: " << quit_after_preprocessing << '\n';
         std::cout << "enable_lineage_tree_window: " << enable_lineage_tree_window << '\n';
         std::cout << "prepare_analyze_one_frame: " << prepare_analyze_one_frame << '\n';
@@ -1735,6 +1745,22 @@ public:
     int finalSparseIsolatedFloorWeakSignalMaxCells = -1;
     float finalSparseIsolatedFloorMaxTop10MinusShell = -1.0f;
 
+    // Default-off center anchored fine shape model. This is a new option, not a
+    // replacement for the verified PCA ellipsoid fitter. When enabled it builds
+    // a local 3D brightness mask around each CellLumen center and exports that
+    // mask as lightweight RLE rows for review or future scoring. It must stay
+    // opt-in so existing tracking runs keep the same PCA behavior.
+    bool fineShapeModelEnabled = false;
+    bool fineShapeModelExportCsv = false;
+    float fineShapeModelRadiusScale = 1.25f;
+    float fineShapeModelMinRadius = 8.0f;
+    float fineShapeModelMaxRadius = 64.0f;
+    float fineShapeModelThresholdQuantile = 0.55f;
+    float fineShapeModelThresholdFloor = 0.08f;
+    float fineShapeModelSeedSearchRadius = 10.0f;
+    float fineShapeModelSeedFallbackFraction = 0.85f;
+    int fineShapeModelMaxVoxelsPerCell = 200000;
+
     // Optional fusion path for the main Cell Universe optimizer. CellLumen is
     // used only as a raw frame center rescue source; candidates still have to
     // pass distance, size, and shell contrast gates before becoming real
@@ -1931,6 +1957,7 @@ public:
     int fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth = 2;
     int fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing = 0;
     int fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists = 0;
+    bool fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence = false;
     float fusionSplitPriorCleanTwoRealParentAnchorReplacementMinParentDistanceBalance = 0.25f;
     float fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxScore = 18.0f;
     float fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxAnchorScoreDelta = 14.0f;
@@ -1996,6 +2023,16 @@ public:
     bool fusionSplitPriorTemporalRepairRejectClaimBlockers = true;
     int fusionSplitPriorTemporalRepairStrongMinVoxels = 1500;
     float fusionSplitPriorTemporalRepairStrongMinSignal = 120.0f;
+    // Default-off rescue for ordinary temporal repair pairs with two strong
+    // current CellLumen centers. This is separate from the temporal-catch path:
+    // f109 showed a true wide split already inside the normal repair radius,
+    // but the ranking soft penalty was high enough that only one daughter was
+    // used as a continuation center. Older profiles keep this disabled.
+    bool fusionSplitPriorTemporalRepairStrongHighPenaltyRescueEnabled = false;
+    int fusionSplitPriorTemporalRepairStrongHighPenaltyMinVoxels = 2500;
+    float fusionSplitPriorTemporalRepairStrongHighPenaltyMinSignal = 85.0f;
+    float fusionSplitPriorTemporalRepairStrongHighPenaltyMinParentShape = 2.0f;
+    float fusionSplitPriorTemporalRepairStrongHighPenaltyMaxRankingSoftPenalty = 12.0f;
     // Default-off targeted relaxation for wide temporal-catch pairs. Some true
     // early daughters sit outside the normal parent catch radius and one center
     // can be slightly below the generic strong-signal threshold. Keep this
@@ -2005,6 +2042,14 @@ public:
     float fusionSplitPriorTemporalRepairCatchStrongMinSignal = 85.0f;
     float fusionSplitPriorTemporalRepairCatchStrongMinParentShape = 2.0f;
     float fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty = 120.0f;
+    // Default 0. This gives an opt-in score correction for strong two-real
+    // temporal-catch pairs that would otherwise lose to a synthetic parent
+    // anchor only because one true daughter is far from the old parent center.
+    float fusionSplitPriorTemporalRepairCatchStrongScoreBonus = 0.0f;
+    // Default-off diagnostic log. It explains why a current-frame CellLumen
+    // center that entered through the temporal catch radius still failed to
+    // become a ranked split pair.
+    bool fusionSplitPriorDebugTemporalCatchPairRejectsEnabled = false;
     // Default-off rescue for sparse-frame wide lateral daughters with only
     // partial future-window support. This is intentionally separate from
     // temporal repair because it lets one parent persistence or one missing
@@ -2093,6 +2138,25 @@ public:
     float fusionSplitPriorWeakParentAnchoredPartialBypassMinLateralSeparation = 18.0f;
     float fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance = 0.30f;
     float fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance = 12.0f;
+    // Default-off bypass for clean negative-cost one-real parent-anchor splits.
+    // This is narrower than the partial-window bypass above: both lookahead
+    // frames must support the split and the current real Cell Lumen seed must
+    // be strong. It exists to prevent a true split from being converted into a
+    // continuation reanchor when the parent elongation is just below a hard
+    // profile threshold.
+    bool fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled = false;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape = 1.90f;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore = 0.0f;
+    int fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels = 3000;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal = 120.0f;
+    int fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth = 2;
+    int fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing = 0;
+    int fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists = 0;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale = 1.75f;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance = 24.0f;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation = 22.0f;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance = 0.35f;
+    float fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance = 16.0f;
     bool fusionSplitPriorRejectTightCleanWindowInternalPairEnabled = false;
     float fusionSplitPriorTightCleanWindowInternalMinSeparationRadiusScale = 1.30f;
     float fusionSplitPriorTightCleanWindowInternalMinMidpointRadiusScale = 0.45f;
@@ -2154,6 +2218,24 @@ public:
     bool fusionTemporalCenterRepairParentAnchorReanchorEnabled = false;
     float fusionTemporalCenterRepairParentAnchorReanchorMinShape = 2.0f;
     float fusionTemporalCenterRepairParentAnchorReanchorMinDistance = 12.0f;
+    // Default-off protection for z-stack cases where a parent-anchor reanchor
+    // would move a cell away from a current-frame Cell Lumen center that is
+    // already future-supported. This avoids turning two nearby z-separated
+    // tracks into one moved continuation.
+    bool fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled = false;
+    float fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance = 0.85f;
+    float fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove = 8.0f;
+    // Default-off middle-density exception for one-real parent-anchor priors
+    // whose parent shape is not elongated enough for the generic rule, but
+    // whose real Cell Lumen center is strong, future-supported, and clean.
+    bool fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled = false;
+    float fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape = 1.35f;
+    int fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels = 5000;
+    float fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal = 110.0f;
+    int fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth = 2;
+    int fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing = 0;
+    int fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists = 0;
+    float fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore = 2.0f;
     // Default-off repair for early daughter continuations that Cell Lumen
     // reports as a one-real-candidate split proposal. Rejected split proposals
     // are not always stored for later repair, so this also allows the nearest
@@ -2165,6 +2247,50 @@ public:
     float fusionTemporalCenterRepairSameParentSplitMinSignal = 60.0f;
     int fusionTemporalCenterRepairSameParentSplitMinWindowSupport = 2;
     bool fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported = false;
+    // Default-off rescue for a weak same-parent split candidate that should be
+    // used as continuation evidence. This is narrower than lowering the normal
+    // repair thresholds because it requires the candidate to come from this
+    // parent's own split graph and still pass future support checks.
+    bool fusionTemporalCenterRepairWeakSameParentContinuationEnabled = false;
+    int fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels = 1800;
+    float fusionTemporalCenterRepairWeakSameParentContinuationMinSignal = 80.0f;
+    int fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport = 1;
+    float fusionTemporalCenterRepairWeakSameParentContinuationMaxMove = 36.0f;
+    // Default-off safeguard for f089-like cases: a selected split prior can
+    // reserve the right Cell Lumen center, then get rejected by split gates.
+    // If the reserved same-parent center is much closer to future evidence
+    // than the old position, center repair may still use it as continuation.
+    bool fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled = false;
+    float fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain = 6.0f;
+    // Default-off sibling ownership override. Middle-density clean runs showed
+    // sibling daughters can both remain near one Cell Lumen center while the
+    // other true center is left unused. When enabled, the current-frame support
+    // at the old position is treated as unsafe if it is closer to the sibling,
+    // allowing a strong future-supported center to reanchor this cell instead.
+    bool fusionTemporalCenterRepairSiblingClaimOverrideEnabled = false;
+    // Default-off late dense sibling repair. When Cell Lumen detects only one
+    // strong center between two very close newborn sibling daughters, the
+    // closer sibling can wrongly consume the shared center and leave the other
+    // sibling stale. This opt-in path reserves the shared center for the stale
+    // sibling and lets temporal repair move it only when the geometry and
+    // future support are strong.
+    bool fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled = false;
+    int fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells = 300;
+    int fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames = 3;
+    float fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance = 14.0f;
+    float fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance = 24.0f;
+    float fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance = 42.0f;
+    float fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation = 30.0f;
+    float fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack = 8.0f;
+    int fusionTemporalCenterRepairSiblingSharedCenterMinVoxels = 1800;
+    float fusionTemporalCenterRepairSiblingSharedCenterMinSignal = 120.0f;
+    float fusionTemporalCenterRepairSiblingSharedCenterScoreBonus = 24.0f;
+    // Default-off dense-frame repair for centers already marked by the split
+    // prior as belonging to a stale future-supported continuation. The split
+    // prior protection only prevents another parent from stealing the center;
+    // this option lets the protected owner use that same evidence as a
+    // continuation reanchor in temporal center repair.
+    bool fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled = false;
     // Default-off split rejection compensation. A rejected Cell Lumen split
     // can reserve the exact center that should still be used as the parent's
     // continuation. When enabled, the rejected parent first tries that same
@@ -2193,8 +2319,35 @@ public:
     int fusionSplitPriorProtectFutureContinuationMinVoxels = 1000;
     float fusionSplitPriorProtectFutureContinuationMinSignal = 100.0f;
     float fusionSplitPriorProtectFutureContinuationPenalty = 80.0f;
+    // Default-off late dense guard for a different stealing pattern: a z-stacked
+    // two-real split pair can use a nearby continuation center as a fake
+    // daughter even when the old owner is not stale enough for the broader
+    // future-continuation protection above. Keep this feature profile-gated.
+    bool fusionSplitPriorLateZContinuationStealGuardEnabled = false;
+    int fusionSplitPriorLateZContinuationStealMinLiveCells = 300;
+    float fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation = 12.0f;
+    float fusionSplitPriorLateZContinuationStealMinSeedZDominance = 0.82f;
+    float fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance = 0.65f;
+    float fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale = 0.35f;
+    float fusionSplitPriorLateZContinuationStealMaxOtherDistance = 22.0f;
+    float fusionSplitPriorLateZContinuationStealOtherRadiusScale = 1.20f;
+    float fusionSplitPriorLateZContinuationStealMaxParentAdvantage = 10.0f;
+    int fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport = 1;
+    float fusionSplitPriorLateZContinuationStealPenalty = 80.0f;
+    // Default off. Late dense frames can have a center that is nearest to a
+    // neighbor in the current frame, but its future-window owner is the real
+    // dividing parent. When enabled, that protected future owner may still use
+    // the candidate in split prior generation.
+    bool fusionSplitPriorProtectedFutureOwnerAssignmentEnabled = false;
     bool fusionSplitPriorAllowWindowBackedDuplicateHandoff = false;
     float fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain = 0.0f;
+    // Default-off safety valve for rejected one-real parent-anchor proposals.
+    // A rejected split can still reanchor the parent to the single real
+    // CellLumen center. In late dense frames that can pull a valid
+    // continuation away from its own body, so YAML may require enough image
+    // gain before this rejected-split reanchor is allowed. Negative preserves
+    // legacy behavior.
+    float fusionSplitPriorParentAnchorRejectReanchorMinImageGain = -1.0f;
     float fusionSplitPriorDuplicateHandoffMinContinuationPenalty = 15.0f;
     float fusionSplitPriorDuplicateHandoffNormLimit = 0.75f;
     float fusionSplitPriorDuplicateHandoffDistanceLimit = 32.0f;
@@ -2230,6 +2383,12 @@ public:
     // CellLumen center that is also supported by the future window and is not
     // more strongly claimed by a neighbor.
     bool fusionStaleContinuationPruneGuardedFutureReanchorEnabled = false;
+    // Default-off dense-frame ownership override for guarded reanchor. The
+    // split-prior stage can identify that a future-supported CellLumen center
+    // belongs to a stale continuation even when same-frame nearest-neighbor
+    // geometry says a different cell is closer. Keep this off unless a density
+    // profile explicitly needs that late-frame evidence.
+    bool fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled = false;
     float fusionStaleContinuationPruneGuardedFutureReanchorMaxDistance = 30.0f;
     int fusionStaleContinuationPruneGuardedFutureReanchorMinFutureSupport = 1;
     float fusionStaleContinuationPruneGuardedFutureReanchorClaimMargin = 4.0f;
@@ -2253,12 +2412,26 @@ public:
     float fusionStaleContinuationPruneCrowdedBridgeMinBrightnessAdvantage = 0.03f;
     float fusionStaleContinuationPruneCrowdedBridgeMinGuardedBrightness = 0.0f;
     float fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness = 0.95f;
+    // Default-off future-window guard for crowded bridge cleanup. A crowded
+    // guarded cell should not be deleted if future frames still see that center.
+    int fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport = -1;
     bool fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled = false;
     float fusionStaleContinuationPruneProtectedOneRealSyntheticMaxBrightness = 0.55f;
     float fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMajorRadius = 12.5f;
     float fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMinorRadius = 5.5f;
     float fusionStaleContinuationPruneProtectedOneRealSyntheticMaxSiblingDistance = 20.0f;
     float fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance = 18.0f;
+    // Default-off protection for strong one-real splits that were accepted in
+    // the current frame. f173 showed that the stale cleanup can otherwise
+    // delete the synthetic daughter it just created for a true parent-anchor
+    // split. Weak or positive-score synthetic daughters still use the old prune.
+    bool fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled = false;
+    float fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore = 0.0f;
+    int fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth = 2;
+    int fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing = 0;
+    int fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists = 0;
+    int fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels = 1800;
+    float fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal = 175.0f;
     float fusionSplitPriorParentAnchorContinuationMergeMinShape = -1.0f;
     float fusionSplitPriorParentAnchorContinuationMergeNormLimit = 0.72f;
     float fusionSplitPriorParentAnchorContinuationMergeDistanceLimit = 30.0f;
@@ -2268,6 +2441,15 @@ public:
     float fusionTemporalCenterRepairSharedClaimPcaRelaxMinShape = 1.45f;
     bool fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled = false;
     float fusionTemporalCenterRepairPcaRelaxOwnClaimMargin = 2.0f;
+    // Default-off dense-frame guard for wide PCA relax. If the old position is
+    // already supported by the future window, a low-shape cell should not jump
+    // to another future-supported center unless the support count actually
+    // improves. This protects lineage identity without changing the normal PCA
+    // fitter or early/middle profiles.
+    bool fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled = false;
+    float fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape = 1.45f;
+    float fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove = 12.0f;
+    int fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport = 2;
     bool fusionSplitPriorPartialParentAnchorRescueEnabled = false;
     float fusionSplitPriorPartialParentAnchorMinShape = 1.75f;
     float fusionSplitPriorPartialParentAnchorMaxScore = 50.0f;
@@ -2357,6 +2539,23 @@ public:
     // after refit, so YAML can set a positive maximum final axis length to
     // reject only that local pattern. Negative keeps legacy behavior.
     float fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen = -1.0f;
+    // Default-off guard for f092-like middle-density false splits. Prepass
+    // fallback can still be useful, but if it has no future support, worsens
+    // total cost, and overlap cost is much larger than image gain, it is more
+    // likely a duplicate split around a neighboring cell than a real division.
+    bool fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled = false;
+    float fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio = 5.0f;
+    float fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth = 2.0f;
+    // Default-off guard for middle-density round-parent prepass fallback false splits.
+    // These cases are not real Cell Lumen two-center evidence; PCA/prepass can split
+    // one compact parent into a daughter plus a neighbor duplicate when overlap cost
+    // dominates the small image gain and no future window supports the split.
+    bool fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled = false;
+    float fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape = 1.45f;
+    float fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost = 8000.0f;
+    float fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio = 5.0f;
+    float fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth = 0.0f;
+    float fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio = 0.65f;
     // Default-off repair for a narrow ordering failure. Sometimes a weak Cell
     // Lumen split prior exists for a parent, so the pre-pass fallback never gets
     // ranked even though PCA found a cleaner two-daughter shape. YAML can allow
@@ -2399,6 +2598,23 @@ public:
     float fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxSoftPenaltyFraction = 0.01f;
     float fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxBridgeValleyRatio = 0.65f;
     int fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMinRealVoxels = 1000;
+    // Default-off f086 repair: a true one-real parent-anchor split can be
+    // mostly separated along z while the daughters still overlap in xy, so the
+    // bridge has no dark valley yet. This rescue only bypasses the no-valley
+    // duplicate reject when future support, z dominance, image gain, and
+    // overlap-to-gain evidence all agree.
+    bool fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled = false;
+    int fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth = 2;
+    int fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing = 0;
+    int fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists = 0;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape = 1.85f;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape = 2.60f;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore = 8.0f;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain = 15000.0f;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio = 3.0f;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance = 0.80f;
+    int fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels = 1000;
+    float fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal = 80.0f;
     // Default-off selector guard. Future-only one-real parent-anchor splits are
     // useful very early, but after the embryo has many current-frame Cell Lumen
     // centers they can invent an extra daughter from lookahead texture.
@@ -2421,6 +2637,8 @@ public:
     float fusionSplitPriorParentAnchorSingleBlockerSelectionBonus = 85.0f;
     bool fusionSplitPriorLockAcceptedDaughtersForFinalPca = false;
     bool fusionSplitPriorCleanTwoRealSingleBlockerRescueEnabled = false;
+    float fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape = 1.0f;
+    float fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty = 1e-5f;
     float fusionSplitPriorCleanTwoRealSingleBlockerMinParentDistanceBalance = 0.80f;
     float fusionSplitPriorCleanTwoRealSingleBlockerMaxScore = 8.0f;
     int fusionSplitPriorCleanTwoRealSingleBlockerMinVoxels = 1800;
@@ -2533,6 +2751,21 @@ public:
     float fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation = 24.0f;
     float fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance = 0.12f;
     float fusionSplitPriorParentAnchorCleanWindowLowZMaxScore = 0.0f;
+    // Default-off companion for z-stack duplicate artifacts. In the middle
+    // density stage a one-real parent-anchor pair can look future-supported
+    // even when the real lumen point is mostly above/below the parent instead
+    // of forming a lateral daughter. Keep it profile-gated to avoid touching
+    // early large-cell rescue behavior.
+    bool fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate = false;
+    int fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth = 2;
+    int fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing = 0;
+    int fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists = 0;
+    float fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape = 1.90f;
+    float fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation = 32.0f;
+    float fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation = 12.0f;
+    float fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance = 0.80f;
+    float fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal = 110.0f;
+    float fusionSplitPriorParentAnchorCleanWindowHighZMaxScore = 0.0f;
     bool fusionSplitPriorCleanTwoRealHighNeighborClaimRescueEnabled = false;
     float fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance = 0.65f;
     float fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore = 60.0f;
@@ -2541,6 +2774,59 @@ public:
     float fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty = 12.0f;
     float fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty = 1e-5f;
     float fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus = 90.0f;
+    // Default off. This is a narrower late dense companion to the high neighbor
+    // claim rescue. It lets a strong two-real pair survive when current-frame
+    // continuation claims block both candidates, but only with clean future
+    // support and bounded local claim pressure.
+    bool fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled = false;
+    int fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers = 2;
+    float fusionSplitPriorCleanTwoRealSharedClaimMinParentShape = 1.0f;
+    float fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty = 45.0f;
+    float fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance = 10.0f;
+    float fusionSplitPriorCleanTwoRealSharedClaimMaxScore = 110.0f;
+    float fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus = 105.0f;
+    // Default off. This is a late dense selector rescue for asymmetric
+    // two-real pairs that are blocked by one nearby continuation. It is meant
+    // for the f171 pattern where a stronger parent has both real CellLumen
+    // daughter centers, but one center is claimed by a lower-shape neighbor.
+    bool fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled = false;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape = 1.55f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape = 1.45f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage = 0.20f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance = 0.35f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty = 45.0f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance = 10.0f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance = 18.0f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale = 1.20f;
+    int fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels = 1500;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal = 120.0f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore = 30.0f;
+    float fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus = 90.0f;
+    bool fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled = false;
+    int fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells = 280;
+    int fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth = 2;
+    float fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape = 2.25f;
+    float fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance = 24.5f;
+    float fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance = 13.0f;
+    float fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty = 0.0f;
+    // Default off: f173 showed that the late short-anchor veto can also block a
+    // real, low-z-dominance one-real split with strong current and future
+    // evidence. Keep the bypass narrow and profile gated so f172-style false
+    // short-anchor splits remain blocked.
+    bool fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled = false;
+    int fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells = 310;
+    int fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth = 2;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape = 1.35f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape = 1.65f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore = 0.0f;
+    int fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels = 1800;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal = 175.0f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance = 16.0f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance = 20.0f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation = 14.0f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance = 0.35f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance = 10.0f;
+    float fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty = 0.0f;
     bool fusionSplitPriorCleanTwoRealDuplicateBypassEnabled = false;
     float fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain = 0.0f;
     float fusionSplitPriorCleanTwoRealDuplicateBypassMaxBridgeValleyRatio = 0.70f;
@@ -2567,6 +2853,16 @@ public:
     float fusionSplitPriorCleanWindowSeedColumnMinZDominance = 0.92f;
     float fusionSplitPriorCleanWindowSeedColumnMinParentShape = 1.70f;
     float fusionSplitPriorCleanWindowSeedColumnMaxParentShape = 2.05f;
+    // Default-off exception for real z-separated daughters. The seed-column
+    // reject is useful against internal z texture, but f112 showed a true
+    // division with two strong Cell Lumen centers and two-frame future support.
+    bool fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled = false;
+    float fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation = 36.0f;
+    float fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance = 0.30f;
+    int fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels = 3500;
+    float fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal = 130.0f;
+    float fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore = 12.0f;
+    float fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance = 12.0f;
     // Default-off guard for one-real parent anchored priors. A single Cell
     // Lumen center can be the upper slice of the same bright column while the
     // nearby lower slice is the safer continuation of the parent. Reject only
@@ -2603,6 +2899,17 @@ public:
     int fusionSplitPriorWeakAsymmetricCleanWindowMinVoxels = 2500;
     float fusionSplitPriorWeakAsymmetricCleanWindowMinSignal = 85.0f;
     float fusionSplitPriorWeakAsymmetricCleanWindowMinRawScore = 0.0f;
+    // Default-off middle-density guard. A future-supported pair can still be
+    // a false temporal split when the parent is not elongated, the daughters
+    // sit very unevenly around the parent, and the ranker cost is positive.
+    bool fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled = false;
+    bool fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair = true;
+    float fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus = 1.0e-5f;
+    float fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape = 1.75f;
+    float fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance = 0.45f;
+    float fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore = 0.0f;
+    float fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore = 0.0f;
+    float fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation = 40.0f;
     // Default-off guard for clean future-window pairs inside triaxial early
     // parents. A large flattened cell can contain two stable bright texture peaks
     // for several frames, so future support alone can create a fake lineage split.
@@ -2646,6 +2953,16 @@ public:
     float fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio = 1.05f;
     float fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth = 0.0f;
     float fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio = 0.95f;
+    // Default-off guard for f097-like cases where the future window supports
+    // a split, but the raw image gain is too small to pay for the soft geometry
+    // penalties. This protects against persistent internal bright peaks being
+    // promoted into a lineage split only because the positive gate allowance is
+    // large in the middle-density profile.
+    bool fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate = false;
+    int fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth = 2;
+    float fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain = 3000.0f;
+    float fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio = 1.0f;
+    float fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff = 0.0f;
     // Default-off guard for a more specific early failure mode: the same
     // bright column inside one large cell survives in the future window as two
     // z-separated seeds. Keep the Cell Lumen candidates available, but reject
@@ -2783,6 +3100,7 @@ public:
     int fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels = 45000;
     float fusionSplitPriorPrepassFallbackLowKeptRescueMinShape = 1.45f;
     float fusionSplitPriorPrepassFallbackLowKeptRescueMaxScore = 4.0f;
+    bool fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled = false;
     float fusionSplitPriorPrepassFallbackMinShape = 1.20f;
     float fusionSplitPriorPrepassFallbackMinSeparationRadiusScale = 0.90f;
     float fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale = 1.05f;
@@ -2796,6 +3114,13 @@ public:
     bool fusionSplitPriorPrepassFallbackRejectCollapsedCenterParent = false;
     float fusionSplitPriorPrepassFallbackBadLumenMaxScore = -1.0f;
     float fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty = -1.0f;
+    // Default-off rescue for late dense frames where the normal Cell Lumen
+    // pair for a parent is marked unsafe, but image-grounded PCA still finds a
+    // compact low-kept split. This keeps the broad bad-parent guard intact.
+    bool fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled = false;
+    int fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels = 45000;
+    float fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape = 1.45f;
+    float fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore = 4.0f;
     int fusionSplitPriorPrepassFallbackMinParentAgeFrames = 0;
     // If image-grounded PCA pulls one daughter far away from the original
     // snapshot split seeds, the PCA direction is probably contaminated by a
@@ -3119,6 +3444,16 @@ public:
         if (node["finalSparseIsolatedFloorWeakSignalMinCells"]) finalSparseIsolatedFloorWeakSignalMinCells = node["finalSparseIsolatedFloorWeakSignalMinCells"].as<int>();
         if (node["finalSparseIsolatedFloorWeakSignalMaxCells"]) finalSparseIsolatedFloorWeakSignalMaxCells = node["finalSparseIsolatedFloorWeakSignalMaxCells"].as<int>();
         if (node["finalSparseIsolatedFloorMaxTop10MinusShell"]) finalSparseIsolatedFloorMaxTop10MinusShell = node["finalSparseIsolatedFloorMaxTop10MinusShell"].as<float>();
+        if (node["fineShapeModelEnabled"]) fineShapeModelEnabled = node["fineShapeModelEnabled"].as<bool>();
+        if (node["fineShapeModelExportCsv"]) fineShapeModelExportCsv = node["fineShapeModelExportCsv"].as<bool>();
+        if (node["fineShapeModelRadiusScale"]) fineShapeModelRadiusScale = node["fineShapeModelRadiusScale"].as<float>();
+        if (node["fineShapeModelMinRadius"]) fineShapeModelMinRadius = node["fineShapeModelMinRadius"].as<float>();
+        if (node["fineShapeModelMaxRadius"]) fineShapeModelMaxRadius = node["fineShapeModelMaxRadius"].as<float>();
+        if (node["fineShapeModelThresholdQuantile"]) fineShapeModelThresholdQuantile = node["fineShapeModelThresholdQuantile"].as<float>();
+        if (node["fineShapeModelThresholdFloor"]) fineShapeModelThresholdFloor = node["fineShapeModelThresholdFloor"].as<float>();
+        if (node["fineShapeModelSeedSearchRadius"]) fineShapeModelSeedSearchRadius = node["fineShapeModelSeedSearchRadius"].as<float>();
+        if (node["fineShapeModelSeedFallbackFraction"]) fineShapeModelSeedFallbackFraction = node["fineShapeModelSeedFallbackFraction"].as<float>();
+        if (node["fineShapeModelMaxVoxelsPerCell"]) fineShapeModelMaxVoxelsPerCell = node["fineShapeModelMaxVoxelsPerCell"].as<int>();
         if (node["fusionEnabled"]) fusionEnabled = node["fusionEnabled"].as<bool>();
         if (node["fusionStartFrame"]) fusionStartFrame = node["fusionStartFrame"].as<int>();
         if (node["fusionEveryNFrames"]) fusionEveryNFrames = std::max(1, node["fusionEveryNFrames"].as<int>());
@@ -3240,6 +3575,7 @@ public:
         if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth"].as<int>();
         if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing"].as<int>();
         if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists"].as<int>();
+        if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence"].as<bool>();
         if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMinParentDistanceBalance"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementMinParentDistanceBalance = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMinParentDistanceBalance"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxScore"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxScore = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxScore"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxAnchorScoreDelta"]) fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxAnchorScoreDelta = node["fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxAnchorScoreDelta"].as<float>();
@@ -3294,11 +3630,18 @@ public:
         if (node["fusionSplitPriorTemporalRepairRejectClaimBlockers"]) fusionSplitPriorTemporalRepairRejectClaimBlockers = node["fusionSplitPriorTemporalRepairRejectClaimBlockers"].as<bool>();
         if (node["fusionSplitPriorTemporalRepairStrongMinVoxels"]) fusionSplitPriorTemporalRepairStrongMinVoxels = node["fusionSplitPriorTemporalRepairStrongMinVoxels"].as<int>();
         if (node["fusionSplitPriorTemporalRepairStrongMinSignal"]) fusionSplitPriorTemporalRepairStrongMinSignal = node["fusionSplitPriorTemporalRepairStrongMinSignal"].as<float>();
+        if (node["fusionSplitPriorTemporalRepairStrongHighPenaltyRescueEnabled"]) fusionSplitPriorTemporalRepairStrongHighPenaltyRescueEnabled = node["fusionSplitPriorTemporalRepairStrongHighPenaltyRescueEnabled"].as<bool>();
+        if (node["fusionSplitPriorTemporalRepairStrongHighPenaltyMinVoxels"]) fusionSplitPriorTemporalRepairStrongHighPenaltyMinVoxels = node["fusionSplitPriorTemporalRepairStrongHighPenaltyMinVoxels"].as<int>();
+        if (node["fusionSplitPriorTemporalRepairStrongHighPenaltyMinSignal"]) fusionSplitPriorTemporalRepairStrongHighPenaltyMinSignal = node["fusionSplitPriorTemporalRepairStrongHighPenaltyMinSignal"].as<float>();
+        if (node["fusionSplitPriorTemporalRepairStrongHighPenaltyMinParentShape"]) fusionSplitPriorTemporalRepairStrongHighPenaltyMinParentShape = node["fusionSplitPriorTemporalRepairStrongHighPenaltyMinParentShape"].as<float>();
+        if (node["fusionSplitPriorTemporalRepairStrongHighPenaltyMaxRankingSoftPenalty"]) fusionSplitPriorTemporalRepairStrongHighPenaltyMaxRankingSoftPenalty = node["fusionSplitPriorTemporalRepairStrongHighPenaltyMaxRankingSoftPenalty"].as<float>();
         if (node["fusionSplitPriorTemporalRepairCatchStrongEvidenceEnabled"]) fusionSplitPriorTemporalRepairCatchStrongEvidenceEnabled = node["fusionSplitPriorTemporalRepairCatchStrongEvidenceEnabled"].as<bool>();
         if (node["fusionSplitPriorTemporalRepairCatchStrongMinVoxels"]) fusionSplitPriorTemporalRepairCatchStrongMinVoxels = node["fusionSplitPriorTemporalRepairCatchStrongMinVoxels"].as<int>();
         if (node["fusionSplitPriorTemporalRepairCatchStrongMinSignal"]) fusionSplitPriorTemporalRepairCatchStrongMinSignal = node["fusionSplitPriorTemporalRepairCatchStrongMinSignal"].as<float>();
         if (node["fusionSplitPriorTemporalRepairCatchStrongMinParentShape"]) fusionSplitPriorTemporalRepairCatchStrongMinParentShape = node["fusionSplitPriorTemporalRepairCatchStrongMinParentShape"].as<float>();
         if (node["fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty"]) fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty = node["fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty"].as<float>();
+        if (node["fusionSplitPriorTemporalRepairCatchStrongScoreBonus"]) fusionSplitPriorTemporalRepairCatchStrongScoreBonus = node["fusionSplitPriorTemporalRepairCatchStrongScoreBonus"].as<float>();
+        if (node["fusionSplitPriorDebugTemporalCatchPairRejectsEnabled"]) fusionSplitPriorDebugTemporalCatchPairRejectsEnabled = node["fusionSplitPriorDebugTemporalCatchPairRejectsEnabled"].as<bool>();
         if (node["fusionSplitPriorPartialWindowWideLateralRescueEnabled"]) fusionSplitPriorPartialWindowWideLateralRescueEnabled = node["fusionSplitPriorPartialWindowWideLateralRescueEnabled"].as<bool>();
         if (node["fusionSplitPriorPartialWindowWideLateralMinWindowBoth"]) fusionSplitPriorPartialWindowWideLateralMinWindowBoth = node["fusionSplitPriorPartialWindowWideLateralMinWindowBoth"].as<int>();
         if (node["fusionSplitPriorPartialWindowWideLateralMaxWindowMissing"]) fusionSplitPriorPartialWindowWideLateralMaxWindowMissing = node["fusionSplitPriorPartialWindowWideLateralMaxWindowMissing"].as<int>();
@@ -3363,6 +3706,19 @@ public:
         if (node["fusionSplitPriorWeakParentAnchoredPartialBypassMinLateralSeparation"]) fusionSplitPriorWeakParentAnchoredPartialBypassMinLateralSeparation = node["fusionSplitPriorWeakParentAnchoredPartialBypassMinLateralSeparation"].as<float>();
         if (node["fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance"]) fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance = node["fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance"].as<float>();
         if (node["fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance"]) fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance = node["fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled"].as<bool>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels"].as<int>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth"].as<int>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing"].as<int>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists"].as<int>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance"].as<float>();
+        if (node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance"]) fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance = node["fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance"].as<float>();
         if (node["fusionSplitPriorRejectTightCleanWindowInternalPairEnabled"]) fusionSplitPriorRejectTightCleanWindowInternalPairEnabled = node["fusionSplitPriorRejectTightCleanWindowInternalPairEnabled"].as<bool>();
         if (node["fusionSplitPriorTightCleanWindowInternalMinSeparationRadiusScale"]) fusionSplitPriorTightCleanWindowInternalMinSeparationRadiusScale = node["fusionSplitPriorTightCleanWindowInternalMinSeparationRadiusScale"].as<float>();
         if (node["fusionSplitPriorTightCleanWindowInternalMinMidpointRadiusScale"]) fusionSplitPriorTightCleanWindowInternalMinMidpointRadiusScale = node["fusionSplitPriorTightCleanWindowInternalMinMidpointRadiusScale"].as<float>();
@@ -3409,12 +3765,43 @@ public:
         if (node["fusionTemporalCenterRepairParentAnchorReanchorEnabled"]) fusionTemporalCenterRepairParentAnchorReanchorEnabled = node["fusionTemporalCenterRepairParentAnchorReanchorEnabled"].as<bool>();
         if (node["fusionTemporalCenterRepairParentAnchorReanchorMinShape"]) fusionTemporalCenterRepairParentAnchorReanchorMinShape = node["fusionTemporalCenterRepairParentAnchorReanchorMinShape"].as<float>();
         if (node["fusionTemporalCenterRepairParentAnchorReanchorMinDistance"]) fusionTemporalCenterRepairParentAnchorReanchorMinDistance = node["fusionTemporalCenterRepairParentAnchorReanchorMinDistance"].as<float>();
+        if (node["fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled"]) fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled = node["fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance"]) fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance = node["fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance"].as<float>();
+        if (node["fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove"]) fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove = node["fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove"].as<float>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape"].as<float>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels"].as<int>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal"].as<float>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth"].as<int>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing"].as<int>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists"].as<int>();
+        if (node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore"]) fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore = node["fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore"].as<float>();
         if (node["fusionTemporalCenterRepairSameParentSplitReanchorEnabled"]) fusionTemporalCenterRepairSameParentSplitReanchorEnabled = node["fusionTemporalCenterRepairSameParentSplitReanchorEnabled"].as<bool>();
         if (node["fusionTemporalCenterRepairSameParentSplitMinDistance"]) fusionTemporalCenterRepairSameParentSplitMinDistance = node["fusionTemporalCenterRepairSameParentSplitMinDistance"].as<float>();
         if (node["fusionTemporalCenterRepairSameParentSplitMinVoxels"]) fusionTemporalCenterRepairSameParentSplitMinVoxels = node["fusionTemporalCenterRepairSameParentSplitMinVoxels"].as<int>();
         if (node["fusionTemporalCenterRepairSameParentSplitMinSignal"]) fusionTemporalCenterRepairSameParentSplitMinSignal = node["fusionTemporalCenterRepairSameParentSplitMinSignal"].as<float>();
         if (node["fusionTemporalCenterRepairSameParentSplitMinWindowSupport"]) fusionTemporalCenterRepairSameParentSplitMinWindowSupport = node["fusionTemporalCenterRepairSameParentSplitMinWindowSupport"].as<int>();
         if (node["fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported"]) fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported = node["fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported"].as<bool>();
+        if (node["fusionTemporalCenterRepairWeakSameParentContinuationEnabled"]) fusionTemporalCenterRepairWeakSameParentContinuationEnabled = node["fusionTemporalCenterRepairWeakSameParentContinuationEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels"]) fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels = node["fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels"].as<int>();
+        if (node["fusionTemporalCenterRepairWeakSameParentContinuationMinSignal"]) fusionTemporalCenterRepairWeakSameParentContinuationMinSignal = node["fusionTemporalCenterRepairWeakSameParentContinuationMinSignal"].as<float>();
+        if (node["fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport"]) fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport = node["fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport"].as<int>();
+        if (node["fusionTemporalCenterRepairWeakSameParentContinuationMaxMove"]) fusionTemporalCenterRepairWeakSameParentContinuationMaxMove = node["fusionTemporalCenterRepairWeakSameParentContinuationMaxMove"].as<float>();
+        if (node["fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled"]) fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled = node["fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain"]) fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain = node["fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingClaimOverrideEnabled"]) fusionTemporalCenterRepairSiblingClaimOverrideEnabled = node["fusionTemporalCenterRepairSiblingClaimOverrideEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled"]) fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled = node["fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells"]) fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells = node["fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells"].as<int>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames"]) fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames = node["fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames"].as<int>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance"]) fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance = node["fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance"]) fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance = node["fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance"]) fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance = node["fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation"]) fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation = node["fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack"]) fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack = node["fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMinVoxels"]) fusionTemporalCenterRepairSiblingSharedCenterMinVoxels = node["fusionTemporalCenterRepairSiblingSharedCenterMinVoxels"].as<int>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterMinSignal"]) fusionTemporalCenterRepairSiblingSharedCenterMinSignal = node["fusionTemporalCenterRepairSiblingSharedCenterMinSignal"].as<float>();
+        if (node["fusionTemporalCenterRepairSiblingSharedCenterScoreBonus"]) fusionTemporalCenterRepairSiblingSharedCenterScoreBonus = node["fusionTemporalCenterRepairSiblingSharedCenterScoreBonus"].as<float>();
+        if (node["fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled"]) fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled = node["fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled"].as<bool>();
         if (node["fusionSplitRejectCompensateWithSameParentCenterEnabled"]) fusionSplitRejectCompensateWithSameParentCenterEnabled = node["fusionSplitRejectCompensateWithSameParentCenterEnabled"].as<bool>();
         if (node["fusionSplitRejectCompensateWithSameParentCenterMinDistance"]) fusionSplitRejectCompensateWithSameParentCenterMinDistance = node["fusionSplitRejectCompensateWithSameParentCenterMinDistance"].as<float>();
         if (node["fusionSplitRejectCompensateWithSameParentCenterMaxDistance"]) fusionSplitRejectCompensateWithSameParentCenterMaxDistance = node["fusionSplitRejectCompensateWithSameParentCenterMaxDistance"].as<float>();
@@ -3435,8 +3822,21 @@ public:
         if (node["fusionSplitPriorProtectFutureContinuationMinVoxels"]) fusionSplitPriorProtectFutureContinuationMinVoxels = node["fusionSplitPriorProtectFutureContinuationMinVoxels"].as<int>();
         if (node["fusionSplitPriorProtectFutureContinuationMinSignal"]) fusionSplitPriorProtectFutureContinuationMinSignal = node["fusionSplitPriorProtectFutureContinuationMinSignal"].as<float>();
         if (node["fusionSplitPriorProtectFutureContinuationPenalty"]) fusionSplitPriorProtectFutureContinuationPenalty = node["fusionSplitPriorProtectFutureContinuationPenalty"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealGuardEnabled"]) fusionSplitPriorLateZContinuationStealGuardEnabled = node["fusionSplitPriorLateZContinuationStealGuardEnabled"].as<bool>();
+        if (node["fusionSplitPriorLateZContinuationStealMinLiveCells"]) fusionSplitPriorLateZContinuationStealMinLiveCells = node["fusionSplitPriorLateZContinuationStealMinLiveCells"].as<int>();
+        if (node["fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation"]) fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation = node["fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealMinSeedZDominance"]) fusionSplitPriorLateZContinuationStealMinSeedZDominance = node["fusionSplitPriorLateZContinuationStealMinSeedZDominance"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance"]) fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance = node["fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale"]) fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale = node["fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealMaxOtherDistance"]) fusionSplitPriorLateZContinuationStealMaxOtherDistance = node["fusionSplitPriorLateZContinuationStealMaxOtherDistance"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealOtherRadiusScale"]) fusionSplitPriorLateZContinuationStealOtherRadiusScale = node["fusionSplitPriorLateZContinuationStealOtherRadiusScale"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealMaxParentAdvantage"]) fusionSplitPriorLateZContinuationStealMaxParentAdvantage = node["fusionSplitPriorLateZContinuationStealMaxParentAdvantage"].as<float>();
+        if (node["fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport"]) fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport = node["fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport"].as<int>();
+        if (node["fusionSplitPriorLateZContinuationStealPenalty"]) fusionSplitPriorLateZContinuationStealPenalty = node["fusionSplitPriorLateZContinuationStealPenalty"].as<float>();
+        if (node["fusionSplitPriorProtectedFutureOwnerAssignmentEnabled"]) fusionSplitPriorProtectedFutureOwnerAssignmentEnabled = node["fusionSplitPriorProtectedFutureOwnerAssignmentEnabled"].as<bool>();
         if (node["fusionSplitPriorAllowWindowBackedDuplicateHandoff"]) fusionSplitPriorAllowWindowBackedDuplicateHandoff = node["fusionSplitPriorAllowWindowBackedDuplicateHandoff"].as<bool>();
         if (node["fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain"]) fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain = node["fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain"].as<float>();
+        if (node["fusionSplitPriorParentAnchorRejectReanchorMinImageGain"]) fusionSplitPriorParentAnchorRejectReanchorMinImageGain = node["fusionSplitPriorParentAnchorRejectReanchorMinImageGain"].as<float>();
         if (node["fusionSplitPriorDuplicateHandoffMinContinuationPenalty"]) fusionSplitPriorDuplicateHandoffMinContinuationPenalty = node["fusionSplitPriorDuplicateHandoffMinContinuationPenalty"].as<float>();
         if (node["fusionSplitPriorDuplicateHandoffNormLimit"]) fusionSplitPriorDuplicateHandoffNormLimit = node["fusionSplitPriorDuplicateHandoffNormLimit"].as<float>();
         if (node["fusionSplitPriorDuplicateHandoffDistanceLimit"]) fusionSplitPriorDuplicateHandoffDistanceLimit = node["fusionSplitPriorDuplicateHandoffDistanceLimit"].as<float>();
@@ -3463,6 +3863,7 @@ public:
         if (node["fusionStaleContinuationPruneGuardedNoFutureIgnoresCurrentCenterEnabled"]) fusionStaleContinuationPruneGuardedNoFutureIgnoresCurrentCenterEnabled = node["fusionStaleContinuationPruneGuardedNoFutureIgnoresCurrentCenterEnabled"].as<bool>();
         if (node["fusionStaleContinuationPruneFutureSupportProtectsGuardedEnabled"]) fusionStaleContinuationPruneFutureSupportProtectsGuardedEnabled = node["fusionStaleContinuationPruneFutureSupportProtectsGuardedEnabled"].as<bool>();
         if (node["fusionStaleContinuationPruneGuardedFutureReanchorEnabled"]) fusionStaleContinuationPruneGuardedFutureReanchorEnabled = node["fusionStaleContinuationPruneGuardedFutureReanchorEnabled"].as<bool>();
+        if (node["fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled"]) fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled = node["fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled"].as<bool>();
         if (node["fusionStaleContinuationPruneGuardedFutureReanchorMaxDistance"]) fusionStaleContinuationPruneGuardedFutureReanchorMaxDistance = node["fusionStaleContinuationPruneGuardedFutureReanchorMaxDistance"].as<float>();
         if (node["fusionStaleContinuationPruneGuardedFutureReanchorMinFutureSupport"]) fusionStaleContinuationPruneGuardedFutureReanchorMinFutureSupport = node["fusionStaleContinuationPruneGuardedFutureReanchorMinFutureSupport"].as<int>();
         if (node["fusionStaleContinuationPruneGuardedFutureReanchorClaimMargin"]) fusionStaleContinuationPruneGuardedFutureReanchorClaimMargin = node["fusionStaleContinuationPruneGuardedFutureReanchorClaimMargin"].as<float>();
@@ -3479,12 +3880,20 @@ public:
         if (node["fusionStaleContinuationPruneCrowdedBridgeMinBrightnessAdvantage"]) fusionStaleContinuationPruneCrowdedBridgeMinBrightnessAdvantage = node["fusionStaleContinuationPruneCrowdedBridgeMinBrightnessAdvantage"].as<float>();
         if (node["fusionStaleContinuationPruneCrowdedBridgeMinGuardedBrightness"]) fusionStaleContinuationPruneCrowdedBridgeMinGuardedBrightness = node["fusionStaleContinuationPruneCrowdedBridgeMinGuardedBrightness"].as<float>();
         if (node["fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness"]) fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness = node["fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness"].as<float>();
+        if (node["fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport"]) fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport = node["fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport"].as<int>();
         if (node["fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled"]) fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled = node["fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled"].as<bool>();
         if (node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxBrightness"]) fusionStaleContinuationPruneProtectedOneRealSyntheticMaxBrightness = node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxBrightness"].as<float>();
         if (node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMajorRadius"]) fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMajorRadius = node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMajorRadius"].as<float>();
         if (node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMinorRadius"]) fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMinorRadius = node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMinorRadius"].as<float>();
         if (node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxSiblingDistance"]) fusionStaleContinuationPruneProtectedOneRealSyntheticMaxSiblingDistance = node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxSiblingDistance"].as<float>();
         if (node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance"]) fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance = node["fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance"].as<float>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled"].as<bool>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore"].as<float>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth"].as<int>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing"].as<int>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists"].as<int>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels"].as<int>();
+        if (node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal"]) fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal = node["fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal"].as<float>();
         if (node["fusionSplitPriorParentAnchorContinuationMergeMinShape"]) fusionSplitPriorParentAnchorContinuationMergeMinShape = node["fusionSplitPriorParentAnchorContinuationMergeMinShape"].as<float>();
         if (node["fusionSplitPriorParentAnchorContinuationMergeNormLimit"]) fusionSplitPriorParentAnchorContinuationMergeNormLimit = node["fusionSplitPriorParentAnchorContinuationMergeNormLimit"].as<float>();
         if (node["fusionSplitPriorParentAnchorContinuationMergeDistanceLimit"]) fusionSplitPriorParentAnchorContinuationMergeDistanceLimit = node["fusionSplitPriorParentAnchorContinuationMergeDistanceLimit"].as<float>();
@@ -3494,6 +3903,10 @@ public:
         if (node["fusionTemporalCenterRepairSharedClaimPcaRelaxMinShape"]) fusionTemporalCenterRepairSharedClaimPcaRelaxMinShape = node["fusionTemporalCenterRepairSharedClaimPcaRelaxMinShape"].as<float>();
         if (node["fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled"]) fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled = node["fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled"].as<bool>();
         if (node["fusionTemporalCenterRepairPcaRelaxOwnClaimMargin"]) fusionTemporalCenterRepairPcaRelaxOwnClaimMargin = node["fusionTemporalCenterRepairPcaRelaxOwnClaimMargin"].as<float>();
+        if (node["fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled"]) fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled = node["fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled"].as<bool>();
+        if (node["fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape"]) fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape = node["fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape"].as<float>();
+        if (node["fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove"]) fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove = node["fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove"].as<float>();
+        if (node["fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport"]) fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport = node["fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport"].as<int>();
         if (node["fusionSplitPriorPartialParentAnchorRescueEnabled"]) fusionSplitPriorPartialParentAnchorRescueEnabled = node["fusionSplitPriorPartialParentAnchorRescueEnabled"].as<bool>();
         if (node["fusionSplitPriorPartialParentAnchorMinShape"]) fusionSplitPriorPartialParentAnchorMinShape = node["fusionSplitPriorPartialParentAnchorMinShape"].as<float>();
         if (node["fusionSplitPriorPartialParentAnchorMaxScore"]) fusionSplitPriorPartialParentAnchorMaxScore = node["fusionSplitPriorPartialParentAnchorMaxScore"].as<float>();
@@ -3569,6 +3982,15 @@ public:
         if (node["fusionSplitPriorPrepassFallbackOverlapNoValleyMinParentShape"]) fusionSplitPriorPrepassFallbackOverlapNoValleyMinParentShape = node["fusionSplitPriorPrepassFallbackOverlapNoValleyMinParentShape"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackOverlapNoValleyMaxPriorScore"]) fusionSplitPriorPrepassFallbackOverlapNoValleyMaxPriorScore = node["fusionSplitPriorPrepassFallbackOverlapNoValleyMaxPriorScore"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen"]) fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen = node["fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen"].as<float>();
+        if (node["fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled"]) fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled = node["fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled"].as<bool>();
+        if (node["fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio"]) fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio = node["fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth"]) fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth = node["fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth"].as<float>();
+        if (node["fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled"]) fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled = node["fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled"].as<bool>();
+        if (node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape"]) fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape = node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost"]) fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost = node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio"]) fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio = node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth"]) fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth = node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio"]) fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio = node["fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackOverrideWeakExistingPriorEnabled"]) fusionSplitPriorPrepassFallbackOverrideWeakExistingPriorEnabled = node["fusionSplitPriorPrepassFallbackOverrideWeakExistingPriorEnabled"].as<bool>();
         if (node["fusionSplitPriorPrepassFallbackOverrideMinParentShape"]) fusionSplitPriorPrepassFallbackOverrideMinParentShape = node["fusionSplitPriorPrepassFallbackOverrideMinParentShape"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackOverrideMaxScore"]) fusionSplitPriorPrepassFallbackOverrideMaxScore = node["fusionSplitPriorPrepassFallbackOverrideMaxScore"].as<float>();
@@ -3601,6 +4023,18 @@ public:
         if (node["fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxSoftPenaltyFraction"]) fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxSoftPenaltyFraction = node["fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxSoftPenaltyFraction"].as<float>();
         if (node["fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxBridgeValleyRatio"]) fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxBridgeValleyRatio = node["fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMaxBridgeValleyRatio"].as<float>();
         if (node["fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMinRealVoxels"]) fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMinRealVoxels = node["fusionSplitPriorParentAnchorOneRealPositiveWindowRescueMinRealVoxels"].as<int>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled"].as<bool>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth"].as<int>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing"].as<int>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists"].as<int>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape"].as<float>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape"].as<float>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore"].as<float>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain"].as<float>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio"].as<float>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance"].as<float>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels"].as<int>();
+        if (node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal"]) fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal = node["fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal"].as<float>();
         if (node["fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawEnabled"]) fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawEnabled = node["fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawEnabled"].as<bool>();
         if (node["fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMinLiveCells"]) fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMinLiveCells = node["fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMinLiveCells"].as<int>();
         if (node["fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMaxRawScore"]) fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMaxRawScore = node["fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMaxRawScore"].as<float>();
@@ -3620,6 +4054,8 @@ public:
         if (node["fusionSplitPriorParentAnchorSingleBlockerSelectionBonus"]) fusionSplitPriorParentAnchorSingleBlockerSelectionBonus = node["fusionSplitPriorParentAnchorSingleBlockerSelectionBonus"].as<float>();
         if (node["fusionSplitPriorLockAcceptedDaughtersForFinalPca"]) fusionSplitPriorLockAcceptedDaughtersForFinalPca = node["fusionSplitPriorLockAcceptedDaughtersForFinalPca"].as<bool>();
         if (node["fusionSplitPriorCleanTwoRealSingleBlockerRescueEnabled"]) fusionSplitPriorCleanTwoRealSingleBlockerRescueEnabled = node["fusionSplitPriorCleanTwoRealSingleBlockerRescueEnabled"].as<bool>();
+        if (node["fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape"]) fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape = node["fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty"]) fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty = node["fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealSingleBlockerMinParentDistanceBalance"]) fusionSplitPriorCleanTwoRealSingleBlockerMinParentDistanceBalance = node["fusionSplitPriorCleanTwoRealSingleBlockerMinParentDistanceBalance"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealSingleBlockerMaxScore"]) fusionSplitPriorCleanTwoRealSingleBlockerMaxScore = node["fusionSplitPriorCleanTwoRealSingleBlockerMaxScore"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealSingleBlockerMinVoxels"]) fusionSplitPriorCleanTwoRealSingleBlockerMinVoxels = node["fusionSplitPriorCleanTwoRealSingleBlockerMinVoxels"].as<int>();
@@ -3707,6 +4143,16 @@ public:
         if (node["fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation"]) fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation = node["fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation"].as<float>();
         if (node["fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance"]) fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance = node["fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance"].as<float>();
         if (node["fusionSplitPriorParentAnchorCleanWindowLowZMaxScore"]) fusionSplitPriorParentAnchorCleanWindowLowZMaxScore = node["fusionSplitPriorParentAnchorCleanWindowLowZMaxScore"].as<float>();
+        if (node["fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate"]) fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate = node["fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate"].as<bool>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth"]) fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth = node["fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth"].as<int>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing"]) fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing = node["fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing"].as<int>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists"]) fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists = node["fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists"].as<int>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape"]) fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape = node["fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape"].as<float>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation"]) fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation = node["fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation"].as<float>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation"]) fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation = node["fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation"].as<float>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance"]) fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance = node["fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance"].as<float>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal"]) fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal = node["fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal"].as<float>();
+        if (node["fusionSplitPriorParentAnchorCleanWindowHighZMaxScore"]) fusionSplitPriorParentAnchorCleanWindowHighZMaxScore = node["fusionSplitPriorParentAnchorCleanWindowHighZMaxScore"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealHighNeighborClaimRescueEnabled"]) fusionSplitPriorCleanTwoRealHighNeighborClaimRescueEnabled = node["fusionSplitPriorCleanTwoRealHighNeighborClaimRescueEnabled"].as<bool>();
         if (node["fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance"]) fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance = node["fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore"]) fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore = node["fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore"].as<float>();
@@ -3715,6 +4161,47 @@ public:
         if (node["fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty"]) fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty = node["fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty"]) fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty = node["fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus"]) fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus = node["fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled"]) fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled = node["fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled"].as<bool>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers"]) fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers = node["fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers"].as<int>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimMinParentShape"]) fusionSplitPriorCleanTwoRealSharedClaimMinParentShape = node["fusionSplitPriorCleanTwoRealSharedClaimMinParentShape"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty"]) fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty = node["fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance"]) fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance = node["fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimMaxScore"]) fusionSplitPriorCleanTwoRealSharedClaimMaxScore = node["fusionSplitPriorCleanTwoRealSharedClaimMaxScore"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus"]) fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus = node["fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled"]) fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled = node["fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled"].as<bool>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels"].as<int>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore"]) fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore = node["fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore"].as<float>();
+        if (node["fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus"]) fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus = node["fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled"].as<bool>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells"].as<int>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth"].as<int>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty"]) fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty = node["fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled"].as<bool>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells"].as<int>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth"].as<int>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels"].as<int>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance"].as<float>();
+        if (node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty"]) fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty = node["fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealDuplicateBypassEnabled"]) fusionSplitPriorCleanTwoRealDuplicateBypassEnabled = node["fusionSplitPriorCleanTwoRealDuplicateBypassEnabled"].as<bool>();
         if (node["fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain"]) fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain = node["fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain"].as<float>();
         if (node["fusionSplitPriorCleanTwoRealDuplicateBypassMaxBridgeValleyRatio"]) fusionSplitPriorCleanTwoRealDuplicateBypassMaxBridgeValleyRatio = node["fusionSplitPriorCleanTwoRealDuplicateBypassMaxBridgeValleyRatio"].as<float>();
@@ -3737,6 +4224,13 @@ public:
         if (node["fusionSplitPriorCleanWindowSeedColumnMinZDominance"]) fusionSplitPriorCleanWindowSeedColumnMinZDominance = node["fusionSplitPriorCleanWindowSeedColumnMinZDominance"].as<float>();
         if (node["fusionSplitPriorCleanWindowSeedColumnMinParentShape"]) fusionSplitPriorCleanWindowSeedColumnMinParentShape = node["fusionSplitPriorCleanWindowSeedColumnMinParentShape"].as<float>();
         if (node["fusionSplitPriorCleanWindowSeedColumnMaxParentShape"]) fusionSplitPriorCleanWindowSeedColumnMaxParentShape = node["fusionSplitPriorCleanWindowSeedColumnMaxParentShape"].as<float>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled"].as<bool>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation"].as<float>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance"].as<float>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels"].as<int>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal"].as<float>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore"].as<float>();
+        if (node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance"]) fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance = node["fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance"].as<float>();
         if (node["fusionSplitPriorRejectParentAnchoredSeedColumnDuplicate"]) fusionSplitPriorRejectParentAnchoredSeedColumnDuplicate = node["fusionSplitPriorRejectParentAnchoredSeedColumnDuplicate"].as<bool>();
         if (node["fusionSplitPriorParentAnchoredSeedColumnMaxSiblingLateralSeparation"]) fusionSplitPriorParentAnchoredSeedColumnMaxSiblingLateralSeparation = node["fusionSplitPriorParentAnchoredSeedColumnMaxSiblingLateralSeparation"].as<float>();
         if (node["fusionSplitPriorParentAnchoredSeedColumnMinSiblingZSeparation"]) fusionSplitPriorParentAnchoredSeedColumnMinSiblingZSeparation = node["fusionSplitPriorParentAnchoredSeedColumnMinSiblingZSeparation"].as<float>();
@@ -3760,6 +4254,14 @@ public:
         if (node["fusionSplitPriorWeakAsymmetricCleanWindowMinVoxels"]) fusionSplitPriorWeakAsymmetricCleanWindowMinVoxels = node["fusionSplitPriorWeakAsymmetricCleanWindowMinVoxels"].as<int>();
         if (node["fusionSplitPriorWeakAsymmetricCleanWindowMinSignal"]) fusionSplitPriorWeakAsymmetricCleanWindowMinSignal = node["fusionSplitPriorWeakAsymmetricCleanWindowMinSignal"].as<float>();
         if (node["fusionSplitPriorWeakAsymmetricCleanWindowMinRawScore"]) fusionSplitPriorWeakAsymmetricCleanWindowMinRawScore = node["fusionSplitPriorWeakAsymmetricCleanWindowMinRawScore"].as<float>();
+        if (node["fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled"]) fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled = node["fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled"].as<bool>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair"].as<bool>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus"].as<float>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape"].as<float>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance"].as<float>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore"].as<float>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore"].as<float>();
+        if (node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation"]) fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation = node["fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation"].as<float>();
         if (node["fusionSplitPriorRejectTriaxialNoBalancedCleanWindowPairEnabled"]) fusionSplitPriorRejectTriaxialNoBalancedCleanWindowPairEnabled = node["fusionSplitPriorRejectTriaxialNoBalancedCleanWindowPairEnabled"].as<bool>();
         if (node["fusionSplitPriorTriaxialNoBalancedCleanWindowMinWindowBoth"]) fusionSplitPriorTriaxialNoBalancedCleanWindowMinWindowBoth = node["fusionSplitPriorTriaxialNoBalancedCleanWindowMinWindowBoth"].as<int>();
         if (node["fusionSplitPriorTriaxialNoBalancedCleanWindowMaxBalancedBonus"]) fusionSplitPriorTriaxialNoBalancedCleanWindowMaxBalancedBonus = node["fusionSplitPriorTriaxialNoBalancedCleanWindowMaxBalancedBonus"].as<float>();
@@ -3786,6 +4288,11 @@ public:
         if (node["fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio"]) fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio = node["fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio"].as<float>();
         if (node["fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth"]) fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth = node["fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth"].as<float>();
         if (node["fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio"]) fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio = node["fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio"].as<float>();
+        if (node["fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate"]) fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate = node["fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate"].as<bool>();
+        if (node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth"]) fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth = node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth"].as<int>();
+        if (node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain"]) fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain = node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain"].as<float>();
+        if (node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio"]) fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio = node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio"].as<float>();
+        if (node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff"]) fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff = node["fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff"].as<float>();
         if (node["fusionSplitPriorRejectSeedZColumnNoValleyOverlapDuplicate"]) fusionSplitPriorRejectSeedZColumnNoValleyOverlapDuplicate = node["fusionSplitPriorRejectSeedZColumnNoValleyOverlapDuplicate"].as<bool>();
         if (node["fusionSplitPriorSeedZColumnNoValleyMaxSeedLateralSeparation"]) fusionSplitPriorSeedZColumnNoValleyMaxSeedLateralSeparation = node["fusionSplitPriorSeedZColumnNoValleyMaxSeedLateralSeparation"].as<float>();
         if (node["fusionSplitPriorSeedZColumnNoValleyMinSeedZDominance"]) fusionSplitPriorSeedZColumnNoValleyMinSeedZDominance = node["fusionSplitPriorSeedZColumnNoValleyMinSeedZDominance"].as<float>();
@@ -3877,6 +4384,7 @@ public:
         if (node["fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels"]) fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels = node["fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels"].as<int>();
         if (node["fusionSplitPriorPrepassFallbackLowKeptRescueMinShape"]) fusionSplitPriorPrepassFallbackLowKeptRescueMinShape = node["fusionSplitPriorPrepassFallbackLowKeptRescueMinShape"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackLowKeptRescueMaxScore"]) fusionSplitPriorPrepassFallbackLowKeptRescueMaxScore = node["fusionSplitPriorPrepassFallbackLowKeptRescueMaxScore"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled"]) fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled = node["fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled"].as<bool>();
         if (node["fusionSplitPriorPrepassFallbackMinShape"]) fusionSplitPriorPrepassFallbackMinShape = node["fusionSplitPriorPrepassFallbackMinShape"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackMinSeparationRadiusScale"]) fusionSplitPriorPrepassFallbackMinSeparationRadiusScale = node["fusionSplitPriorPrepassFallbackMinSeparationRadiusScale"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale"]) fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale = node["fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale"].as<float>();
@@ -3886,6 +4394,10 @@ public:
         if (node["fusionSplitPriorPrepassFallbackRejectCollapsedCenterParent"]) fusionSplitPriorPrepassFallbackRejectCollapsedCenterParent = node["fusionSplitPriorPrepassFallbackRejectCollapsedCenterParent"].as<bool>();
         if (node["fusionSplitPriorPrepassFallbackBadLumenMaxScore"]) fusionSplitPriorPrepassFallbackBadLumenMaxScore = node["fusionSplitPriorPrepassFallbackBadLumenMaxScore"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty"]) fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty = node["fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled"]) fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled = node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled"].as<bool>();
+        if (node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels"]) fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels = node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels"].as<int>();
+        if (node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape"]) fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape = node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape"].as<float>();
+        if (node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore"]) fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore = node["fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore"].as<float>();
         if (node["fusionSplitPriorPrepassFallbackMinParentAgeFrames"]) fusionSplitPriorPrepassFallbackMinParentAgeFrames = node["fusionSplitPriorPrepassFallbackMinParentAgeFrames"].as<int>();
         if (node["fusionSplitPriorPrepassFallbackUseSnapshotSeedOnLargeDrift"]) fusionSplitPriorPrepassFallbackUseSnapshotSeedOnLargeDrift = node["fusionSplitPriorPrepassFallbackUseSnapshotSeedOnLargeDrift"].as<bool>();
         if (node["fusionSplitPriorPrepassFallbackSeedMaxShift"]) fusionSplitPriorPrepassFallbackSeedMaxShift = node["fusionSplitPriorPrepassFallbackSeedMaxShift"].as<float>();
@@ -4059,6 +4571,16 @@ public:
         std::cout << "finalSparseIsolatedFloorWeakSignalMinCells: " << finalSparseIsolatedFloorWeakSignalMinCells << '\n';
         std::cout << "finalSparseIsolatedFloorWeakSignalMaxCells: " << finalSparseIsolatedFloorWeakSignalMaxCells << '\n';
         std::cout << "finalSparseIsolatedFloorMaxTop10MinusShell: " << finalSparseIsolatedFloorMaxTop10MinusShell << '\n';
+        std::cout << "fineShapeModelEnabled: " << fineShapeModelEnabled << '\n';
+        std::cout << "fineShapeModelExportCsv: " << fineShapeModelExportCsv << '\n';
+        std::cout << "fineShapeModelRadiusScale: " << fineShapeModelRadiusScale << '\n';
+        std::cout << "fineShapeModelMinRadius: " << fineShapeModelMinRadius << '\n';
+        std::cout << "fineShapeModelMaxRadius: " << fineShapeModelMaxRadius << '\n';
+        std::cout << "fineShapeModelThresholdQuantile: " << fineShapeModelThresholdQuantile << '\n';
+        std::cout << "fineShapeModelThresholdFloor: " << fineShapeModelThresholdFloor << '\n';
+        std::cout << "fineShapeModelSeedSearchRadius: " << fineShapeModelSeedSearchRadius << '\n';
+        std::cout << "fineShapeModelSeedFallbackFraction: " << fineShapeModelSeedFallbackFraction << '\n';
+        std::cout << "fineShapeModelMaxVoxelsPerCell: " << fineShapeModelMaxVoxelsPerCell << '\n';
         std::cout << "radiusInflationScale: " << radiusInflationScale << '\n';
         std::cout << "signalStatsEnabled: " << signalStatsEnabled << '\n';
         std::cout << "minTop10MinusShell: " << minTop10MinusShell << '\n';
@@ -4153,6 +4675,7 @@ public:
         std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementMinWindowBoth << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowMissing << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxWindowParentPersists << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementAllowPartialFutureWithParentPersistence << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementMinParentDistanceBalance: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementMinParentDistanceBalance << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxScore: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxScore << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxAnchorScoreDelta: " << fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxAnchorScoreDelta << '\n';
@@ -4204,6 +4727,8 @@ public:
         std::cout << "fusionSplitPriorTemporalRepairCatchStrongMinSignal: " << fusionSplitPriorTemporalRepairCatchStrongMinSignal << '\n';
         std::cout << "fusionSplitPriorTemporalRepairCatchStrongMinParentShape: " << fusionSplitPriorTemporalRepairCatchStrongMinParentShape << '\n';
         std::cout << "fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty: " << fusionSplitPriorTemporalRepairCatchStrongMaxRankingSoftPenalty << '\n';
+        std::cout << "fusionSplitPriorTemporalRepairCatchStrongScoreBonus: " << fusionSplitPriorTemporalRepairCatchStrongScoreBonus << '\n';
+        std::cout << "fusionSplitPriorDebugTemporalCatchPairRejectsEnabled: " << fusionSplitPriorDebugTemporalCatchPairRejectsEnabled << '\n';
         std::cout << "fusionSplitPriorPartialWindowWideLateralRescueEnabled: " << fusionSplitPriorPartialWindowWideLateralRescueEnabled << '\n';
         std::cout << "fusionSplitPriorPartialWindowWideLateralMinWindowBoth: " << fusionSplitPriorPartialWindowWideLateralMinWindowBoth << '\n';
         std::cout << "fusionSplitPriorPartialWindowWideLateralMaxWindowMissing: " << fusionSplitPriorPartialWindowWideLateralMaxWindowMissing << '\n';
@@ -4268,6 +4793,19 @@ public:
         std::cout << "fusionSplitPriorWeakParentAnchoredPartialBypassMinLateralSeparation: " << fusionSplitPriorWeakParentAnchoredPartialBypassMinLateralSeparation << '\n';
         std::cout << "fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance: " << fusionSplitPriorWeakParentAnchoredPartialBypassMaxZDominance << '\n';
         std::cout << "fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance: " << fusionSplitPriorWeakParentAnchoredPartialBypassMaxMidpointDistance << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassEnabled << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinParentShape << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxScore << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealVoxels << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinRealSignal << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinWindowBoth << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowMissing << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxWindowParentPersists << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinSeparationRadiusScale << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinFarDistance << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMinLateralSeparation << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxZDominance << '\n';
+        std::cout << "fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance: " << fusionSplitPriorWeakParentAnchoredNegativeWindowBypassMaxMidpointDistance << '\n';
         std::cout << "fusionSplitPriorRejectTightCleanWindowInternalPairEnabled: " << fusionSplitPriorRejectTightCleanWindowInternalPairEnabled << '\n';
         std::cout << "fusionSplitPriorTightCleanWindowInternalMinSeparationRadiusScale: " << fusionSplitPriorTightCleanWindowInternalMinSeparationRadiusScale << '\n';
         std::cout << "fusionSplitPriorTightCleanWindowInternalMinMidpointRadiusScale: " << fusionSplitPriorTightCleanWindowInternalMinMidpointRadiusScale << '\n';
@@ -4313,12 +4851,43 @@ public:
         std::cout << "fusionTemporalCenterRepairParentAnchorReanchorEnabled: " << fusionTemporalCenterRepairParentAnchorReanchorEnabled << '\n';
         std::cout << "fusionTemporalCenterRepairParentAnchorReanchorMinShape: " << fusionTemporalCenterRepairParentAnchorReanchorMinShape << '\n';
         std::cout << "fusionTemporalCenterRepairParentAnchorReanchorMinDistance: " << fusionTemporalCenterRepairParentAnchorReanchorMinDistance << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled: " << fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance: " << fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMinZDominance << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove: " << fusionTemporalCenterRepairParentAnchorPreserveOldSupportedZStackMaxLateralMove << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeReanchorEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMinShape << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMinVoxels << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMinSignal << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMinWindowBoth << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists << '\n';
+        std::cout << "fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore: " << fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore << '\n';
         std::cout << "fusionTemporalCenterRepairSameParentSplitReanchorEnabled: " << fusionTemporalCenterRepairSameParentSplitReanchorEnabled << '\n';
         std::cout << "fusionTemporalCenterRepairSameParentSplitMinDistance: " << fusionTemporalCenterRepairSameParentSplitMinDistance << '\n';
         std::cout << "fusionTemporalCenterRepairSameParentSplitMinVoxels: " << fusionTemporalCenterRepairSameParentSplitMinVoxels << '\n';
         std::cout << "fusionTemporalCenterRepairSameParentSplitMinSignal: " << fusionTemporalCenterRepairSameParentSplitMinSignal << '\n';
         std::cout << "fusionTemporalCenterRepairSameParentSplitMinWindowSupport: " << fusionTemporalCenterRepairSameParentSplitMinWindowSupport << '\n';
         std::cout << "fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported: " << fusionTemporalCenterRepairSameParentRequireSupportGainWhenOldSupported << '\n';
+        std::cout << "fusionTemporalCenterRepairWeakSameParentContinuationEnabled: " << fusionTemporalCenterRepairWeakSameParentContinuationEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels: " << fusionTemporalCenterRepairWeakSameParentContinuationMinVoxels << '\n';
+        std::cout << "fusionTemporalCenterRepairWeakSameParentContinuationMinSignal: " << fusionTemporalCenterRepairWeakSameParentContinuationMinSignal << '\n';
+        std::cout << "fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport: " << fusionTemporalCenterRepairWeakSameParentContinuationMinWindowSupport << '\n';
+        std::cout << "fusionTemporalCenterRepairWeakSameParentContinuationMaxMove: " << fusionTemporalCenterRepairWeakSameParentContinuationMaxMove << '\n';
+        std::cout << "fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled: " << fusionTemporalCenterRepairSameParentCloserFutureOverrideEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain: " << fusionTemporalCenterRepairSameParentCloserFutureOverrideMinGain << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingClaimOverrideEnabled: " << fusionTemporalCenterRepairSiblingClaimOverrideEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled: " << fusionTemporalCenterRepairSiblingSharedCenterReanchorEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells: " << fusionTemporalCenterRepairSiblingSharedCenterMinLiveCells << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames: " << fusionTemporalCenterRepairSiblingSharedCenterMaxAgeFrames << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance: " << fusionTemporalCenterRepairSiblingSharedCenterMaxCloserDistance << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance: " << fusionTemporalCenterRepairSiblingSharedCenterMinFarDistance << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance: " << fusionTemporalCenterRepairSiblingSharedCenterMaxFarDistance << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation: " << fusionTemporalCenterRepairSiblingSharedCenterMinSiblingSeparation << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack: " << fusionTemporalCenterRepairSiblingSharedCenterMaxBetweenSlack << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMinVoxels: " << fusionTemporalCenterRepairSiblingSharedCenterMinVoxels << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterMinSignal: " << fusionTemporalCenterRepairSiblingSharedCenterMinSignal << '\n';
+        std::cout << "fusionTemporalCenterRepairSiblingSharedCenterScoreBonus: " << fusionTemporalCenterRepairSiblingSharedCenterScoreBonus << '\n';
+        std::cout << "fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled: " << fusionTemporalCenterRepairProtectedFutureOwnerReanchorEnabled << '\n';
         std::cout << "fusionSplitRejectCompensateWithSameParentCenterEnabled: " << fusionSplitRejectCompensateWithSameParentCenterEnabled << '\n';
         std::cout << "fusionSplitRejectCompensateWithSameParentCenterMinDistance: " << fusionSplitRejectCompensateWithSameParentCenterMinDistance << '\n';
         std::cout << "fusionSplitRejectCompensateWithSameParentCenterMaxDistance: " << fusionSplitRejectCompensateWithSameParentCenterMaxDistance << '\n';
@@ -4340,8 +4909,21 @@ public:
         std::cout << "fusionSplitPriorProtectFutureContinuationMinVoxels: " << fusionSplitPriorProtectFutureContinuationMinVoxels << '\n';
         std::cout << "fusionSplitPriorProtectFutureContinuationMinSignal: " << fusionSplitPriorProtectFutureContinuationMinSignal << '\n';
         std::cout << "fusionSplitPriorProtectFutureContinuationPenalty: " << fusionSplitPriorProtectFutureContinuationPenalty << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealGuardEnabled: " << fusionSplitPriorLateZContinuationStealGuardEnabled << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMinLiveCells: " << fusionSplitPriorLateZContinuationStealMinLiveCells << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation: " << fusionSplitPriorLateZContinuationStealMaxSeedLateralSeparation << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMinSeedZDominance: " << fusionSplitPriorLateZContinuationStealMinSeedZDominance << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance: " << fusionSplitPriorLateZContinuationStealMaxParentDistanceBalance << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale: " << fusionSplitPriorLateZContinuationStealMaxMidpointRadiusScale << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMaxOtherDistance: " << fusionSplitPriorLateZContinuationStealMaxOtherDistance << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealOtherRadiusScale: " << fusionSplitPriorLateZContinuationStealOtherRadiusScale << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMaxParentAdvantage: " << fusionSplitPriorLateZContinuationStealMaxParentAdvantage << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport: " << fusionSplitPriorLateZContinuationStealMinCandidateWindowSupport << '\n';
+        std::cout << "fusionSplitPriorLateZContinuationStealPenalty: " << fusionSplitPriorLateZContinuationStealPenalty << '\n';
+        std::cout << "fusionSplitPriorProtectedFutureOwnerAssignmentEnabled: " << fusionSplitPriorProtectedFutureOwnerAssignmentEnabled << '\n';
         std::cout << "fusionSplitPriorAllowWindowBackedDuplicateHandoff: " << fusionSplitPriorAllowWindowBackedDuplicateHandoff << '\n';
         std::cout << "fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain: " << fusionSplitPriorParentAnchorCleanFutureDriftRescueMinImageGain << '\n';
+        std::cout << "fusionSplitPriorParentAnchorRejectReanchorMinImageGain: " << fusionSplitPriorParentAnchorRejectReanchorMinImageGain << '\n';
         std::cout << "fusionSplitPriorDuplicateHandoffMinContinuationPenalty: " << fusionSplitPriorDuplicateHandoffMinContinuationPenalty << '\n';
         std::cout << "fusionSplitPriorDuplicateHandoffNormLimit: " << fusionSplitPriorDuplicateHandoffNormLimit << '\n';
         std::cout << "fusionSplitPriorDuplicateHandoffDistanceLimit: " << fusionSplitPriorDuplicateHandoffDistanceLimit << '\n';
@@ -4368,6 +4950,7 @@ public:
         std::cout << "fusionStaleContinuationPruneGuardedNoFutureIgnoresCurrentCenterEnabled: " << fusionStaleContinuationPruneGuardedNoFutureIgnoresCurrentCenterEnabled << '\n';
         std::cout << "fusionStaleContinuationPruneFutureSupportProtectsGuardedEnabled: " << fusionStaleContinuationPruneFutureSupportProtectsGuardedEnabled << '\n';
         std::cout << "fusionStaleContinuationPruneGuardedFutureReanchorEnabled: " << fusionStaleContinuationPruneGuardedFutureReanchorEnabled << '\n';
+        std::cout << "fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled: " << fusionStaleContinuationPruneGuardedFutureReanchorTrustProtectedOwnerEnabled << '\n';
         std::cout << "fusionStaleContinuationPruneGuardedFutureReanchorMaxDistance: " << fusionStaleContinuationPruneGuardedFutureReanchorMaxDistance << '\n';
         std::cout << "fusionStaleContinuationPruneGuardedFutureReanchorMinFutureSupport: " << fusionStaleContinuationPruneGuardedFutureReanchorMinFutureSupport << '\n';
         std::cout << "fusionStaleContinuationPruneGuardedFutureReanchorClaimMargin: " << fusionStaleContinuationPruneGuardedFutureReanchorClaimMargin << '\n';
@@ -4384,12 +4967,20 @@ public:
         std::cout << "fusionStaleContinuationPruneCrowdedBridgeMinBrightnessAdvantage: " << fusionStaleContinuationPruneCrowdedBridgeMinBrightnessAdvantage << '\n';
         std::cout << "fusionStaleContinuationPruneCrowdedBridgeMinGuardedBrightness: " << fusionStaleContinuationPruneCrowdedBridgeMinGuardedBrightness << '\n';
         std::cout << "fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness: " << fusionStaleContinuationPruneCrowdedBridgeMaxGuardedBrightness << '\n';
+        std::cout << "fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport: " << fusionStaleContinuationPruneCrowdedBridgeMaxFutureSupport << '\n';
         std::cout << "fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled: " << fusionStaleContinuationPruneProtectedOneRealSyntheticEnabled << '\n';
         std::cout << "fusionStaleContinuationPruneProtectedOneRealSyntheticMaxBrightness: " << fusionStaleContinuationPruneProtectedOneRealSyntheticMaxBrightness << '\n';
         std::cout << "fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMajorRadius: " << fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMajorRadius << '\n';
         std::cout << "fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMinorRadius: " << fusionStaleContinuationPruneProtectedOneRealSyntheticMaxMinorRadius << '\n';
         std::cout << "fusionStaleContinuationPruneProtectedOneRealSyntheticMaxSiblingDistance: " << fusionStaleContinuationPruneProtectedOneRealSyntheticMaxSiblingDistance << '\n';
         std::cout << "fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance: " << fusionStaleContinuationPruneProtectedOneRealSyntheticMaxIndependentCenterDistance << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticEnabled << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxScore << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinWindowBoth << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowMissing << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMaxWindowParentPersists << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealVoxels << '\n';
+        std::cout << "fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal: " << fusionStaleContinuationPruneKeepStrongAcceptedOneRealSyntheticMinRealSignal << '\n';
         std::cout << "fusionSplitPriorParentAnchorContinuationMergeMinShape: " << fusionSplitPriorParentAnchorContinuationMergeMinShape << '\n';
         std::cout << "fusionSplitPriorParentAnchorContinuationMergeNormLimit: " << fusionSplitPriorParentAnchorContinuationMergeNormLimit << '\n';
         std::cout << "fusionSplitPriorParentAnchorContinuationMergeDistanceLimit: " << fusionSplitPriorParentAnchorContinuationMergeDistanceLimit << '\n';
@@ -4399,6 +4990,10 @@ public:
         std::cout << "fusionTemporalCenterRepairSharedClaimPcaRelaxMinShape: " << fusionTemporalCenterRepairSharedClaimPcaRelaxMinShape << '\n';
         std::cout << "fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled: " << fusionTemporalCenterRepairPcaRelaxRequireOwnClaimEnabled << '\n';
         std::cout << "fusionTemporalCenterRepairPcaRelaxOwnClaimMargin: " << fusionTemporalCenterRepairPcaRelaxOwnClaimMargin << '\n';
+        std::cout << "fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled: " << fusionTemporalCenterRepairPcaRelaxRequireSupportGainForLowShapeOldSupportedEnabled << '\n';
+        std::cout << "fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape: " << fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMaxShape << '\n';
+        std::cout << "fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove: " << fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinMove << '\n';
+        std::cout << "fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport: " << fusionTemporalCenterRepairPcaRelaxLowShapeOldSupportedMinOldWindowSupport << '\n';
         std::cout << "fusionSplitPriorPartialParentAnchorRescueEnabled: " << fusionSplitPriorPartialParentAnchorRescueEnabled << '\n';
         std::cout << "fusionSplitPriorPartialParentAnchorMinShape: " << fusionSplitPriorPartialParentAnchorMinShape << '\n';
         std::cout << "fusionSplitPriorPartialParentAnchorMaxScore: " << fusionSplitPriorPartialParentAnchorMaxScore << '\n';
@@ -4474,6 +5069,15 @@ public:
         std::cout << "fusionSplitPriorPrepassFallbackOverlapNoValleyMinParentShape: " << fusionSplitPriorPrepassFallbackOverlapNoValleyMinParentShape << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackOverlapNoValleyMaxPriorScore: " << fusionSplitPriorPrepassFallbackOverlapNoValleyMaxPriorScore << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen: " << fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen << '\n';
+        std::cout << "fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled: " << fusionSplitPriorRejectPrepassFallbackPositiveOverlapDominatedEnabled << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio: " << fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth: " << fusionSplitPriorPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth << '\n';
+        std::cout << "fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled: " << fusionSplitPriorRejectPrepassFallbackLowShapeOverlapDominatedEnabled << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape: " << fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxParentShape << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost: " << fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapCost << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio: " << fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth: " << fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio: " << fusionSplitPriorPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackOverrideWeakExistingPriorEnabled: " << fusionSplitPriorPrepassFallbackOverrideWeakExistingPriorEnabled << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackOverrideMinParentShape: " << fusionSplitPriorPrepassFallbackOverrideMinParentShape << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackOverrideMaxScore: " << fusionSplitPriorPrepassFallbackOverrideMaxScore << '\n';
@@ -4496,6 +5100,18 @@ public:
         std::cout << "fusionSplitPriorParentAnchorOneRealMinImageGainGuardEnabled: " << fusionSplitPriorParentAnchorOneRealMinImageGainGuardEnabled << '\n';
         std::cout << "fusionSplitPriorParentAnchorOneRealCleanMinImageGain: " << fusionSplitPriorParentAnchorOneRealCleanMinImageGain << '\n';
         std::cout << "fusionSplitPriorParentAnchorOneRealPartialMinImageGain: " << fusionSplitPriorParentAnchorOneRealPartialMinImageGain << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueEnabled << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinParentShape << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxParentShape << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxScore << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinImageGain << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinZDominance << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels << '\n';
+        std::cout << "fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal: " << fusionSplitPriorParentAnchorOneRealZCloseNoValleyRescueMinRealSignal << '\n';
         std::cout << "fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawEnabled: " << fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawEnabled << '\n';
         std::cout << "fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMinLiveCells: " << fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMinLiveCells << '\n';
         std::cout << "fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMaxRawScore: " << fusionSplitPriorRejectFutureOnlyParentAnchorPositiveRawMaxRawScore << '\n';
@@ -4515,6 +5131,8 @@ public:
         std::cout << "fusionSplitPriorParentAnchorSingleBlockerSelectionBonus: " << fusionSplitPriorParentAnchorSingleBlockerSelectionBonus << '\n';
         std::cout << "fusionSplitPriorLockAcceptedDaughtersForFinalPca: " << fusionSplitPriorLockAcceptedDaughtersForFinalPca << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealSingleBlockerRescueEnabled: " << fusionSplitPriorCleanTwoRealSingleBlockerRescueEnabled << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape: " << fusionSplitPriorCleanTwoRealSingleBlockerMinParentShape << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty: " << fusionSplitPriorCleanTwoRealSingleBlockerMaxNeighborClaimPenalty << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealSingleBlockerMinParentDistanceBalance: " << fusionSplitPriorCleanTwoRealSingleBlockerMinParentDistanceBalance << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealSingleBlockerMaxScore: " << fusionSplitPriorCleanTwoRealSingleBlockerMaxScore << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealSingleBlockerMinVoxels: " << fusionSplitPriorCleanTwoRealSingleBlockerMinVoxels << '\n';
@@ -4602,6 +5220,16 @@ public:
         std::cout << "fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation: " << fusionSplitPriorParentAnchorCleanWindowLowZMaxSeparation << '\n';
         std::cout << "fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance: " << fusionSplitPriorParentAnchorCleanWindowLowZMaxZDominance << '\n';
         std::cout << "fusionSplitPriorParentAnchorCleanWindowLowZMaxScore: " << fusionSplitPriorParentAnchorCleanWindowLowZMaxScore << '\n';
+        std::cout << "fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate: " << fusionSplitPriorRejectParentAnchorCleanWindowHighZDuplicate << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth: " << fusionSplitPriorParentAnchorCleanWindowHighZMinWindowBoth << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing: " << fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowMissing << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists: " << fusionSplitPriorParentAnchorCleanWindowHighZMaxWindowParentPersists << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape: " << fusionSplitPriorParentAnchorCleanWindowHighZMinParentShape << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation: " << fusionSplitPriorParentAnchorCleanWindowHighZMaxSeparation << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation: " << fusionSplitPriorParentAnchorCleanWindowHighZMaxLateralSeparation << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance: " << fusionSplitPriorParentAnchorCleanWindowHighZMinZDominance << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal: " << fusionSplitPriorParentAnchorCleanWindowHighZMaxRealSignal << '\n';
+        std::cout << "fusionSplitPriorParentAnchorCleanWindowHighZMaxScore: " << fusionSplitPriorParentAnchorCleanWindowHighZMaxScore << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealHighNeighborClaimRescueEnabled: " << fusionSplitPriorCleanTwoRealHighNeighborClaimRescueEnabled << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance: " << fusionSplitPriorCleanTwoRealHighNeighborClaimMinParentDistanceBalance << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore: " << fusionSplitPriorCleanTwoRealHighNeighborClaimMaxScore << '\n';
@@ -4610,6 +5238,47 @@ public:
         std::cout << "fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty: " << fusionSplitPriorCleanTwoRealHighNeighborClaimMinNeighborClaimPenalty << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty: " << fusionSplitPriorCleanTwoRealHighNeighborClaimMaxContinuationClaimPenalty << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus: " << fusionSplitPriorCleanTwoRealHighNeighborClaimSelectionBonus << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled: " << fusionSplitPriorCleanTwoRealSharedClaimRescueEnabled << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers: " << fusionSplitPriorCleanTwoRealSharedClaimMaxBlockers << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimMinParentShape: " << fusionSplitPriorCleanTwoRealSharedClaimMinParentShape << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty: " << fusionSplitPriorCleanTwoRealSharedClaimMaxNeighborClaimPenalty << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance: " << fusionSplitPriorCleanTwoRealSharedClaimMaxMidpointDistance << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimMaxScore: " << fusionSplitPriorCleanTwoRealSharedClaimMaxScore << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus: " << fusionSplitPriorCleanTwoRealSharedClaimSelectionBonus << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled: " << fusionSplitPriorCleanTwoRealAsymmetricClaimRescueEnabled << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentShape << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMaxBlockerShape << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinShapeAdvantage << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinParentDistanceBalance << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMaxContinuationPenalty << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMaxMidpointDistance << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinFarParentDistance << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinSeparationRadiusScale << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinVoxels << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMinSignal << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore: " << fusionSplitPriorCleanTwoRealAsymmetricClaimMaxScore << '\n';
+        std::cout << "fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus: " << fusionSplitPriorCleanTwoRealAsymmetricClaimSelectionBonus << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoEnabled << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinLiveCells << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinWindowBoth << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMinParentShape << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxFarDistance << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxMidpointDistance << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty: " << fusionSplitPriorLateParentAnchorOneRealShortElongatedVetoMaxNeighborClaimPenalty << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassEnabled << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLiveCells << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinWindowBoth << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinParentShape << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxParentShape << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxScore << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealVoxels << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinRealSignal << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinFarDistance << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxFarDistance << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMinLateralSeparation << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxZDominance << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxMidpointDistance << '\n';
+        std::cout << "fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty: " << fusionSplitPriorLateParentAnchorOneRealStrongNegativeBypassMaxNeighborClaimPenalty << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealDuplicateBypassEnabled: " << fusionSplitPriorCleanTwoRealDuplicateBypassEnabled << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain: " << fusionSplitPriorCleanTwoRealDuplicateBypassMinImageGain << '\n';
         std::cout << "fusionSplitPriorCleanTwoRealDuplicateBypassMaxBridgeValleyRatio: " << fusionSplitPriorCleanTwoRealDuplicateBypassMaxBridgeValleyRatio << '\n';
@@ -4632,6 +5301,13 @@ public:
         std::cout << "fusionSplitPriorCleanWindowSeedColumnMinZDominance: " << fusionSplitPriorCleanWindowSeedColumnMinZDominance << '\n';
         std::cout << "fusionSplitPriorCleanWindowSeedColumnMinParentShape: " << fusionSplitPriorCleanWindowSeedColumnMinParentShape << '\n';
         std::cout << "fusionSplitPriorCleanWindowSeedColumnMaxParentShape: " << fusionSplitPriorCleanWindowSeedColumnMaxParentShape << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalBypassEnabled << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSeparation << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinParentDistanceBalance << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinVoxels << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalMinSignal << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxScore << '\n';
+        std::cout << "fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance: " << fusionSplitPriorCleanWindowSeedColumnStrongTemporalMaxMidpointDistance << '\n';
         std::cout << "fusionSplitPriorRejectParentAnchoredSeedColumnDuplicate: " << fusionSplitPriorRejectParentAnchoredSeedColumnDuplicate << '\n';
         std::cout << "fusionSplitPriorParentAnchoredSeedColumnMaxSiblingLateralSeparation: " << fusionSplitPriorParentAnchoredSeedColumnMaxSiblingLateralSeparation << '\n';
         std::cout << "fusionSplitPriorParentAnchoredSeedColumnMinSiblingZSeparation: " << fusionSplitPriorParentAnchoredSeedColumnMinSiblingZSeparation << '\n';
@@ -4655,6 +5331,14 @@ public:
         std::cout << "fusionSplitPriorWeakAsymmetricCleanWindowMinVoxels: " << fusionSplitPriorWeakAsymmetricCleanWindowMinVoxels << '\n';
         std::cout << "fusionSplitPriorWeakAsymmetricCleanWindowMinSignal: " << fusionSplitPriorWeakAsymmetricCleanWindowMinSignal << '\n';
         std::cout << "fusionSplitPriorWeakAsymmetricCleanWindowMinRawScore: " << fusionSplitPriorWeakAsymmetricCleanWindowMinRawScore << '\n';
+        std::cout << "fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled: " << fusionSplitPriorRejectLowShapeUnbalancedPositiveCleanWindowPairEnabled << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowRequireTemporalRepair << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxBalancedBonus << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentShape << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMaxParentDistanceBalance << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinScore << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinRawScore << '\n';
+        std::cout << "fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation: " << fusionSplitPriorLowShapeUnbalancedPositiveCleanWindowMinSeparation << '\n';
         std::cout << "fusionSplitPriorRejectTriaxialNoBalancedCleanWindowPairEnabled: " << fusionSplitPriorRejectTriaxialNoBalancedCleanWindowPairEnabled << '\n';
         std::cout << "fusionSplitPriorTriaxialNoBalancedCleanWindowMinWindowBoth: " << fusionSplitPriorTriaxialNoBalancedCleanWindowMinWindowBoth << '\n';
         std::cout << "fusionSplitPriorTriaxialNoBalancedCleanWindowMaxBalancedBonus: " << fusionSplitPriorTriaxialNoBalancedCleanWindowMaxBalancedBonus << '\n';
@@ -4681,6 +5365,11 @@ public:
         std::cout << "fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio: " << fusionSplitPriorWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio << '\n';
         std::cout << "fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth: " << fusionSplitPriorWindowNoValleyOverlapDominatedMaxBridgeGapWidth << '\n';
         std::cout << "fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio: " << fusionSplitPriorWindowNoValleyOverlapDominatedMinBridgeValleyRatio << '\n';
+        std::cout << "fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate: " << fusionSplitPriorRejectWindowSoftPenaltyPositiveSmallGainDuplicate << '\n';
+        std::cout << "fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth: " << fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinWindowBoth << '\n';
+        std::cout << "fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain: " << fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMaxImageGain << '\n';
+        std::cout << "fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio: " << fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio << '\n';
+        std::cout << "fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff: " << fusionSplitPriorWindowSoftPenaltyPositiveSmallGainMinGateDiff << '\n';
         std::cout << "fusionSplitPriorRejectSeedZColumnNoValleyOverlapDuplicate: " << fusionSplitPriorRejectSeedZColumnNoValleyOverlapDuplicate << '\n';
         std::cout << "fusionSplitPriorSeedZColumnNoValleyMaxSeedLateralSeparation: " << fusionSplitPriorSeedZColumnNoValleyMaxSeedLateralSeparation << '\n';
         std::cout << "fusionSplitPriorSeedZColumnNoValleyMinSeedZDominance: " << fusionSplitPriorSeedZColumnNoValleyMinSeedZDominance << '\n';
@@ -4761,6 +5450,7 @@ public:
         std::cout << "fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels: " << fusionSplitPriorPrepassFallbackLowKeptRescueMinKeptPixels << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackLowKeptRescueMinShape: " << fusionSplitPriorPrepassFallbackLowKeptRescueMinShape << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackLowKeptRescueMaxScore: " << fusionSplitPriorPrepassFallbackLowKeptRescueMaxScore << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled: " << fusionSplitPriorPrepassFallbackLowKeptRescueBypassShapeGateEnabled << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackMinShape: " << fusionSplitPriorPrepassFallbackMinShape << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackMinSeparationRadiusScale: " << fusionSplitPriorPrepassFallbackMinSeparationRadiusScale << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale: " << fusionSplitPriorPrepassFallbackMaxSeparationRadiusScale << '\n';
@@ -4770,6 +5460,10 @@ public:
         std::cout << "fusionSplitPriorPrepassFallbackRejectCollapsedCenterParent: " << fusionSplitPriorPrepassFallbackRejectCollapsedCenterParent << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackBadLumenMaxScore: " << fusionSplitPriorPrepassFallbackBadLumenMaxScore << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty: " << fusionSplitPriorPrepassFallbackBadLumenMaxNeighborClaimPenalty << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled: " << fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueEnabled << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels: " << fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinKeptPixels << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape: " << fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMinShape << '\n';
+        std::cout << "fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore: " << fusionSplitPriorPrepassFallbackBadLumenLowKeptRescueMaxScore << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackMinParentAgeFrames: " << fusionSplitPriorPrepassFallbackMinParentAgeFrames << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackUseSnapshotSeedOnLargeDrift: " << fusionSplitPriorPrepassFallbackUseSnapshotSeedOnLargeDrift << '\n';
         std::cout << "fusionSplitPriorPrepassFallbackSeedMaxShift: " << fusionSplitPriorPrepassFallbackSeedMaxShift << '\n';

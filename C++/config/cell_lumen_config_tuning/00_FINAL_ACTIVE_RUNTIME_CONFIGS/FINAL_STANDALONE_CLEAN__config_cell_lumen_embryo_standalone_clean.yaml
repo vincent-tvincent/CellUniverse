@@ -9,6 +9,20 @@
 base_config: ../../C.elegans developing embryo/Best_until_now/config_embryo.yaml
 
 cell_lumen:
+  # Optional fine shape export. This does not replace PCA and does not change
+  # detected centers. When explicitly enabled it exports center anchored 3D
+  # brightness masks as CSV RLE rows for review or future scoring.
+  fineShapeModelEnabled: false
+  fineShapeModelExportCsv: false
+  fineShapeModelRadiusScale: 1.25
+  fineShapeModelMinRadius: 8.0
+  fineShapeModelMaxRadius: 64.0
+  fineShapeModelThresholdQuantile: 0.55
+  fineShapeModelThresholdFloor: 0.08
+  fineShapeModelSeedSearchRadius: 10.0
+  fineShapeModelSeedFallbackFraction: 0.85
+  fineShapeModelMaxVoxelsPerCell: 200000
+
   # Late dense frames can start with fewer qualified watershed cells even when
   # the permissive mask already contains valid dim cell regions. Trigger the
   # dense frame voxel floor earlier so frames around 150 to 194 do not lose

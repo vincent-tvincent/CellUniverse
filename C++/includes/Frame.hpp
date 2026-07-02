@@ -63,7 +63,16 @@ struct BridgeSplitProposal
     float neighborClaimPenalty = 0.0f;
     float continuationClaimSoftPenalty = 0.0f;
     std::string continuationClaimBlockerNames;
+    // Cached split-prior evidence used by later continuation repair. Keeping
+    // these fields on the proposal lets the repair stage distinguish a strong
+    // low-shape parent-anchor case from a weak noisy one without looking at GT.
+    float rankedScore = 0.0f;
+    int voxA = 0;
+    int voxB = 0;
+    float signalA = 0.0f;
+    float signalB = 0.0f;
     bool futureContinuationConflictRescued = false;
+    bool cleanTwoRealClaimRescued = false;
     bool zStackDaughterPromotion = false;
     int zStackPromotedCandidateId = -1;
     float zStackPromotionZShift = 0.0f;
@@ -280,6 +289,7 @@ public:
         bool lumenSkipNeighborBridgeCheck = false,
         bool lumenAllowWindowBackedDuplicateHandoff = false,
         float lumenParentAnchorCleanFutureDriftRescueMinImageGain = 0.0f,
+        float lumenParentAnchorRejectReanchorMinImageGain = -1.0f,
         bool lumenParentAnchorWeakGainDuplicateRescueEnabled = false,
         float lumenParentAnchorWeakGainCleanMinShape = 1.60f,
         float lumenParentAnchorWeakGainPartialMinShape = 1.70f,
@@ -341,6 +351,18 @@ public:
         float lumenParentAnchorOneRealPositiveWindowRescueMaxSoftPenaltyFraction = 0.01f,
         float lumenParentAnchorOneRealPositiveWindowRescueMaxBridgeValleyRatio = 0.65f,
         int lumenParentAnchorOneRealPositiveWindowRescueMinRealVoxels = 1000,
+        bool lumenParentAnchorOneRealZCloseNoValleyRescueEnabled = false,
+        int lumenParentAnchorOneRealZCloseNoValleyRescueMinWindowBoth = 2,
+        int lumenParentAnchorOneRealZCloseNoValleyRescueMaxWindowMissing = 0,
+        int lumenParentAnchorOneRealZCloseNoValleyRescueMaxWindowParentPersists = 0,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMinParentShape = 1.85f,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMaxParentShape = 2.60f,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMaxScore = 8.0f,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMinImageGain = 15000.0f,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMaxOverlapToImageGainRatio = 3.0f,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMinZDominance = 0.80f,
+        int lumenParentAnchorOneRealZCloseNoValleyRescueMinRealVoxels = 1000,
+        float lumenParentAnchorOneRealZCloseNoValleyRescueMinRealSignal = 80.0f,
         bool lumenCleanTwoRealDuplicateBypassEnabled = false,
         float lumenCleanTwoRealDuplicateBypassMinImageGain = 0.0f,
         float lumenCleanTwoRealDuplicateBypassMaxBridgeValleyRatio = 0.70f,
@@ -373,6 +395,15 @@ public:
         float lumenPrepassFallbackOverlapNoValleyMinParentShape = 1.70f,
         float lumenPrepassFallbackOverlapNoValleyMaxPriorScore = 8.0f,
         float lumenPrepassFallbackOverlapNoValleyMaxFinalAxisLen = -1.0f,
+        bool lumenRejectPrepassFallbackPositiveOverlapDominated = false,
+        float lumenPrepassFallbackPositiveOverlapDominatedMinOverlapToImageGainRatio = 5.0f,
+        float lumenPrepassFallbackPositiveOverlapDominatedMaxBridgeGapWidth = 2.0f,
+        bool lumenRejectPrepassFallbackLowShapeOverlapDominated = false,
+        float lumenPrepassFallbackLowShapeOverlapDominatedMaxParentShape = 1.45f,
+        float lumenPrepassFallbackLowShapeOverlapDominatedMinOverlapCost = 8000.0f,
+        float lumenPrepassFallbackLowShapeOverlapDominatedMinOverlapToImageGainRatio = 5.0f,
+        float lumenPrepassFallbackLowShapeOverlapDominatedMaxBridgeGapWidth = 0.0f,
+        float lumenPrepassFallbackLowShapeOverlapDominatedMinBridgeValleyRatio = 0.65f,
         bool lumenRejectWeakWindowNoValleyOverlapDuplicate = false,
         float lumenWeakWindowNoValleyMaxImageGain = 5000.0f,
         float lumenWeakWindowNoValleyMinOverlapCost = 4000.0f,
@@ -391,6 +422,11 @@ public:
         float lumenWindowNoValleyOverlapDominatedMinOverlapToImageGainRatio = 1.05f,
         float lumenWindowNoValleyOverlapDominatedMaxBridgeGapWidth = 0.0f,
         float lumenWindowNoValleyOverlapDominatedMinBridgeValleyRatio = 0.95f,
+        bool lumenRejectWindowSoftPenaltyPositiveSmallGainDuplicate = false,
+        int lumenWindowSoftPenaltyPositiveSmallGainMinWindowBoth = 2,
+        float lumenWindowSoftPenaltyPositiveSmallGainMaxImageGain = 3000.0f,
+        float lumenWindowSoftPenaltyPositiveSmallGainMinSoftPenaltyToImageGainRatio = 1.0f,
+        float lumenWindowSoftPenaltyPositiveSmallGainMinGateDiff = 0.0f,
         bool lumenRejectSeedZColumnNoValleyOverlapDuplicate = false,
         float lumenSeedZColumnNoValleyMaxSeedLateralSeparation = 7.0f,
         float lumenSeedZColumnNoValleyMinSeedZDominance = 0.92f,

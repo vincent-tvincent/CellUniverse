@@ -11,7 +11,7 @@ base_config: config_celluniverse2_tuning.yaml
 # evidence comes from the map algebra below.
 simulation:
   celluniverse3_enabled: true
-  celluniverse3_window_radius: 15
+  celluniverse3_window_radius: 20
   celluniverse3_window_overlap_radius: 2
   celluniverse3_window_background_percentile: 95.0
   celluniverse3_window_dual_background_enabled: false
@@ -23,17 +23,17 @@ simulation:
   celluniverse3_window_min_signal: 0.012
   celluniverse3_window_sum_gamma: 0.85
   celluniverse3_window_sum_epsilon: 0.05
-  celluniverse3_window_initial_bright_fraction: 0.78
-  celluniverse3_window_recursive_bright_fraction: 0.55
+  celluniverse3_window_initial_bright_fraction: 0.20
+  celluniverse3_window_recursive_bright_fraction: 0.25
   celluniverse3_window_max_recursive_depth: 2
   celluniverse3_window_export_debug: false
   export_perturb_cell_center_debug_images: false
   celluniverse3_window_merge_centers: false
-  # Keep CellUniverse3's 15-frame window maps, but discard prepared TIFF stacks
+  # Keep CellUniverse3's 20-frame window maps, but discard prepared TIFF stacks
   # after map construction unless they are still near enough for immediate
   # future validation.
   celluniverse3_frame_cache_prune_enabled: true
-  celluniverse3_frame_cache_keep_future: 12
+  celluniverse3_frame_cache_keep_future: 20
   celluniverse3_frame_cache_min_available_gb: 6.0
   celluniverse3_frame_cache_pressure_keep_future: 4
   # Exact disk-backed prepared-frame cache for CellUniverse3 only. This lets
@@ -418,7 +418,7 @@ prob:
   celluniverse3_delayed_missing_daughter_enabled: true
   celluniverse3_delayed_missing_daughter_memory_frames: 8
   celluniverse3_delayed_missing_daughter_min_memory_shape: 1.80
-  celluniverse3_delayed_missing_daughter_max_current_shape: 1.65
+  celluniverse3_delayed_missing_daughter_max_current_shape: 2.05
   celluniverse3_delayed_missing_daughter_search_radius_scale: 4.4
   celluniverse3_delayed_missing_daughter_min_distance_scale: 1.20
   celluniverse3_delayed_missing_daughter_max_distance_scale: 4.8

@@ -220,6 +220,11 @@ int main(int argc, char *argv[])
     // Suppress OpenCV TIFF warnings (ColorMap tag noise from microscopy TIFFs)
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
 
+    // Keep worker logs durable through backend pipes. This is useful when a
+    // native process is killed before buffered '\n' diagnostics flush.
+    std::cout.setf(std::ios::unitbuf);
+    std::cerr.setf(std::ios::unitbuf);
+
     // Note: progress/status lines use std::endl for immediate visibility
     // through pipes (tee). Inner-loop diagnostics use '\n' for performance.
 

@@ -908,7 +908,11 @@ ImageStack runN2V2PreprocessingFromRawTiff(const std::string &imageFile,
     static std::unique_ptr<n2v2::N2V2Preprocessor> runtime;
     static std::string runtimeKey;
 
+    const fs::path imagePath(imageFile);
+    const std::string frameName = imagePath.filename().string();
+    log << "[N2V2FrameLoad] frame=" << frameName << " stage=runtime_key_begin" << std::endl;
     const std::string key = makeN2V2RuntimeKey(simulation);
+    log << "[N2V2FrameLoad] frame=" << frameName << " stage=runtime_key_done" << std::endl;
     if (!runtime || runtimeKey != key)
     {
         log << "[N2V2] load_runtime"
@@ -919,17 +923,23 @@ ImageStack runN2V2PreprocessingFromRawTiff(const std::string &imageFile,
         runtime = std::make_unique<n2v2::N2V2Preprocessor>(makeN2V2Config(simulation));
         runtimeKey = key;
     }
+    log << "[N2V2FrameLoad] frame=" << frameName << " stage=runtime_ready" << std::endl;
 
-    const fs::path imagePath(imageFile);
-    log << "[PreprocessingPipeline] frame=" << imagePath.filename().string()
+    log << "[PreprocessingPipeline] frame=" << frameName
         << " pipeline=n2v2"
         << " legacy_pipeline=off"
         << " model=" << simulation.n2v2_model_path
         << " network_enabled=" << simulation.n2v2_enable_network
         << std::endl;
 
+    log << "[N2V2FrameLoad] frame=" << frameName << " stage=raw_tiff_begin" << std::endl;
     ImageStack rawStack = n2v2::loadTiffStack(imagePath);
+    log << "[N2V2FrameLoad] frame=" << frameName
+        << " stage=raw_tiff_done slices=" << rawStack.size() << std::endl;
+    log << "[N2V2FrameLoad] frame=" << frameName << " stage=process_stack_begin" << std::endl;
     n2v2::PreprocessResult result = runtime->processStack(rawStack, imagePath, log);
+    log << "[N2V2FrameLoad] frame=" << frameName
+        << " stage=process_stack_done slices=" << result.stack.size() << std::endl;
     return normalizeN2V2RuntimeStack(result.stack, imageFile, log);
 }
 #endif
@@ -1024,11 +1034,18 @@ ImageStack loadN2V2FrameFromRawTiff(const std::string &imageFile,
                                        std::ostream &log)
 {
 #if CELLUNIVERSE_HAS_N2V2_PREPROCESS
+    const std::string frameName = fs::path(imageFile).filename().string();
+    log << "[N2V2FrameLoad] frame=" << frameName << " stage=enter" << std::endl;
     ImageStack normalized = runN2V2PreprocessingFromRawTiff(
         imageFile,
         config.simulation,
         log);
-    return finalizeExternalPreprocessedStack(normalized, imageFile, config, log);
+    log << "[N2V2FrameLoad] frame=" << frameName
+        << " stage=normalize_done slices=" << normalized.size() << std::endl;
+    ImageStack finalized = finalizeExternalPreprocessedStack(normalized, imageFile, config, log);
+    log << "[N2V2FrameLoad] frame=" << frameName
+        << " stage=finalize_done slices=" << finalized.size() << std::endl;
+    return finalized;
 #else
     (void)imageFile;
     (void)config;

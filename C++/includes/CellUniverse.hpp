@@ -180,6 +180,12 @@ private:
        cv::Point3f splitAxis{0.0f, 0.0f, 0.0f};
        float parentMaxRadius = 0.0f;
        float parentShape = 1.0f;
+       bool hasActivityRegionHint = false;
+       cv::Point3f activityRegionCenter{0.0f, 0.0f, 0.0f};
+       cv::Point3f activityRegionAxis{0.0f, 0.0f, 0.0f};
+       float activityRegionRadius = 0.0f;
+       float activityRegionBrightness = 0.0f;
+       float activityRegionScore = std::numeric_limits<float>::max();
    };
    std::unordered_map<std::string, CellUniverse3MissedSplitMemory>
        cellUniverse3MissedSplitMemoryByCell;

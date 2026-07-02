@@ -126,6 +126,10 @@ struct BridgeSplitProposal
     float cellUniverse3MapUSupportD2 = 0.0f;
     bool cellUniverse3MapD1InsideTunnel = false;
     bool cellUniverse3MapD2InsideTunnel = false;
+    bool cellUniverse3MapFutureD1InsideTunnel = false;
+    bool cellUniverse3MapFutureD2InsideTunnel = false;
+    bool cellUniverse3MapAxialSameTunnelSupport = false;
+    float cellUniverse3MapFutureAxisAlignment = 0.0f;
     bool cellUniverse3MapTunnelSnapApplied = false;
     float cellUniverse3MapTunnelSnapD1Distance = 0.0f;
     float cellUniverse3MapTunnelSnapD2Distance = 0.0f;

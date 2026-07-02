@@ -12,16 +12,16 @@ simulation:
   parallel_threads: 32
   parallel_min_slices: 2
   n2v2_preprocess:
-    device: cuda
-    inference_batch_size: 64
+    device: cpu
+    inference_batch_size: 24
 
-  # With 500 GB RAM, keep the whole 15-frame future context resident and avoid
+  # With 500 GB RAM, keep the whole 20-frame future context resident and avoid
   # aggressive pressure pruning. This should reduce repeated frame reloads and
   # window-map rebuild churn compared with the workstation profile.
   celluniverse3_frame_cache_prune_enabled: true
-  celluniverse3_frame_cache_keep_future: 15
+  celluniverse3_frame_cache_keep_future: 20
   celluniverse3_frame_cache_min_available_gb: 64.0
-  celluniverse3_frame_cache_pressure_keep_future: 15
+  celluniverse3_frame_cache_pressure_keep_future: 20
 
   # Cache signal maps too. This uses more disk per prepared frame, but avoids
   # rebuilding signal maps every time a cached prepared frame is reused.

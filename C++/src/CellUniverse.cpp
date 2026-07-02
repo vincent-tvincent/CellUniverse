@@ -6543,9 +6543,13 @@ CellUniverse::PreparedFrameStack CellUniverse::loadPreparedFrameStack(int frameI
         throw std::invalid_argument("loadPreparedFrameStack: invalid frame index");
     }
 
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=enter" << std::endl;
     std::ostringstream prepareLog;
     PreparedFrameStack prepared;
     BaseConfig preprocessConfig = configForPreprocessing(frameIndex);
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=config_ready" << std::endl;
     if (config.simulation.n2v2_contrast_gamma_split_decay_enabled) {
         std::cout << "[Gamma Split Decay] frame=" << (firstFrame + frameIndex)
                   << " accepted_splits_total=" << cumulativeAcceptedSplits
@@ -6559,6 +6563,8 @@ CellUniverse::PreparedFrameStack CellUniverse::loadPreparedFrameStack(int frameI
                   << '\n';
     }
 
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=cache_lookup" << std::endl;
     if (loadPreparedFrameStackFromDiskCache(frameIndex, preprocessConfig, prepared)) {
         if (prepared.signalMap.empty() &&
             preprocessConfig.simulation.signal_map_enabled) {
@@ -6578,14 +6584,21 @@ CellUniverse::PreparedFrameStack CellUniverse::loadPreparedFrameStack(int frameI
                                     preprocessConfig.simulation.export_frame_png,
                                     preprocessConfig.simulation.export_frame_tiff);
         }
+        std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+                  << " stage=cache_hit_return" << std::endl;
         return prepared;
     }
 
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=image_load_begin" << std::endl;
     prepared.realFrame =
         ImageHandler::loadFrame(imagePaths[static_cast<size_t>(frameIndex)].string(),
                                 preprocessConfig,
                                 &prepareLog);
     std::cout << prepareLog.str();
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=image_load_done slices=" << prepared.realFrame.size()
+              << std::endl;
     if (usesIterativePostPreprocessing(preprocessConfig.simulation)) {
         if (preprocessConfig.simulation.edge_brightness_alignment_enabled &&
             !edgeBrightnessAlignmentTargetInitialized) {
@@ -6629,13 +6642,22 @@ CellUniverse::PreparedFrameStack CellUniverse::loadPreparedFrameStack(int frameI
                   << " skipped_for_mode=" << preprocessConfig.simulation.preprocess_mode
                   << '\n';
     }
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=signal_map_begin" << std::endl;
     prepared.signalMap = buildSignalMapStack(
         prepared.realFrame,
         preprocessConfig.simulation,
         imagePaths[static_cast<size_t>(frameIndex)],
         std::cout);
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=signal_map_done slices=" << prepared.signalMap.size()
+              << std::endl;
 
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=cache_write_begin" << std::endl;
     savePreparedFrameStackToDiskCache(frameIndex, preprocessConfig, prepared);
+    std::cout << "[Prepared Frame Load] frame=" << (firstFrame + frameIndex)
+              << " stage=cache_write_done" << std::endl;
 
     if (preprocessConfig.simulation.export_preprocessed_images) {
         exportPreprocessedStack(prepared.realFrame, fs::path(outputPath),
@@ -13333,6 +13355,10 @@ void CellUniverse::optimize(int frameIndex)
             proposal.cellUniverse3MapUSupportD2 = 0.0f;
             proposal.cellUniverse3MapD1InsideTunnel = false;
             proposal.cellUniverse3MapD2InsideTunnel = false;
+            proposal.cellUniverse3MapFutureD1InsideTunnel = false;
+            proposal.cellUniverse3MapFutureD2InsideTunnel = false;
+            proposal.cellUniverse3MapAxialSameTunnelSupport = false;
+            proposal.cellUniverse3MapFutureAxisAlignment = 0.0f;
             proposal.cellUniverse3MapTunnelSnapApplied = false;
             proposal.cellUniverse3MapTunnelSnapD1Distance = 0.0f;
             proposal.cellUniverse3MapTunnelSnapD2Distance = 0.0f;
@@ -13614,6 +13640,30 @@ void CellUniverse::optimize(int frameIndex)
                 insideParentTunnel(proposal.d1Pos);
             proposal.cellUniverse3MapD2InsideTunnel =
                 insideParentTunnel(proposal.d2Pos);
+            if (proposal.windowBestMatchedOffset > 0) {
+                proposal.cellUniverse3MapFutureD1InsideTunnel =
+                    insideParentTunnel(proposal.windowBestMatchedD1Pos);
+                proposal.cellUniverse3MapFutureD2InsideTunnel =
+                    insideParentTunnel(proposal.windowBestMatchedD2Pos);
+                const cv::Point3f futureAxisRaw =
+                    proposal.windowBestMatchedD2Pos - proposal.windowBestMatchedD1Pos;
+                const float futureAxisNorm =
+                    static_cast<float>(cv::norm(futureAxisRaw));
+                if (futureAxisNorm > 1e-6f && mapAxisNorm > 1e-6f) {
+                    const cv::Point3f futureAxis =
+                        futureAxisRaw * (1.0f / futureAxisNorm);
+                    proposal.cellUniverse3MapFutureAxisAlignment =
+                        std::abs(futureAxis.dot(proposal.cellUniverse3MapAxis));
+                }
+                const float minAlignment = std::cos(
+                    config.simulation
+                        .celluniverse3_window_map_max_axis_angle_degrees *
+                    static_cast<float>(M_PI) / 180.0f);
+                proposal.cellUniverse3MapAxialSameTunnelSupport =
+                    proposal.cellUniverse3MapFutureD1InsideTunnel &&
+                    proposal.cellUniverse3MapFutureD2InsideTunnel &&
+                    proposal.cellUniverse3MapFutureAxisAlignment >= minAlignment;
+            }
             const float minUSupport =
                 config.simulation.celluniverse3_window_map_min_u_support;
             if (minUSupport > 0.0f) {
@@ -13865,6 +13915,14 @@ void CellUniverse::optimize(int frameIndex)
                       << proposal.cellUniverse3MapTunnelSnapD1Distance
                       << " tunnelSnapD2="
                       << proposal.cellUniverse3MapTunnelSnapD2Distance
+                      << " futureTunnelD1="
+                      << (proposal.cellUniverse3MapFutureD1InsideTunnel ? 1 : 0)
+                      << " futureTunnelD2="
+                      << (proposal.cellUniverse3MapFutureD2InsideTunnel ? 1 : 0)
+                      << " axialSameTunnel="
+                      << (proposal.cellUniverse3MapAxialSameTunnelSupport ? 1 : 0)
+                      << " futureAxisAlignment="
+                      << proposal.cellUniverse3MapFutureAxisAlignment
                       << " axisAlignment="
                       << proposal.cellUniverse3MapAxisAlignment
                       << " centerUnits="
@@ -14803,32 +14861,128 @@ void CellUniverse::optimize(int frameIndex)
                 proposal.cellUniverse3MapPriorEvaluated &&
                 (!proposal.cellUniverse3MapD1InsideTunnel ||
                  !proposal.cellUniverse3MapD2InsideTunnel)) {
-                std::ostringstream detail;
-                detail << "tunnelD1="
-                       << (proposal.cellUniverse3MapD1InsideTunnel ? 1 : 0)
-                       << " tunnelD2="
-                       << (proposal.cellUniverse3MapD2InsideTunnel ? 1 : 0)
-                       << " tunnelNeighborBoxes="
-                       << config.simulation
-                              .celluniverse3_window_map_tunnel_center_neighbor_boxes
-                       << " mapUSupportD1="
-                       << proposal.cellUniverse3MapUSupportD1
-                       << " mapUSupportD2="
-                       << proposal.cellUniverse3MapUSupportD2
-                       << " mapRegionPenalty="
-                       << proposal.cellUniverse3MapRegionPenalty
-                       << " mapConfident="
-                       << (proposal.cellUniverse3MapPriorConfident ? 1 : 0)
-                       << " mapProposal="
-                       << (proposal.cellUniverse3MapProposal ? 1 : 0)
-                       << " tunnelSnap="
-                       << (proposal.cellUniverse3MapTunnelSnapApplied ? 1 : 0)
-                       << " tunnelSnapD1="
-                       << proposal.cellUniverse3MapTunnelSnapD1Distance
-                       << " tunnelSnapD2="
-                       << proposal.cellUniverse3MapTunnelSnapD2Distance;
-                return rejectProposal("celluniverse3_split_outside_u_tunnel",
-                                      detail.str());
+                const bool cleanFutureAxialTunnelSplit =
+                    proposal.cellUniverse3MapAxialSameTunnelSupport &&
+                    proposal.windowBothDaughtersSupported >= 2 &&
+                    proposal.windowMissingDaughterCount == 0 &&
+                    proposal.windowParentPersists == 0 &&
+                    proposal.windowBestMatchedMinBrightness >=
+                        config.prob.pca_bridge_future_window_rod_tip_balance_min_brightness &&
+                    daughterSep >= minBioSep &&
+                    proposal.parentDistanceBalance >=
+                        config.prob.pca_bridge_future_window_parent_balance_rescue_min;
+                const bool futureConfirmedOutsideTunnelSplit =
+                    (source == "signal_center_split" ||
+                     source == "pca_bridge_cut") &&
+                    !proposal.cellUniverse3MapD1InsideTunnel &&
+                    !proposal.cellUniverse3MapD2InsideTunnel &&
+                    proposal.windowBothDaughtersSupported >= 2 &&
+                    proposal.windowMissingDaughterCount == 0 &&
+                    proposal.windowParentPersists == 0 &&
+                    proposal.windowBestMatchedMinBrightness >=
+                        config.prob.pca_bridge_future_window_rod_tip_balance_min_brightness &&
+                    daughterSep >= minBioSep &&
+                    proposal.parentDistanceBalance >=
+                        config.prob.pca_bridge_future_window_parent_balance_rescue_min &&
+                    proposal.cellUniverse3MapFutureAxisAlignment >= 0.65f &&
+                    proposal.cellUniverse3MapRegionPenalty <= 2.0f;
+                const float currentCenterTrustMaxSeedDistance =
+                    std::max(config.prob.pca_bridge_future_window_match_distance,
+                             0.75f * parentMaxR);
+                const bool currentRealCenterSupportedSplit =
+                    source == "signal_center_split" &&
+                    proposal.centerSnapApplied &&
+                    !proposal.immediateFutureCenterBacked &&
+                    proposal.centerSnapMaxSeedDistance <=
+                        currentCenterTrustMaxSeedDistance &&
+                    proposal.centerSnapScore <= 1.25f &&
+                    proposal.windowBothDaughtersSupported >= 1 &&
+                    proposal.windowMissingDaughterCount <= 1 &&
+                    proposal.windowParentPersists == 0 &&
+                    proposal.windowBestMatchedMinBrightness >=
+                        0.5f * config.prob.pca_bridge_future_window_rod_tip_balance_min_brightness &&
+                    daughterSep >= minBioSep &&
+                    proposal.parentDistanceBalance >=
+                        config.prob.pca_bridge_future_window_parent_balance_rescue_min &&
+                    proposal.cellUniverse3MapRegionPenalty <= 2.0f;
+                if (cleanFutureAxialTunnelSplit ||
+                    futureConfirmedOutsideTunnelSplit ||
+                    currentRealCenterSupportedSplit) {
+                    std::cout << "[CellUniverse3 Axial Tunnel Split Bypass] frame "
+                              << displayFrame
+                              << " source=" << source
+                              << " parent=" << parent.getName()
+                              << " reason="
+                              << (cleanFutureAxialTunnelSplit
+                                      ? "clean_future_centers_inside_same_tunnel"
+                                      : (futureConfirmedOutsideTunnelSplit
+                                             ? "future_confirmed_outside_tunnel_path_split"
+                                             : "current_real_center_supported_tunnel_path_split"))
+                              << " tunnelD1="
+                              << (proposal.cellUniverse3MapD1InsideTunnel ? 1 : 0)
+                              << " tunnelD2="
+                              << (proposal.cellUniverse3MapD2InsideTunnel ? 1 : 0)
+                              << " futureTunnelD1="
+                              << (proposal.cellUniverse3MapFutureD1InsideTunnel ? 1 : 0)
+                              << " futureTunnelD2="
+                              << (proposal.cellUniverse3MapFutureD2InsideTunnel ? 1 : 0)
+                              << " futureAxisAlignment="
+                              << proposal.cellUniverse3MapFutureAxisAlignment
+                              << " mapRegionPenalty="
+                              << proposal.cellUniverse3MapRegionPenalty
+                              << " futureBoth="
+                              << proposal.windowBothDaughtersSupported
+                              << " futureBrightness="
+                              << proposal.windowBestMatchedMinBrightness
+                              << " centerSnap="
+                              << (proposal.centerSnapApplied ? 1 : 0)
+                              << " immediateFutureCenter="
+                              << (proposal.immediateFutureCenterBacked ? 1 : 0)
+                              << " centerSnapDistance="
+                              << proposal.centerSnapMaxSeedDistance
+                              << " centerSnapScore="
+                              << proposal.centerSnapScore
+                              << " parentDistBalance="
+                              << proposal.parentDistanceBalance
+                              << " sep=" << daughterSep
+                              << " minBioSep=" << minBioSep
+                              << std::endl;
+                } else {
+                    std::ostringstream detail;
+                    detail << "tunnelD1="
+                           << (proposal.cellUniverse3MapD1InsideTunnel ? 1 : 0)
+                           << " tunnelD2="
+                           << (proposal.cellUniverse3MapD2InsideTunnel ? 1 : 0)
+                           << " tunnelNeighborBoxes="
+                           << config.simulation
+                                  .celluniverse3_window_map_tunnel_center_neighbor_boxes
+                           << " mapUSupportD1="
+                           << proposal.cellUniverse3MapUSupportD1
+                           << " mapUSupportD2="
+                           << proposal.cellUniverse3MapUSupportD2
+                           << " futureTunnelD1="
+                           << (proposal.cellUniverse3MapFutureD1InsideTunnel ? 1 : 0)
+                           << " futureTunnelD2="
+                           << (proposal.cellUniverse3MapFutureD2InsideTunnel ? 1 : 0)
+                           << " axialSameTunnel="
+                           << (proposal.cellUniverse3MapAxialSameTunnelSupport ? 1 : 0)
+                           << " futureAxisAlignment="
+                           << proposal.cellUniverse3MapFutureAxisAlignment
+                           << " mapRegionPenalty="
+                           << proposal.cellUniverse3MapRegionPenalty
+                           << " mapConfident="
+                           << (proposal.cellUniverse3MapPriorConfident ? 1 : 0)
+                           << " mapProposal="
+                           << (proposal.cellUniverse3MapProposal ? 1 : 0)
+                           << " tunnelSnap="
+                           << (proposal.cellUniverse3MapTunnelSnapApplied ? 1 : 0)
+                           << " tunnelSnapD1="
+                           << proposal.cellUniverse3MapTunnelSnapD1Distance
+                           << " tunnelSnapD2="
+                           << proposal.cellUniverse3MapTunnelSnapD2Distance;
+                    return rejectProposal("celluniverse3_split_outside_u_tunnel",
+                                          detail.str());
+                }
             }
 
             if (source == "pca_bridge_cut" &&
@@ -17840,6 +17994,199 @@ void CellUniverse::optimize(int frameIndex)
                 config.prob
                     .celluniverse3_delayed_missing_daughter_relaxed_score_limit);
 
+        struct ActivityRegionAttentionPick {
+            bool valid = false;
+            cv::Point3f center{0.0f, 0.0f, 0.0f};
+            cv::Point3f axis{0.0f, 0.0f, 0.0f};
+            float radius = 0.0f;
+            float brightness = 0.0f;
+            float axisAlignment = 1.0f;
+            float distanceToParent = 0.0f;
+            float score = std::numeric_limits<float>::max();
+            size_t indexA = 0;
+            size_t indexB = 0;
+        };
+
+        int activityRegionAttentionMarked = 0;
+        int activityRegionAttentionConsidered = 0;
+        if (activeCenters.size() > firstWindowCenterIndex) {
+            for (const Ellipsoid &cell : frame.cells) {
+                if (cell.isTrash()) continue;
+                const std::string &cellName = cell.getName();
+                if (signalCenterSplitProposals.count(cellName) > 0 ||
+                    rodTipSplitFallbackProposals.count(cellName) > 0 ||
+                    cellUniverse2SplitCoolingDown(cellName)) {
+                    continue;
+                }
+                auto snapIt = previousSnapshots.find(cellName);
+                if (snapIt == previousSnapshots.end() || !snapIt->second.valid) {
+                    continue;
+                }
+
+                const float parentShape =
+                    std::max(cell.shapeElongation(), snapIt->second.shapeElongation);
+                if (parentShape <
+                    config.prob.celluniverse3_delayed_missing_daughter_min_memory_shape) {
+                    continue;
+                }
+                const float parentMaxR = std::max({
+                    snapIt->second.aRadius, snapIt->second.bRadius,
+                    snapIt->second.cRadius, cell.getARadius(),
+                    cell.getBRadius(), cell.getCRadius(), 1.0f});
+                const BoundingBox3D bbox = frame.computeBboxAtPoint(
+                    snapIt->second.position,
+                    parentMaxR,
+                    std::max(config.prob.bbox_margin_scale, 1.80f));
+                if (!bbox.isValid()) continue;
+
+                cv::Point3f splitAxis = snapIt->second.splitAxisDir;
+                float splitAxisNorm = static_cast<float>(cv::norm(splitAxis));
+                if (splitAxisNorm <= 1e-6f) {
+                    float axisLength = 0.0f;
+                    cell.worldSplitAxis(splitAxis, axisLength);
+                    splitAxisNorm = static_cast<float>(cv::norm(splitAxis));
+                }
+                const bool hasSplitAxis = splitAxisNorm > 1e-6f;
+                if (hasSplitAxis) {
+                    splitAxis *= (1.0f / splitAxisNorm);
+                }
+
+                ActivityRegionAttentionPick bestRegion;
+                for (size_t ai = firstWindowCenterIndex;
+                     ai < activeCenters.size(); ++ai) {
+                    const Frame::SignalCenter &a = activeCenters[ai];
+                    if (!pointInsideBbox(a.position, bbox) ||
+                        a.brightness < relaxedMinBrightness ||
+                        a.boxes < relaxedMinBoxes) {
+                        continue;
+                    }
+
+                    ActivityRegionAttentionPick single;
+                    single.valid = true;
+                    single.center = a.position;
+                    single.axis = hasSplitAxis ? splitAxis : cv::Point3f(0.0f, 0.0f, 0.0f);
+                    single.radius = std::max(parentMaxR, 1.25f * parentMaxR);
+                    single.brightness = a.brightness;
+                    single.distanceToParent = static_cast<float>(
+                        cv::norm(a.position - snapIt->second.position));
+                    if (single.distanceToParent <= 1.80f * parentMaxR) {
+                        ++activityRegionAttentionConsidered;
+                        single.score =
+                            single.distanceToParent / std::max(1.0f, parentMaxR) -
+                            0.25f * single.brightness -
+                            0.00005f * static_cast<float>(a.boxes);
+                        single.indexA = ai;
+                        single.indexB = ai;
+                        if (single.score < bestRegion.score) {
+                            bestRegion = single;
+                        }
+                    }
+
+                    for (size_t bi = ai + 1;
+                         bi < activeCenters.size(); ++bi) {
+                        const Frame::SignalCenter &b = activeCenters[bi];
+                        if (!pointInsideBbox(b.position, bbox) ||
+                            b.brightness < relaxedMinBrightness ||
+                            b.boxes < relaxedMinBoxes) {
+                            continue;
+                        }
+                        ++activityRegionAttentionConsidered;
+                        const cv::Point3f delta = b.position - a.position;
+                        const float sep = static_cast<float>(cv::norm(delta));
+                        const float minSep =
+                            std::max(1.0f, relaxedMinDistanceScale * parentMaxR);
+                        const float maxSep =
+                            std::max(minSep, relaxedMaxDistanceScale * parentMaxR);
+                        if (sep < minSep || sep > maxSep) continue;
+                        const cv::Point3f midpoint = 0.5f * (a.position + b.position);
+                        const float distanceToParent = static_cast<float>(
+                            cv::norm(midpoint - snapIt->second.position));
+                        if (distanceToParent > 1.60f * parentMaxR) continue;
+                        float axisAlignment = 1.0f;
+                        cv::Point3f regionAxis =
+                            sep > 1e-6f ? delta * (1.0f / sep) : cv::Point3f(0.0f, 0.0f, 0.0f);
+                        if (hasSplitAxis && sep > 1e-6f) {
+                            axisAlignment = std::abs(delta.dot(splitAxis) / sep);
+                            if (axisAlignment < std::max(0.30f, minAxisAlignment)) {
+                                continue;
+                            }
+                        }
+                        const float brightness = a.brightness + b.brightness;
+                        const float score =
+                            distanceToParent / std::max(1.0f, parentMaxR) +
+                            0.20f * std::abs(sep / std::max(1.0f, parentMaxR) - 1.65f) +
+                            0.35f * (1.0f - axisAlignment) -
+                            0.25f * brightness -
+                            0.00005f * static_cast<float>(a.boxes + b.boxes);
+                        if (score >= bestRegion.score) continue;
+                        bestRegion.valid = true;
+                        bestRegion.center = midpoint;
+                        bestRegion.axis = regionAxis;
+                        bestRegion.radius = std::max(parentMaxR, 0.65f * sep);
+                        bestRegion.brightness = brightness;
+                        bestRegion.axisAlignment = axisAlignment;
+                        bestRegion.distanceToParent = distanceToParent;
+                        bestRegion.score = score;
+                        bestRegion.indexA = ai;
+                        bestRegion.indexB = bi;
+                    }
+                }
+                if (!bestRegion.valid) continue;
+
+                auto existingIt = cellUniverse3MissedSplitMemoryByCell.find(cellName);
+                const int memoryFramesForRegion = std::max(
+                    1,
+                    config.prob.celluniverse3_delayed_missing_daughter_memory_frames);
+                if (existingIt != cellUniverse3MissedSplitMemoryByCell.end()) {
+                    const int existingAge = frameIndex - existingIt->second.frameIndex;
+                    if (existingAge >= 0 &&
+                        existingAge <= memoryFramesForRegion &&
+                        existingIt->second.hasActivityRegionHint &&
+                        existingIt->second.activityRegionScore <= bestRegion.score) {
+                        continue;
+                    }
+                }
+
+                CellUniverse3MissedSplitMemory memory;
+                memory.frameIndex = frameIndex;
+                memory.parentPosition = snapIt->second.position;
+                memory.splitAxis = hasSplitAxis ? splitAxis : bestRegion.axis;
+                memory.parentMaxRadius = parentMaxR;
+                memory.parentShape = parentShape;
+                memory.hasActivityRegionHint = true;
+                memory.activityRegionCenter = bestRegion.center;
+                memory.activityRegionAxis = bestRegion.axis;
+                memory.activityRegionRadius = bestRegion.radius;
+                memory.activityRegionBrightness = bestRegion.brightness;
+                memory.activityRegionScore = bestRegion.score;
+                cellUniverse3MissedSplitMemoryByCell[cellName] = memory;
+                ++activityRegionAttentionMarked;
+                std::cout << "[CellUniverse3 Activity Region Attention] frame "
+                          << displayFrame
+                          << " cell=" << cellName
+                          << " centerA=" << bestRegion.indexA
+                          << " centerB=" << bestRegion.indexB
+                          << " parentShape=" << parentShape
+                          << " regionCenter=(" << bestRegion.center.x << ","
+                          << bestRegion.center.y << "," << bestRegion.center.z << ")"
+                          << " radius=" << bestRegion.radius
+                          << " distanceToParent=" << bestRegion.distanceToParent
+                          << " axisAlignment=" << bestRegion.axisAlignment
+                          << " brightness=" << bestRegion.brightness
+                          << " score=" << bestRegion.score
+                          << std::endl;
+            }
+        }
+        if (activityRegionAttentionConsidered > 0 || activityRegionAttentionMarked > 0) {
+            std::cout << "[CellUniverse3 Activity Region Attention Summary] frame "
+                      << displayFrame
+                      << " considered=" << activityRegionAttentionConsidered
+                      << " marked=" << activityRegionAttentionMarked
+                      << " windowCenters="
+                      << (activeCenters.size() - firstWindowCenterIndex)
+                      << std::endl;
+        }
+
         struct DelayedMissingPick {
             bool valid = false;
             bool relaxed = false;
@@ -18006,12 +18353,35 @@ void CellUniverse::optimize(int frameIndex)
                     continue;
                 }
 
+                float activityRegionAttentionBonus = 0.0f;
+                if (memory.hasActivityRegionHint) {
+                    const float regionDistance = static_cast<float>(
+                        cv::norm(center.position - memory.activityRegionCenter));
+                    const float regionCloseness = std::clamp(
+                        1.0f - regionDistance /
+                                   std::max(1.0f, memory.activityRegionRadius),
+                        0.0f,
+                        1.0f);
+                    float regionAxisAlignment = axisAlignment;
+                    const float activityAxisNorm = static_cast<float>(
+                        cv::norm(memory.activityRegionAxis));
+                    if (activityAxisNorm > 1e-6f && distCurrent > 1e-6f) {
+                        const cv::Point3f activityAxis =
+                            memory.activityRegionAxis * (1.0f / activityAxisNorm);
+                        regionAxisAlignment = std::abs(
+                            (center.position - currentPos).dot(activityAxis) / distCurrent);
+                    }
+                    activityRegionAttentionBonus =
+                        0.35f * regionCloseness +
+                        0.20f * std::clamp(regionAxisAlignment, 0.0f, 1.0f);
+                }
                 const float score =
                     distCurrent / std::max(1.0f, parentMaxR) +
                     scoreMemoryAgeWeight * static_cast<float>(memoryAge) +
                     axisWeight * (1.0f - axisAlignment) -
                     scoreBrightnessWeight * center.brightness -
-                    scoreBoxWeight * static_cast<float>(center.boxes);
+                    scoreBoxWeight * static_cast<float>(center.boxes) -
+                    activityRegionAttentionBonus;
                 if (score >= bestPick.score) {
                     continue;
                 }
@@ -18121,6 +18491,28 @@ void CellUniverse::optimize(int frameIndex)
                         continue;
                     }
 
+                    float activityRegionAttentionBonus = 0.0f;
+                    if (memory.hasActivityRegionHint) {
+                        const float regionDistance = static_cast<float>(
+                            cv::norm(center.position - memory.activityRegionCenter));
+                        const float regionCloseness = std::clamp(
+                            1.0f - regionDistance /
+                                       std::max(1.0f, 1.25f * memory.activityRegionRadius),
+                            0.0f,
+                            1.0f);
+                        float regionAxisAlignment = axisAlignment;
+                        const float activityAxisNorm = static_cast<float>(
+                            cv::norm(memory.activityRegionAxis));
+                        if (activityAxisNorm > 1e-6f && distCurrent > 1e-6f) {
+                            const cv::Point3f activityAxis =
+                                memory.activityRegionAxis * (1.0f / activityAxisNorm);
+                            regionAxisAlignment = std::abs(
+                                (center.position - currentPos).dot(activityAxis) / distCurrent);
+                        }
+                        activityRegionAttentionBonus =
+                            0.30f * regionCloseness +
+                            0.15f * std::clamp(regionAxisAlignment, 0.0f, 1.0f);
+                    }
                     const float score =
                         distCurrent / std::max(1.0f, parentMaxR) +
                         relaxedScoreMemoryAgeWeight *
@@ -18129,7 +18521,8 @@ void CellUniverse::optimize(int frameIndex)
                         relaxedOtherClaimPenaltyWeight * otherClaimPenalty -
                         relaxedScoreBrightnessWeight * center.brightness -
                         relaxedScoreBoxWeight *
-                            static_cast<float>(center.boxes);
+                            static_cast<float>(center.boxes) -
+                        activityRegionAttentionBonus;
                     if (score > relaxedScoreLimit) {
                         ++relaxedRejectedScore;
                         continue;
@@ -18241,6 +18634,9 @@ void CellUniverse::optimize(int frameIndex)
                       << " memoryAge=" << memoryAge
                       << " currentShape=" << currentShape
                       << " memoryShape=" << memory.parentShape
+                      << " activityRegionHint="
+                      << (memory.hasActivityRegionHint ? 1 : 0)
+                      << " activityRegionScore=" << memory.activityRegionScore
                       << " centerIndex=" << bestPick.centerIndex
                       << " relaxed=" << (bestPick.relaxed ? 1 : 0)
                       << " score=" << bestPick.score

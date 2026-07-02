@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <sstream>
 #include <thread>
 #ifdef _OPENMP
 #include <omp.h>
@@ -113,6 +114,63 @@ void applyRuntimeOverrides(BaseConfig &config)
               << " realtime=iterations_per_second"
               << " note=split_attempts_are_reported_separately_because_they_are_much_more_expensive"
               << std::endl;
+}
+
+// When live_viz.enabled, spawn the read-only visualizer (scripts/cell_viz)
+// pointed at this run's output dir, in the background. Non-fatal on any failure —
+// a viz problem must never affect the tracking run.
+void maybeLaunchLiveViz(const BaseConfig &config, const Args &args,
+                        const std::string &exePath)
+{
+    if (!config.liveViz.enabled) return;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    // Derive the C++ project root from the executable (<root>/build/celluniverse).
+    fs::path exe = fs::weakly_canonical(fs::absolute(exePath, ec), ec);
+    fs::path cppRoot = exe.parent_path().parent_path();
+    fs::path script = cppRoot / "scripts" / "live_cell_viz.py";
+    if (!fs::exists(script)) {
+        // Fallback: derive from the config path (<root>/config/x.yaml).
+        fs::path cfgRoot = fs::absolute(args.config, ec).parent_path().parent_path();
+        if (fs::exists(cfgRoot / "scripts" / "live_cell_viz.py")) {
+            cppRoot = cfgRoot;
+            script = cppRoot / "scripts" / "live_cell_viz.py";
+        }
+    }
+    if (!fs::exists(script)) {
+        std::cerr << "[LiveViz] enabled but " << script
+                  << " not found; skipping launch.\n";
+        return;
+    }
+
+    fs::path venvPy = cppRoot / ".venv-viz" / "bin" / "python";
+    std::string python = fs::exists(venvPy) ? venvPy.string() : std::string("python3");
+    if (!fs::exists(venvPy)) {
+        std::cerr << "[LiveViz] venv not found at " << venvPy
+                  << "; using 'python3' (see scripts/cell_viz/requirements.txt).\n";
+    }
+
+    fs::create_directories(fs::path(args.output) / "viz", ec);
+    const fs::path launchLog = fs::path(args.output) / "viz" / "launch.log";
+
+    std::ostringstream cmd;
+    cmd << "\"" << python << "\" \"" << script.string() << "\""
+        << " \"" << args.output << "\""
+        << " --input-pattern \"" << args.input << "\""
+        << " --first-frame " << args.firstFrame
+        << " --last-frame " << args.lastFrame
+        << " --mode " << config.liveViz.mode
+        << " --backend " << config.liveViz.backend
+        << " > \"" << launchLog.string() << "\" 2>&1 &";
+
+    std::cout << "[LiveViz] launching (backend=" << config.liveViz.backend
+              << " mode=" << config.liveViz.mode << ") log=" << launchLog.string()
+              << std::endl;
+    const int rc = std::system(cmd.str().c_str());
+    if (rc != 0) {
+        std::cerr << "[LiveViz] launch shell returned rc=" << rc << " (non-fatal)\n";
+    }
 }
 
 Args initArgs(int argc, char *argv[]) {
@@ -367,6 +425,10 @@ int main(int argc, char *argv[])
             }
         }
     }
+
+    // Optionally spawn the live visualizer (scripts/cell_viz) now that the
+    // output dir / frame range are known. Backgrounded; non-fatal on failure.
+    maybeLaunchLiveViz(config, args, argv[0]);
 
     // Run
     auto start = std::chrono::steady_clock::now();

@@ -2746,6 +2746,28 @@ public:
     }
 };
 
+// Optional live visualizer auto-launch (see scripts/cell_viz). When enabled,
+// CellUniverse spawns the read-only napari/mpl viewer pointed at this run's
+// output dir, so the full run command also starts the visualization — no
+// separate command needed.
+struct LiveVizConfig {
+    bool enabled = false;
+    std::string mode = "3d";        // "2d" | "3d"
+    std::string backend = "napari"; // "napari" (live window) | "mpl" (headless video)
+
+    void explodeConfig(const YAML::Node& node) {
+        if (!node) return;
+        if (node["enabled"]) enabled = node["enabled"].as<bool>();
+        if (node["mode"]) mode = node["mode"].as<std::string>();
+        if (node["backend"]) backend = node["backend"].as<std::string>();
+    }
+    void printConfig() const {
+        std::cout << "live_viz.enabled: " << enabled << '\n';
+        std::cout << "live_viz.mode: " << mode << '\n';
+        std::cout << "live_viz.backend: " << backend << '\n';
+    }
+};
+
 class BaseConfig {
 public:
     std::string cellType;
@@ -2753,6 +2775,7 @@ public:
     SimulationConfig simulation;
     ProbabilityConfig prob;
     CellLumenConfig cellLumen;
+    LiveVizConfig liveViz;
 
     BaseConfig() = default;
     ~BaseConfig() = default;
@@ -2763,7 +2786,8 @@ public:
           cell(other.cell ? std::make_unique<EllipsoidConfig>(*other.cell) : nullptr),
           simulation(other.simulation),
           prob(other.prob),
-          cellLumen(other.cellLumen) {}
+          cellLumen(other.cellLumen),
+          liveViz(other.liveViz) {}
 
     BaseConfig& operator=(const BaseConfig& other) {
         if (this != &other) {
@@ -2772,6 +2796,7 @@ public:
             simulation = other.simulation;
             prob = other.prob;
             cellLumen = other.cellLumen;
+            liveViz = other.liveViz;
         }
         return *this;
     }
@@ -2787,12 +2812,14 @@ public:
         simulation.explodeConfig(node["simulation"]);
         prob.explodeConfig(node["prob"]);
         if (node["cell_lumen"]) cellLumen.explodeConfig(node["cell_lumen"]);
+        if (node["live_viz"]) liveViz.explodeConfig(node["live_viz"]);
     }
 
     void printConfig() const {
         simulation.printConfig();
         prob.printConfig();
         cellLumen.printConfig();
+        liveViz.printConfig();
     }
 };
 

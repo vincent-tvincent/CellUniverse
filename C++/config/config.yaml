@@ -1,5 +1,17 @@
 cellType: ellipsoid
 
+# Live visualizer auto-launch (scripts/cell_viz). When enabled, running the
+# normal celluniverse command also spawns the read-only viewer pointed at this
+# run's output dir — no separate command. Inherited by all configs via
+# base_config; flip `enabled` in your entry config to turn it on.
+#   backend: napari -> live interactive window (needs a display; macOS OK)
+#   backend: mpl    -> headless, writes <output>/viz/playback_*.mp4 (no display)
+# Requires the viz venv: pip install -r scripts/cell_viz/requirements.txt
+live_viz:
+  enabled: false
+  mode: 3d        # 2d | 3d
+  backend: napari # napari | mpl
+
 # Position + rotation perturbation only.
 # Radii are fit by iterative PCA on bright pixels each frame, so
 # radius perturbation params are not read here.

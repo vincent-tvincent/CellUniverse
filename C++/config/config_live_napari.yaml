@@ -1,0 +1,15 @@
+base_config: config_embryo_CellLumenFusion_VERIFIED_F085-120_temporalRepair_noTif_20260531.yaml
+
+# Verified CellLumen fusion, with the baked-in live visualizer opening an
+# interactive napari window that advances per frame. Needs a display (run on
+# the Mac, not headless SSH). For headless, set backend: mpl instead.
+# Re-enable the z-interpolated real/synth frame export (the _noExport base turns
+# it off). The visualizer uses <output>/<frame>_real.tif as the background so the
+# z-interpolation is already applied and cells map 1:1 in z.
+simulation:
+  export_frame_tiff: true
+
+live_viz:
+  enabled: true
+  mode: 3d        # 2d | 3d  (toggle in-window too)
+  backend: napari

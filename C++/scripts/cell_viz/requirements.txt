@@ -1,0 +1,14 @@
+# Live Napari cell-tracking visualizer dependencies.
+# Install into an isolated venv (see scripts/cell_viz/README.md):
+#   python3 -m venv .venv-viz && source .venv-viz/bin/activate
+#   pip install -r scripts/cell_viz/requirements.txt
+napari>=0.7
+PyQt5>=5.15
+tifffile>=2024.1
+imagecodecs>=2024.1   # raw embryo TIFFs are LZW-compressed
+imageio>=2.30
+imageio-ffmpeg>=0.4
+matplotlib>=3.7        # headless 'mpl' backend (no OpenGL needed)
+numpy>=1.24
+pytest>=7              # tests/cell_viz
+opencv-python-headless>=4.8   # demo_volume MIP renderer

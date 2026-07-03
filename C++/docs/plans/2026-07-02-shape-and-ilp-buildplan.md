@@ -132,14 +132,22 @@ D1 auto-seed (CTC prerequisite) ── validated alongside ── D2 data-derive
 
 ## Decision gates
 
-| After | Proceed only if |
-|-------|-----------------|
-| Phase 0a | `W=1` ILP fixes known hard 1-vs-2 cases the greedy logic missed |
-| Phase 0b | superquadric/metaball raises the per-slice SEG ceiling meaningfully |
-| Phase D1 | auto-detected frame-0 cells match GT count/positions within tolerance on ≥2 datasets (no CSV) |
-| Phase D2 | the same config runs a second dataset (e.g. Tribolium) with no per-dataset retuning |
-| Phase S1 | SEG improves on the 5 slices with no split/position regression vs best22 |
-| Phase L2 | windowed ILP improves TRA / division-timing vs per-frame greedy, no new spurious splits |
+| After | Proceed only if | Result (2026-07-02) |
+|-------|-----------------|---------------------|
+| Phase 0a | `W=1` ILP fixes known hard 1-vs-2 cases the greedy logic missed | **INCONCLUSIVE** — ILP core validated (self-test), but on real committed data W=1–3 never overrode the per-frame image call; the real errors are *late splits* needing competing hypotheses that don't exist until S2/L1. Not a green light for L2 alone. `scripts/ilp_proto/RESULTS.md` |
+| Phase 0b | superquadric/metaball raises the per-slice SEG ceiling meaningfully | **S1 FAILED / S2 targeted** — ellipse ceiling already 0.887; superellipse +0.005 (median exponent 2.00 → don't build S1); union-of-2 +0.022 overall but +0.08–0.145 on ~8% dividing nuclei. Big finding: 0.89 ceiling vs 0.358 actual ⇒ SEG loss is a **fit/placement gap, not a primitive gap**. `scripts/ilp_proto/RESULTS_phase0b.md` |
+| Phase D1 | auto-detected frame-0 cells match GT count/positions within tolerance on ≥2 datasets (no CSV) | back burner |
+| Phase D2 | the same config runs a second dataset (e.g. Tribolium) with no per-dataset retuning | not started |
+| Phase S1 | SEG improves on the 5 slices with no split/position regression vs best22 | **DROPPED** — 0b ceiling gain negligible |
+| Phase L2 | windowed ILP improves TRA / division-timing vs per-frame greedy, no new spurious splits | gated on S2/L1 producing real hypotheses |
+
+### Phase 0 outcome & revised direction (2026-07-02)
+
+Both cheap gates are done. Combined steer:
+
+1. **Drop S1 (superquadric)** — nuclei are genuinely elliptical; ceiling gain +0.005.
+2. **S2 (union-of-2 / metaball)** keeps only a *modest, dual* justification: the ~8% dividing nuclei **and** the ILP's 2-cell hypothesis generator. Not a standalone win.
+3. **The dominant SEG lever is closing the ellipse-fit gap (0.89 ceiling → 0.358 actual), not shape richness.** Next diagnostic (before any shape/ILP build): measure the tracker's *actual* per-nucleus Jaccard on the 5 SEG slices to localize the gap (fit vs placement vs missed/matching).
 
 ## Stance compatibility
 

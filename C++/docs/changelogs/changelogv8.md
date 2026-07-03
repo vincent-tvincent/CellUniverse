@@ -1174,3 +1174,36 @@ Offline, Python-only. Validates whether a small sliding-window ILP that selects 
 ### Not done (per standing rules)
 
 - No git writes. No change to tracker code, `config.yaml`, or committed run CSVs (run evidence). CSV column rename (`majorRadius/bRadius/minorRadius` → semi-axis + shape-exponent) deferred to S1, where the superquadric changes radii semantics anyway.
+
+---
+
+## 2026-07-02: Phase 0b — offline shape-ceiling measurement (Change 18)
+
+**Status: EXPLORATORY — no tracker/C++ change. Go/no-go for Workstream S (richer shape), per the build plan.**
+
+Offline, Python-only. Measures the best-achievable per-slice SEG (Jaccard) ceiling for three shape primitives on the 5 CTC GT SEG slices, to decide whether a richer shape is worth building *before* touching C++.
+
+### New files
+
+- **`scripts/ilp_proto/phase0b_shape_ceiling.py`** (new, ~230 LOC) — for each of the 102 GT nuclei in `01_GT/SEG/man_seg_*.tif`, optimizes (Nelder-Mead, moment init, multi-restart) an **ellipse**, a **superellipse** `|x'/a|ʳ+|y'/b|ʳ≤1`, and a **union-of-2-ellipses** to maximize 2D Jaccard vs the GT outline. Reports per-nucleus + summary ceilings. (Local optimizer → ceilings are conservative lower bounds.)
+- **`scripts/ilp_proto/RESULTS_phase0b.md`** (new) — findings + verdict.
+
+### Findings (102 nuclei)
+
+| primitive | mean Jaccard | Δ vs ellipse |
+|---|---|---|
+| ellipse (current) | 0.887 | — |
+| superellipse (S1) | 0.892 | **+0.005** (median fitted exponent 2.00) |
+| union-of-2 (S2) | 0.909 | **+0.022** (concentrated: +0.08–0.145 on ~8% dividing nuclei) |
+
+- **S1 superquadric — GATE FAILED** (ceiling +0.005; nuclei are genuinely elliptical). **Dropped** from the plan.
+- **S2 union-of-2 — targeted pass only** (helps the dividing/dumbbell nuclei; modest overall). Kept only for its dual role (dividing case + ILP 2-cell hypothesis generator).
+- **Reframe:** ellipse ceiling 0.89 vs reported SEG 0.358 ⇒ the ~0.53 SEG loss is a **fit/placement gap, not a shape-primitive gap**. A richer primitive closes ≤+0.02 of it.
+
+### Plan doc updated
+
+- `docs/plans/2026-07-02-shape-and-ilp-buildplan.md` decision-gate table filled with 0a + 0b results; added "Phase 0 outcome & revised direction" (drop S1; S2 modest; next diagnostic = tracker's *actual* per-nucleus Jaccard on the 5 slices to localize the fit gap).
+
+### Not done (per standing rules)
+
+- No git writes. No tracker/C++/config change.

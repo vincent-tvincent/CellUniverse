@@ -2553,13 +2553,14 @@ profiles:
         fusionSplitPriorPrepassFallbackOverrideMinExistingWindowBoth: 2
         fusionSplitPriorPrepassFallbackOverrideMaxExistingWindowMissing: 0
         fusionSplitPriorPrepassFallbackOverrideMaxExistingWindowParentPersists: 0
-        # f092 Cell type 1_3100, f099 Cell type 1_3100, and f100 Cell type 1_4100
-        # exposed middle-density fallback splits with no future support, no clear
-        # dark bridge, and overlap growth much larger than the useful image gain.
-        # The f099 false split had bridgeValleyFromBright=0.798419, so 0.79 keeps
-        # the guard narrow while avoiding a fragile 0.80 cutoff miss.
+        # f092 Cell type 1_3100, f099 Cell type 1_3100, f100 Cell type 1_4100,
+        # and f115 Cell type 1_101000 exposed middle-density fallback splits
+        # with no future support, no real Cell Lumen candidate ids, no clear dark
+        # bridge, and overlap growth much larger than the useful image gain. The
+        # f115 false split had bridgeValleyFromBright=0.785074, so keep this
+        # threshold below that value while preserving the other general guards.
         fusionSplitPriorPrepassFallbackOverlapNoValleyMinOverlapCost: 4000.0
-        fusionSplitPriorPrepassFallbackOverlapNoValleyMinBridgeValleyRatio: 0.79
+        fusionSplitPriorPrepassFallbackOverlapNoValleyMinBridgeValleyRatio: 0.75
         fusionSplitPriorPrepassFallbackOverlapNoValleyMinParentShape: 1.45
         fusionSplitPriorPrepassFallbackOverlapNoValleyMaxPriorScore: 8.0
         fusionSplitPriorPrepassFallbackOverlapNoValleyMaxFinalAxisLen: 35.0

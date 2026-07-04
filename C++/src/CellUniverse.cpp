@@ -9607,8 +9607,21 @@ void CellUniverse::applyCellLumenRescue(int frameIndex)
                         !hasCleanWindowSupport(ranked) ||
                         !hasTolerableContinuationClaim(ranked) ||
                         !ranked.continuationClaimBlockers.empty() ||
-                        ranked.neighborClaimPenalty > 1e-5f ||
-                        ranked.parentPersistencePenalty > 1e-5f ||
+                        // Keep the real rescue decision aligned with the
+                        // printed audit thresholds. f112 showed that using the
+                        // legacy near-zero penalty gates here made a pair look
+                        // fully passing in logs while the helper still returned
+                        // false.
+                        ranked.neighborClaimPenalty >
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairAsymmetricStrongSelectableMaxNeighborClaimPenalty) ||
+                        ranked.parentPersistencePenalty >
+                            std::max(
+                                0.0f,
+                                lumenConfig
+                                    .fusionSplitPriorTemporalRepairAsymmetricStrongSelectableMaxParentPersistencePenalty) ||
                         ranked.continuationClaimSoftPenalty > 1e-5f) {
                         return false;
                     }

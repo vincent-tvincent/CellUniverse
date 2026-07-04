@@ -174,6 +174,17 @@ private:
    std::vector<cv::Mat> cellUniverse3GlobalMaxMap;
    float cellUniverse3GlobalHotThreshold = 0.0f;
    bool cellUniverse3GlobalMaxMapReady = false;
+   struct CellUniverse3SplitHotspot {
+       int frameIndex = -1;
+       cv::Point3f center{0.0f, 0.0f, 0.0f};
+       cv::Point3f axis{0.0f, 0.0f, 0.0f};
+       float radius = 0.0f;
+       float separation = 0.0f;
+       float brightness = 0.0f;
+       int boxes = 0;
+       float score = std::numeric_limits<float>::max();
+   };
+   std::vector<CellUniverse3SplitHotspot> cellUniverse3SplitHotspots;
    struct CellUniverse3MissedSplitMemory {
        int frameIndex = -1;
        cv::Point3f parentPosition{0.0f, 0.0f, 0.0f};

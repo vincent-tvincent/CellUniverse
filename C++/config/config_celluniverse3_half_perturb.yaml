@@ -182,6 +182,21 @@ prob:
   # current division axis. Frame-18 fluo false split cell_00 had axisAlign=0.47;
   # accepted signal-center splits observed so far are >= 0.83.
   signal_center_split_min_axis_alignment: 0.80
+  # Far daughter pairs can be visible as two current-frame bright centers even
+  # when one daughter jumps outside the U-tunnel at the split frame. Keep this
+  # narrow: centered, bright enough, and near-round parents only.
+  signal_center_disconnected_far_pair_rescue_enabled: true
+  signal_center_disconnected_far_pair_max_parent_shape: 2.05
+  signal_center_disconnected_far_pair_min_sep_ratio: 1.60
+  signal_center_disconnected_far_pair_max_sep_scale: 3.10
+  signal_center_disconnected_far_pair_max_midpoint_scale: 0.80
+  signal_center_disconnected_far_pair_min_boxes: 20
+  signal_center_disconnected_far_pair_min_brightness: 0.10
+  signal_center_disconnected_far_pair_cost_rescue_enabled: true
+  signal_center_disconnected_far_pair_cost_rescue_min_raw_gain_fraction: 0.75
+  signal_center_disconnected_far_pair_cost_rescue_max_overlap_fraction: 0.08
+  signal_center_disconnected_far_pair_cost_rescue_max_gap_density: 0.025
+  signal_center_disconnected_far_pair_cost_rescue_max_valley_from_bright: 0.60
   # Allow a small combined-volume tolerance for valid rod-tip splits after PCA
   # refit. Frame-18 cell_10 measured 1.340657 against the default 1.30 cap.
   bio_combined_volume_max_fraction: 1.36
@@ -199,7 +214,11 @@ prob:
   # stricter CellUniverse2 inherited tuning.
   pca_bridge_future_window_min_both_daughter_support: 1
   pca_bridge_future_window_max_missing_daughters: 2
-  pca_bridge_future_window_parent_balance_rescue_min: 0.19
+  pca_bridge_future_window_parent_balance_rescue_min: 0.12
+  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.09
+  rod_tip_immediate_future_min_brightness: 0.09
+  rod_tip_immediate_future_min_parent_balance: 0.35
+  rod_tip_immediate_future_high_shape_min_parent_balance: 0.30
   # Frame-19 fluo signal-center split has clean future support but newborn
   # sibling masks overlap by ~0.178 before the next PCA separation pass.
   split_max_daughter_overlap_fraction: 0.18
@@ -250,6 +269,15 @@ prob:
   celluniverse3_window_map_primary_asymmetric_min_weak_u_support: 0.25
   celluniverse3_window_map_primary_asymmetric_min_total_u_support: 0.85
   celluniverse3_window_map_primary_asymmetric_min_axis_alignment: 0.90
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled: true
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_weak_u_support: 0.15
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both: 1
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing: 2
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness: 0.025
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_parent_shape: 2.0
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_region_penalty: 1.25
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_center_snap_score: 1.10
+  celluniverse3_window_map_asymmetric_u_tunnel_rescue_near_separation_fraction: 0.75
   celluniverse3_single_frame_future_center_requires_window_map_support: true
   celluniverse3_single_frame_future_center_max_future_both: 1
   celluniverse3_require_window_map_split_for_pca_bridge: true
@@ -382,11 +410,11 @@ prob:
   celluniverse3_crowded_signal_center_asymmetric_future_rescue_max_parent_balance: 0.35
   celluniverse3_crowded_signal_center_asymmetric_future_rescue_min_axis_alignment: 0.90
   celluniverse3_pca_bridge_near_separation_rescue_enabled: true
-  celluniverse3_pca_bridge_near_separation_fraction: 0.48
-  celluniverse3_pca_bridge_near_separation_min_future_both: 2
-  celluniverse3_pca_bridge_near_separation_max_missing: 0
-  celluniverse3_pca_bridge_near_separation_min_brightness: 0.03
-  celluniverse3_pca_bridge_near_separation_min_parent_balance: 0.25
+  celluniverse3_pca_bridge_near_separation_fraction: 0.60
+  celluniverse3_pca_bridge_near_separation_min_future_both: 1
+  celluniverse3_pca_bridge_near_separation_max_missing: 2
+  celluniverse3_pca_bridge_near_separation_min_brightness: 0.02
+  celluniverse3_pca_bridge_near_separation_min_parent_balance: 0.10
   celluniverse3_pca_bridge_near_separation_max_snap_radius_scale: 1.30
   split_dense_flat_future_min_parent_balance: 0.24
   split_dense_flat_future_min_brightness: 0.055
@@ -478,6 +506,16 @@ prob:
   celluniverse3_orphan_window_center_rescue_min_nearest_cell_distance: 55.0
   celluniverse3_orphan_window_center_rescue_radius: 25.0
   celluniverse3_orphan_window_center_rescue_brightness: 0.50
+  celluniverse3_split_hotspot_enabled: true
+  celluniverse3_split_hotspot_max_per_frame: 10
+  celluniverse3_split_hotspot_min_brightness: 0.05
+  celluniverse3_split_hotspot_min_boxes: 24
+  celluniverse3_split_hotspot_min_separation: 18.0
+  celluniverse3_split_hotspot_max_separation: 120.0
+  celluniverse3_split_hotspot_merge_distance: 18.0
+  celluniverse3_split_hotspot_match_radius: 30.0
+  celluniverse3_split_hotspot_min_cell_shape: 1.45
+  celluniverse3_split_hotspot_min_axis_alignment: 0.35
   # Keep the post-PCA rod fallback narrow: only severe rods that already
   # produced split evidence may use it, so stable regions do not trigger it.
   post_pca_force_rod_split_enabled: true
@@ -515,6 +553,8 @@ prob:
   celluniverse3_post_pca_rod_salvage_prior_evidence_enabled: true
   celluniverse3_post_pca_rod_salvage_prior_evidence_min_shape: 1.70
   celluniverse3_post_pca_rod_salvage_prior_evidence_min_long_mid_ratio: 1.35
+  split_future_rod_tip_primary_min_brightness: 0.12
+  split_future_rod_tip_primary_max_gap_density: 0.34
   # CellUniverse3-only safety net for the opposite bad PCA failure mode:
   # a parent suddenly becomes pancake-flat (large mid/short, ordinary long/mid).
   # Treat it as a failed probe after split retries, and restore the pre-PCA shape.

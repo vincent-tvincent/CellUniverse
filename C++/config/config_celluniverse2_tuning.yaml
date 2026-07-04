@@ -177,11 +177,14 @@ prob:
   # If both daughters are already visible in the immediate future window,
   # allow an asymmetric current-frame seed instead of rejecting on parent
   # distance balance alone.
-  pca_bridge_future_window_parent_balance_rescue_min: 0.19
+  pca_bridge_future_window_parent_balance_rescue_min: 0.12
+  rod_tip_immediate_future_min_brightness: 0.09
+  rod_tip_immediate_future_min_parent_balance: 0.35
+  rod_tip_immediate_future_high_shape_min_parent_balance: 0.30
   # Rod-tip fallback can be very asymmetric after post-split movement. Only
   # waive the parent-distance balance floor when both future frames show two
   # bright supported daughters.
-  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.10
+  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.09
   pca_bridge_future_window_rod_tip_midpoint_parent_fraction: 1.00
   # When daughter centers came from the immediate future frame, only let clean
   # future support override current-frame dim/cost gates for very rod-like

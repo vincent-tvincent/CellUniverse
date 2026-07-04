@@ -5039,7 +5039,34 @@ CostCallbackPair Frame::trySplitCellPhased(
             }
             return true;
         };
-        appendBridgeCandidate(bridgeCand, true, false);
+        const bool suppressFutureRodTipCenterSlides =
+            simulationConfig.celluniverse2_enabled &&
+            bridgeProposalOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->daughterSphereRadius > 0.0f &&
+            probConfig.pca_bridge_future_window_enabled &&
+            bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount <= 2 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                std::max(0.0f,
+                         probConfig
+                             .pca_bridge_future_window_rod_tip_balance_min_brightness);
+        appendBridgeCandidate(bridgeCand, !suppressFutureRodTipCenterSlides, false);
+        if (suppressFutureRodTipCenterSlides) {
+            std::cout << "  [Split Bridge Center Slides Suppressed] "
+                      << parentName
+                      << " reason=future_supported_rod_tip"
+                      << " futureBoth="
+                      << bridgeProposal->windowBothDaughtersSupported
+                      << " futureMissing="
+                      << bridgeProposal->windowMissingDaughterCount
+                      << " futureBrightness="
+                      << bridgeProposal->windowBestMatchedMinBrightness
+                      << std::endl;
+        }
 
         if (bridgeProposalOnly &&
             simulationConfig.celluniverse3_enabled &&
@@ -5117,7 +5144,29 @@ CostCallbackPair Frame::trySplitCellPhased(
                                             "current_axis_place_mid",
                                             false);
                 }
-                if (bridgeProposal->windowBothDaughtersSupported >= 2) {
+                const bool asymmetricUTunnelFuturePairEvidence =
+                    simulationConfig.celluniverse3_enabled &&
+                    probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled &&
+                    bridgeProposal->cellUniverse3MapPriorEvaluated &&
+                    ((bridgeProposal->cellUniverse3MapD1InsideTunnel ? 1 : 0) +
+                     (bridgeProposal->cellUniverse3MapD2InsideTunnel ? 1 : 0)) == 1 &&
+                    std::max(bridgeProposal->cellUniverse3MapUSupportD1,
+                             bridgeProposal->cellUniverse3MapUSupportD2) >=
+                        probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+                    std::min(bridgeProposal->cellUniverse3MapUSupportD1,
+                             bridgeProposal->cellUniverse3MapUSupportD2) <=
+                        probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_weak_u_support &&
+                    bridgeProposal->windowBothDaughtersSupported >=
+                        std::max(1,
+                                 probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both) &&
+                    bridgeProposal->windowMissingDaughterCount <=
+                        std::max(0,
+                                 probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing) &&
+                    bridgeProposal->windowParentPersists == 0 &&
+                    bridgeProposal->windowBestMatchedMinBrightness >=
+                        probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness;
+                if (bridgeProposal->windowBothDaughtersSupported >= 2 ||
+                    asymmetricUTunnelFuturePairEvidence) {
                     appendPairCandidate(bridgeProposal->windowBestMatchedD1Pos,
                                         bridgeProposal->windowBestMatchedD2Pos,
                                         "future_best_pair");
@@ -5576,12 +5625,118 @@ CostCallbackPair Frame::trySplitCellPhased(
             bridgeTunnelContainsPoint(candD1Pos);
         const bool bridgeTunnelFinalD2Inside =
             bridgeTunnelContainsPoint(candD2Pos);
+        const float candDaughterSeparation =
+            static_cast<float>(cv::norm(candD2Pos - candD1Pos));
+        const float futureRodTipPrimaryMinCandidateSeparation =
+            std::max(0.0f,
+                     probConfig.bio_min_daughter_separation_parent_fraction) *
+            std::max(1.0f, srcMaxR);
+        const bool futureSupportedRodTipSelectionGuardCandidate =
+            candIsPcaBridgeOnly &&
+            bridgeProposal != nullptr &&
+            bridgeProposal->daughterSphereRadius > 0.0f &&
+            probConfig.pca_bridge_future_window_enabled &&
+            bridgeProposal->centerSnapUsedAlignedPairFallback &&
+            bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+            bridgeProposal->windowBothDaughtersSupported >= 1 &&
+            bridgeProposal->windowMissingDaughterCount <= 2 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                std::max(0.0f,
+                         probConfig
+                             .pca_bridge_future_window_rod_tip_balance_min_brightness);
+        const bool futureRodTipPrimaryCollapsedCandidate =
+            futureSupportedRodTipSelectionGuardCandidate &&
+            futureRodTipPrimaryMinCandidateSeparation > 0.0f &&
+            candDaughterSeparation < futureRodTipPrimaryMinCandidateSeparation;
+        if (futureRodTipPrimaryCollapsedCandidate) {
+            std::cout << "  [Split Cand Future RodTip Separation Gate] "
+                      << parentName
+                      << " idx=" << ci
+                      << " label=" << cand.label
+                      << " candSep=" << candDaughterSeparation
+                      << " minSep="
+                      << futureRodTipPrimaryMinCandidateSeparation
+                      << " futureBoth="
+                      << bridgeProposal->windowBothDaughtersSupported
+                      << " futureMissing="
+                      << bridgeProposal->windowMissingDaughterCount
+                      << " futureBrightness="
+                      << bridgeProposal->windowBestMatchedMinBrightness
+                      << " action=reject_candidate"
+                      << std::endl;
+        }
+        const bool bridgeTunnelAsymmetricCandidatePass =
+            bridgeTunnelConstraintActive &&
+            bridgeProposal != nullptr &&
+            probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled &&
+            cand.label == "bridge_primary" &&
+            ((bridgeTunnelSeedD1Inside && bridgeTunnelFinalD1Inside &&
+              !bridgeTunnelSeedD2Inside && !bridgeTunnelFinalD2Inside) ||
+             (bridgeTunnelSeedD2Inside && bridgeTunnelFinalD2Inside &&
+              !bridgeTunnelSeedD1Inside && !bridgeTunnelFinalD1Inside)) &&
+            std::max(bridgeProposal->cellUniverse3MapUSupportD1,
+                     bridgeProposal->cellUniverse3MapUSupportD2) >=
+                std::max(0.0f,
+                         probConfig
+                             .celluniverse3_window_map_primary_asymmetric_min_strong_u_support) &&
+            std::min(bridgeProposal->cellUniverse3MapUSupportD1,
+                     bridgeProposal->cellUniverse3MapUSupportD2) <=
+                std::max(0.0f,
+                         probConfig
+                             .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_weak_u_support) &&
+            bridgeProposal->windowBothDaughtersSupported >=
+                std::max(1,
+                         probConfig
+                             .celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both) &&
+            bridgeProposal->windowMissingDaughterCount <=
+                std::max(0,
+                         probConfig
+                             .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing) &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                std::max(0.0f,
+                         probConfig
+                             .celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness) &&
+            bridgeProposal->cellUniverse3MapRegionPenalty <=
+                std::max(0.0f,
+                         probConfig
+                             .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_region_penalty) &&
+            (!bridgeProposal->centerSnapApplied ||
+             bridgeProposal->centerSnapScore <=
+                 std::max(0.0f,
+                          probConfig
+                              .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_center_snap_score));
+        const bool bridgeTunnelOutsideFutureCandidatePass =
+            bridgeTunnelConstraintActive &&
+            bridgeProposal != nullptr &&
+            cand.label == "bridge_primary" &&
+            !bridgeTunnelSeedD1Inside &&
+            !bridgeTunnelSeedD2Inside &&
+            !bridgeTunnelFinalD1Inside &&
+            !bridgeTunnelFinalD2Inside &&
+            bridgeProposal->windowBothDaughtersSupported >= 2 &&
+            bridgeProposal->windowMissingDaughterCount == 0 &&
+            bridgeProposal->windowParentPersists == 0 &&
+            bridgeProposal->windowBestMatchedMinBrightness >=
+                std::max(0.0f,
+                         probConfig
+                             .pca_bridge_future_window_rod_tip_balance_min_brightness) &&
+            bridgeProposal->parentDistanceBalance >=
+                std::max(0.0f,
+                         probConfig
+                             .pca_bridge_future_window_parent_balance_rescue_min) &&
+            bridgeProposal->bioSeparationObserved >=
+                bridgeProposal->bioSeparationRequired &&
+            bridgeProposal->cellUniverse3MapRegionPenalty <= 2.0f;
         const bool bridgeTunnelCandidatePass =
             !bridgeTunnelConstraintActive ||
             (bridgeTunnelSeedD1Inside &&
              bridgeTunnelSeedD2Inside &&
              bridgeTunnelFinalD1Inside &&
-             bridgeTunnelFinalD2Inside);
+             bridgeTunnelFinalD2Inside) ||
+            bridgeTunnelAsymmetricCandidatePass ||
+            bridgeTunnelOutsideFutureCandidatePass;
         std::cout << "  [Split Cand] " << parentName
                   << " idx=" << ci << "/" << candidates.size()
                   << " label=" << cand.label
@@ -5594,6 +5749,31 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " total=" << candTotal
                   << " (image=" << candImageCost << " overlap=" << candOverlap << ")"
                   << std::endl;
+        if (bridgeTunnelAsymmetricCandidatePass ||
+            bridgeTunnelOutsideFutureCandidatePass) {
+            std::cout << "  [Split Cand Tunnel Gate] " << parentName
+                      << " idx=" << ci
+                      << " label=" << cand.label
+                      << " seedD1Inside=" << (bridgeTunnelSeedD1Inside ? 1 : 0)
+                      << " seedD2Inside=" << (bridgeTunnelSeedD2Inside ? 1 : 0)
+                      << " finalD1Inside=" << (bridgeTunnelFinalD1Inside ? 1 : 0)
+                      << " finalD2Inside=" << (bridgeTunnelFinalD2Inside ? 1 : 0)
+                      << " mapUSupportD1="
+                      << bridgeProposal->cellUniverse3MapUSupportD1
+                      << " mapUSupportD2="
+                      << bridgeProposal->cellUniverse3MapUSupportD2
+                      << " futureBoth="
+                      << bridgeProposal->windowBothDaughtersSupported
+                      << " futureMissing="
+                      << bridgeProposal->windowMissingDaughterCount
+                      << " futureBrightness="
+                      << bridgeProposal->windowBestMatchedMinBrightness
+                      << " action="
+                      << (bridgeTunnelOutsideFutureCandidatePass
+                              ? "allow_outside_future_pair"
+                              : "allow_asymmetric_u_tunnel")
+                      << std::endl;
+        }
         if (!bridgeTunnelCandidatePass) {
             std::cout << "  [Split Cand Tunnel Gate] " << parentName
                       << " idx=" << ci
@@ -5994,6 +6174,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             cellUniverse3WindowMapCandidatePass &&
             cellUniverse3CleanSignalCandidatePass &&
             bridgeTunnelCandidatePass &&
+            !futureRodTipPrimaryCollapsedCandidate &&
             candSelectionScore < bestSelectionScore) {
             bestTotal = candTotal;
             bestSelectionScore = candSelectionScore;
@@ -7122,10 +7303,44 @@ CostCallbackPair Frame::trySplitCellPhased(
                     (idx == d1IdxRefine)
                         ? futureRodTipUnlockD1Mean
                         : ((idx == d2IdxRefine) ? futureRodTipUnlockD2Mean : 0.0f);
+                const bool asymmetricTunnelOneInside =
+                    lockCellUniverse3TunnelDaughterPosition &&
+                    bridgeProposal != nullptr &&
+                    ((bridgeProposal->cellUniverse3MapD1InsideTunnel ? 1 : 0) +
+                     (bridgeProposal->cellUniverse3MapD2InsideTunnel ? 1 : 0)) == 1;
+                const bool asymmetricTunnelD1Weak =
+                    asymmetricTunnelOneInside &&
+                    !bridgeProposal->cellUniverse3MapD1InsideTunnel &&
+                    bridgeProposal->cellUniverse3MapD2InsideTunnel;
+                const bool asymmetricTunnelD2Weak =
+                    asymmetricTunnelOneInside &&
+                    !bridgeProposal->cellUniverse3MapD2InsideTunnel &&
+                    bridgeProposal->cellUniverse3MapD1InsideTunnel;
+                const bool unlockAsymmetricTunnelWeakDaughter =
+                    simulationConfig.celluniverse3_enabled &&
+                    probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled &&
+                    bridgeProposalOnly &&
+                    bestLabel == "bridge_primary" &&
+                    bridgeProposal != nullptr &&
+                    bridgeProposal->windowBothDaughtersSupported >=
+                        std::max(1,
+                                 probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both) &&
+                    bridgeProposal->windowMissingDaughterCount <=
+                        std::max(0,
+                                 probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing) &&
+                    bridgeProposal->windowParentPersists == 0 &&
+                    bridgeProposal->windowBestMatchedMinBrightness >=
+                        probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness &&
+                    ((idx == d1IdxRefine && asymmetricTunnelD1Weak) ||
+                     (idx == d2IdxRefine && asymmetricTunnelD2Weak));
                 const bool effectiveSplitDaughterRefitPositionLock =
                     lockSplitDaughterRefitPosition &&
                     !allowFutureBridgeDaughterPcaPositionUpdate &&
-                    !allowFutureRodTipThisDaughter;
+                    !allowFutureRodTipThisDaughter &&
+                    !unlockAsymmetricTunnelWeakDaughter;
+                const bool effectivePreserveSplitDaughterRefitSeedPosition =
+                    preserveSplitDaughterRefitSeedPosition &&
+                    !unlockAsymmetricTunnelWeakDaughter;
                 const float preA = cells[idx].getARadius();
                 const float preB = cells[idx].getBRadius();
                 const float preC = cells[idx].getCRadius();
@@ -7150,6 +7365,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                               << splitDaughterRefitLockReason
                               << " rodTipDimUnlock="
                               << (allowFutureRodTipThisDaughter ? 1 : 0)
+                              << " asymmetricTunnelWeakUnlock="
+                              << (unlockAsymmetricTunnelWeakDaughter ? 1 : 0)
                               << " rodTipMean="
                               << futureRodTipUnlockThisMean
                               << " rodTipMinMean="
@@ -7405,7 +7622,13 @@ CostCallbackPair Frame::trySplitCellPhased(
                 const float fitB = std::clamp(cells[idx].getBRadius(), floorB, ceilB);
                 const float fitC = std::clamp(cells[idx].getCRadius(), floorC, ceilC);
                 cells[idx].setRadii(fitA, fitB, fitC);
-                if (preserveSplitDaughterRefitSeedPosition) {
+                const cv::Point3f splitDaughterPullAnchor =
+                    unlockAsymmetricTunnelWeakDaughter
+                        ? ((idx == d1IdxRefine)
+                               ? bridgeProposal->windowBestMatchedD1Pos
+                               : bridgeProposal->windowBestMatchedD2Pos)
+                        : prePos;
+                if (effectivePreserveSplitDaughterRefitSeedPosition) {
                     cells[idx].setPosition(prePos.x, prePos.y, prePos.z);
                     std::cout << "  [Split Daughter Weighted Center Pull Skip] "
                               << parentName
@@ -7417,7 +7640,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                               << std::endl;
                 } else {
                     applySplitDaughterWeightedCenterPull(
-                        idx, label, "post_pca_shape_fit", prePos);
+                        idx, label, "post_pca_shape_fit", splitDaughterPullAnchor);
                 }
                 if (flattenedPlaneRotationApplied) {
                     const cv::Point3f beforeExtraPos(cells[idx].getX(),
@@ -7444,7 +7667,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                     const float extraFitC =
                         std::clamp(cells[idx].getCRadius(), floorC, ceilC);
                     cells[idx].setRadii(extraFitA, extraFitB, extraFitC);
-                    if (preserveSplitDaughterRefitSeedPosition) {
+                    if (effectivePreserveSplitDaughterRefitSeedPosition) {
                         cells[idx].setPosition(prePos.x, prePos.y, prePos.z);
                         std::cout << "  [Split Daughter Weighted Center Pull Skip] "
                                   << parentName
@@ -7456,7 +7679,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                                   << std::endl;
                     } else {
                         applySplitDaughterWeightedCenterPull(
-                            idx, label, "post_plane_rotation_extra_pca", prePos);
+                            idx, label, "post_plane_rotation_extra_pca", splitDaughterPullAnchor);
                     }
                     const cv::Point3f afterExtraPos(cells[idx].getX(),
                                                     cells[idx].getY(),
@@ -7916,7 +8139,88 @@ CostCallbackPair Frame::trySplitCellPhased(
     const cv::Point3f bestD2Pos(bestD2.getX(), bestD2.getY(), bestD2.getZ());
     const bool bestTunnelD1Inside = bridgeTunnelContainsPoint(bestD1Pos);
     const bool bestTunnelD2Inside = bridgeTunnelContainsPoint(bestD2Pos);
+    const bool bestAsymmetricUTunnelPass =
+        bridgeTunnelConstraintActive &&
+        bridgeProposal != nullptr &&
+        probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled &&
+        bestLabel == "bridge_primary" &&
+        bestTunnelD1Inside != bestTunnelD2Inside &&
+        std::max(bridgeProposal->cellUniverse3MapUSupportD1,
+                 bridgeProposal->cellUniverse3MapUSupportD2) >=
+            std::max(0.0f,
+                     probConfig
+                         .celluniverse3_window_map_primary_asymmetric_min_strong_u_support) &&
+        std::min(bridgeProposal->cellUniverse3MapUSupportD1,
+                 bridgeProposal->cellUniverse3MapUSupportD2) <=
+            std::max(0.0f,
+                     probConfig
+                         .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_weak_u_support) &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(1,
+                     probConfig
+                         .celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            std::max(0,
+                     probConfig
+                         .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(0.0f,
+                     probConfig
+                         .celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness) &&
+        bridgeProposal->cellUniverse3MapRegionPenalty <=
+            std::max(0.0f,
+                     probConfig
+                         .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_region_penalty) &&
+        (!bridgeProposal->centerSnapApplied ||
+         bridgeProposal->centerSnapScore <=
+             std::max(0.0f,
+                      probConfig
+                          .celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_center_snap_score));
+    const bool bestOutsideFutureTunnelPass =
+        bridgeTunnelConstraintActive &&
+        bridgeProposal != nullptr &&
+        bestLabel == "bridge_primary" &&
+        !bestTunnelD1Inside &&
+        !bestTunnelD2Inside &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            std::max(0.0f,
+                     probConfig
+                         .pca_bridge_future_window_rod_tip_balance_min_brightness) &&
+        bridgeProposal->parentDistanceBalance >=
+            std::max(0.0f,
+                     probConfig
+                         .pca_bridge_future_window_parent_balance_rescue_min) &&
+        bridgeProposal->bioSeparationObserved >=
+            bridgeProposal->bioSeparationRequired &&
+        bridgeProposal->cellUniverse3MapRegionPenalty <= 2.0f;
+    if (bestAsymmetricUTunnelPass || bestOutsideFutureTunnelPass) {
+        std::cout << "  [Split Final Tunnel Gate] " << parentName
+                  << " label=" << bestLabel
+                  << " d1Inside=" << (bestTunnelD1Inside ? 1 : 0)
+                  << " d2Inside=" << (bestTunnelD2Inside ? 1 : 0)
+                  << " mapUSupportD1="
+                  << bridgeProposal->cellUniverse3MapUSupportD1
+                  << " mapUSupportD2="
+                  << bridgeProposal->cellUniverse3MapUSupportD2
+                  << " futureBoth="
+                  << bridgeProposal->windowBothDaughtersSupported
+                  << " futureMissing="
+                  << bridgeProposal->windowMissingDaughterCount
+                  << " futureBrightness="
+                  << bridgeProposal->windowBestMatchedMinBrightness
+                  << " action="
+                  << (bestOutsideFutureTunnelPass
+                          ? "allow_outside_future_pair"
+                          : "allow_asymmetric_u_tunnel")
+                  << std::endl;
+    }
     if (bridgeTunnelConstraintActive &&
+        !bestAsymmetricUTunnelPass &&
+        !bestOutsideFutureTunnelPass &&
         (!bestTunnelD1Inside || !bestTunnelD2Inside)) {
         std::cout << "  [Split Final Tunnel Gate] " << parentName
                   << " label=" << bestLabel
@@ -9480,13 +9784,64 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << bridgeProposal->windowMissingDaughterCount
                           << std::endl;
             }
+            const bool asymmetricUTunnelDenseBridgeRescue =
+                simulationConfig.celluniverse3_enabled &&
+                probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled &&
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->cellUniverse3MapPriorEvaluated &&
+                ((bridgeProposal->cellUniverse3MapD1InsideTunnel ? 1 : 0) +
+                 (bridgeProposal->cellUniverse3MapD2InsideTunnel ? 1 : 0)) == 1 &&
+                std::max(bridgeProposal->cellUniverse3MapUSupportD1,
+                         bridgeProposal->cellUniverse3MapUSupportD2) >=
+                    probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+                std::min(bridgeProposal->cellUniverse3MapUSupportD1,
+                         bridgeProposal->cellUniverse3MapUSupportD2) <=
+                    probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_weak_u_support &&
+                bridgeProposal->windowBothDaughtersSupported >=
+                    std::max(1,
+                             probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both) &&
+                bridgeProposal->windowMissingDaughterCount <=
+                    std::max(0,
+                             probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing) &&
+                bridgeProposal->windowParentPersists == 0 &&
+                bridgeProposal->windowBestMatchedMinBrightness >=
+                    probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness &&
+                valleyFromBright <=
+                    probConfig.celluniverse3_window_map_primary_dense_bridge_max_valley_from_bright &&
+                gapDensity <=
+                    probConfig.celluniverse3_window_map_primary_dense_bridge_max_gap_density;
+            if (edgeCount > 0 &&
+                denseDriftingBridgeGeometryTriggered &&
+                denseDriftingBridgeFutureWeak &&
+                asymmetricUTunnelDenseBridgeRescue) {
+                std::cout << "[CellUniverse3 Asymmetric U Tunnel Dense Bridge Rescue] "
+                          << parentName
+                          << " valleyFromBright=" << valleyFromBright
+                          << " gapDensity=" << gapDensity
+                          << " maxDaughterSeedDrift=" << maxDaughterSeedDrift
+                          << " driftLimit=" << denseDriftingBridgeDriftLimit
+                          << " uSupportD1="
+                          << bridgeProposal->cellUniverse3MapUSupportD1
+                          << " uSupportD2="
+                          << bridgeProposal->cellUniverse3MapUSupportD2
+                          << " futureBoth="
+                          << bridgeProposal->windowBothDaughtersSupported
+                          << " futureMissing="
+                          << bridgeProposal->windowMissingDaughterCount
+                          << " futureBrightness="
+                          << bridgeProposal->windowBestMatchedMinBrightness
+                          << std::endl;
+            }
             const bool denseDriftingDeterministicBridge =
                 simulationConfig.celluniverse2_enabled &&
                 bridgeProposalOnly &&
                 bestLabel == "bridge_primary" &&
                 denseDriftingBridgeGeometryTriggered &&
                 denseDriftingBridgeFutureWeak &&
-                !cellUniverse3WindowMapPrimaryDenseBridgeRescue;
+                !cellUniverse3WindowMapPrimaryDenseBridgeRescue &&
+                !asymmetricUTunnelDenseBridgeRescue;
             if (edgeCount > 0 && denseDriftingDeterministicBridge) {
                 std::cout << "[Split Reject bio] " << parentName
                           << " reason=dense_drifting_bridge"
@@ -9767,6 +10122,54 @@ CostCallbackPair Frame::trySplitCellPhased(
             finalBioConfig.bio_min_daughter_separation_parent_fraction,
             std::max(0.0f, probConfig.bio_min_daughter_separation_parent_fraction) *
                 nearSeparationFraction);
+    }
+    const bool cellUniverse3AsymmetricUTunnelNearSeparationRescue =
+        simulationConfig.celluniverse3_enabled &&
+        probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->cellUniverse3MapPriorEvaluated &&
+        ((bridgeProposal->cellUniverse3MapD1InsideTunnel ? 1 : 0) +
+         (bridgeProposal->cellUniverse3MapD2InsideTunnel ? 1 : 0)) == 1 &&
+        std::max(bridgeProposal->cellUniverse3MapUSupportD1,
+                 bridgeProposal->cellUniverse3MapUSupportD2) >=
+            probConfig.celluniverse3_window_map_primary_support_min_u_support &&
+        std::min(bridgeProposal->cellUniverse3MapUSupportD1,
+                 bridgeProposal->cellUniverse3MapUSupportD2) <=
+            probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_weak_u_support &&
+        bridgeProposal->windowBothDaughtersSupported >=
+            std::max(1,
+                     probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_both) &&
+        bridgeProposal->windowMissingDaughterCount <=
+            std::max(0,
+                     probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_max_missing) &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_min_future_brightness;
+    if (cellUniverse3AsymmetricUTunnelNearSeparationRescue) {
+        const float nearSeparationFraction = std::clamp(
+            probConfig.celluniverse3_window_map_asymmetric_u_tunnel_rescue_near_separation_fraction,
+            0.0f,
+            1.0f);
+        finalBioConfig.bio_min_daughter_separation_parent_fraction = std::min(
+            finalBioConfig.bio_min_daughter_separation_parent_fraction,
+            std::max(0.0f, probConfig.bio_min_daughter_separation_parent_fraction) *
+                nearSeparationFraction);
+        std::cout << "[CellUniverse3 Asymmetric U Tunnel Near Separation Rescue] "
+                  << parentName
+                  << " fraction=" << nearSeparationFraction
+                  << " futureBoth="
+                  << bridgeProposal->windowBothDaughtersSupported
+                  << " futureMissing="
+                  << bridgeProposal->windowMissingDaughterCount
+                  << " futureBrightness="
+                  << bridgeProposal->windowBestMatchedMinBrightness
+                  << " uSupportD1="
+                  << bridgeProposal->cellUniverse3MapUSupportD1
+                  << " uSupportD2="
+                  << bridgeProposal->cellUniverse3MapUSupportD2
+                  << std::endl;
     }
     const float midpointParentFraction =
         futureSupportedMidpointRescue
@@ -10292,6 +10695,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                 (bridgeProposal != nullptr &&
                  (bridgeProposal->futureWindowSplitRescue ||
                   cellUniverse3SignalCenterFutureDensitySupport ||
+                  cellUniverse3AsymmetricUTunnelNearSeparationRescue ||
                   weakFutureCurrentBridgeDensitySupport ||
                   bestFutureSupportedRodTipPrimary ||
                   bestHasCleanFutureSplitSupport));
@@ -12469,6 +12873,16 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeProposal->centerSnapMaxSeedDistance > cleanPcaBridgeFuturePairSnapLimit;
     const bool futureRodTipPrimaryHasCurrentImageGain =
         imageCostDiff <= -futureRodTipPrimaryImageGainRequired;
+    const bool futureRodTipPrimaryStrongFutureEvidence =
+        bridgeProposal != nullptr &&
+        bridgeProposal->windowImmediateBothDaughtersSupported > 0 &&
+        bridgeProposal->windowBothDaughtersSupported >= 2 &&
+        bridgeProposal->windowMissingDaughterCount == 0 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.split_future_rod_tip_primary_min_brightness &&
+        bridgeProposal->parentDistanceBalance >=
+            probConfig.split_future_rod_tip_primary_min_parent_balance;
     const bool futureRodTipPrimaryCostRescued =
         (bestIsSignalCenterProposal || bestIsPcaBridgeOnly) &&
         bridgeProposal != nullptr &&
@@ -12481,7 +12895,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeProposal->windowBestMatchedMinBrightness >= probConfig.split_future_rod_tip_primary_min_brightness &&
         bridgeProposal->parentDistanceBalance >= probConfig.split_future_rod_tip_primary_min_parent_balance &&
         (!futureRodTipPrimaryRequiresCurrentImageGain ||
-         futureRodTipPrimaryHasCurrentImageGain) &&
+         futureRodTipPrimaryHasCurrentImageGain ||
+         futureRodTipPrimaryStrongFutureEvidence) &&
         costDiff <= futureRodTipPrimaryCostLimit &&
         imageCostDiff <= futureRodTipPrimaryImageCostLimit &&
         overlapCostDiff <= futureRodTipPrimaryOverlapCostLimit &&
@@ -13433,6 +13848,63 @@ CostCallbackPair Frame::trySplitCellPhased(
                 probConfig
                     .celluniverse3_delayed_missing_daughter_cost_rescue_max_drift_scale *
                     std::max(1.0f, srcMaxR));
+    const bool cellUniverse3OutsideFuturePairCostRescued =
+        simulationConfig.celluniverse3_enabled &&
+        bestOutsideFutureTunnelPass &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        costDiff <= -adaptiveThreshold &&
+        imageCostDiff <= -adaptiveThreshold &&
+        overlapCostDiff <=
+            static_cast<double>(
+                std::max(0.0f,
+                         probConfig
+                             .celluniverse3_window_map_primary_cost_rescue_max_overlap_fraction)) *
+                baselineImageCost &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <=
+            probConfig
+                .celluniverse3_window_map_primary_cost_rescue_max_gap_density;
+    const double disconnectedFarPairRawGainRequired =
+        std::max(0.0,
+                 static_cast<double>(
+                     probConfig
+                         .signal_center_disconnected_far_pair_cost_rescue_min_raw_gain_fraction)) *
+        adaptiveThreshold;
+    const double disconnectedFarPairOverlapLimit =
+        std::max(0.0,
+                 static_cast<double>(
+                     probConfig
+                         .signal_center_disconnected_far_pair_cost_rescue_max_overlap_fraction)) *
+        baselineImageCost;
+    const bool cellUniverse3DisconnectedFarPairCostRescued =
+        simulationConfig.celluniverse3_enabled &&
+        probConfig.signal_center_disconnected_far_pair_cost_rescue_enabled &&
+        bridgeProposalOnly &&
+        bestLabel == "bridge_primary" &&
+        bridgeProposal != nullptr &&
+        bridgeProposal->signalCenterDisconnectedFarPairRescue &&
+        bridgeProposal->centerSnapApplied &&
+        bridgeProposal->windowBothDaughtersSupported >= 1 &&
+        bridgeProposal->windowMissingDaughterCount <= 1 &&
+        bridgeProposal->windowParentPersists == 0 &&
+        bridgeProposal->windowBestMatchedMinBrightness >=
+            probConfig.signal_center_disconnected_far_pair_min_brightness &&
+        bridgeProposal->cellUniverse3MapRegionPenalty <= 2.0f &&
+        bridgeProposal->signalCenterSeparationRatio >=
+            probConfig.signal_center_disconnected_far_pair_min_sep_ratio &&
+        costDiff <= 0.0 &&
+        imageCostDiff <= -disconnectedFarPairRawGainRequired &&
+        overlapCostDiff <= disconnectedFarPairOverlapLimit &&
+        maxDaughterSeedDrift <=
+            std::max(0.0f, 0.35f * std::max(1.0f, srcMaxR)) &&
+        bridgeCostRescueValleyFromBright <=
+            probConfig.signal_center_disconnected_far_pair_cost_rescue_max_valley_from_bright &&
+        bridgeCostRescueGapDensity <=
+            probConfig.signal_center_disconnected_far_pair_cost_rescue_max_gap_density;
     const bool futureWindowCostRescued =
         futureWindowStrictCostRescued || futureWindowSoftCostRescued ||
         futureWindowStrongCostRescued || futureWindowGeometryCostRescued ||
@@ -13475,7 +13947,9 @@ CostCallbackPair Frame::trySplitCellPhased(
         cellUniverse3WeakPcaBridgeCostRescued ||
         cellUniverse3WindowSoftPenaltyCostRescued ||
         cellUniverse3SignalCenterFutureCostRescued ||
-        cellUniverse3DelayedMissingDaughterCostRescued;
+        cellUniverse3DelayedMissingDaughterCostRescued ||
+        cellUniverse3OutsideFuturePairCostRescued ||
+        cellUniverse3DisconnectedFarPairCostRescued;
     double acceptedCostDiff = costDiff;
     if (bridgeCostRescued) {
         acceptedCostDiff = -std::max(1.0, adaptiveThreshold);
@@ -13516,6 +13990,12 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << (futureWindowGeometryCostRescued ? 1 : 0)
                   << " twoFrameBridgeRescue="
                   << (twoFrameFutureBridgeCostRescued ? 1 : 0)
+                  << " outsideFuturePairRescue="
+                  << (cellUniverse3OutsideFuturePairCostRescued ? 1 : 0)
+                  << " disconnectedFarPairRescue="
+                  << (cellUniverse3DisconnectedFarPairCostRescued ? 1 : 0)
+                  << " disconnectedFarPairRawGainRequired="
+                  << disconnectedFarPairRawGainRequired
                   << " softPenaltyRawGainRescue="
                   << (futureWindowSoftPenaltyRawGainRescued ? 1 : 0)
                   << " softPenaltyRawGainLimit="
@@ -13666,6 +14146,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << cellUniverse3SignalCenterFutureCostLimit
                   << " cellUniverse3DelayedMissingDaughterCostRescue="
                   << (cellUniverse3DelayedMissingDaughterCostRescued ? 1 : 0)
+                  << " cellUniverse3DisconnectedFarPairCostRescue="
+                  << (cellUniverse3DisconnectedFarPairCostRescued ? 1 : 0)
                   << " severePostPcaRodFutureLongMidRatio="
                   << severeCostLongMidRatio
                   << " severePostPcaRodFutureMidShortRatio="

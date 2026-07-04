@@ -85,6 +85,7 @@ struct BridgeSplitProposal
     float signalCenterSeparationRatio = 0.0f;
     float signalCenterMidpointDistance = 0.0f;
     float signalCenterAxisAlignment = 0.0f;
+    bool signalCenterDisconnectedFarPairRescue = false;
     bool cellUniverse3DelayedMissingDaughter = false;
     float parentPersistencePenalty = 0.0f;
     float neighborClaimPenalty = 0.0f;

@@ -121,11 +121,11 @@ prob:
   # If both daughters are already visible in the immediate future window,
   # allow an asymmetric current-frame seed instead of rejecting on parent
   # distance balance alone.
-  pca_bridge_future_window_parent_balance_rescue_min: 0.19
+  pca_bridge_future_window_parent_balance_rescue_min: 0.12
   # Rod-tip fallback can be very asymmetric after post-split movement. Only
   # waive the parent-distance balance floor when both future frames show two
   # bright supported daughters.
-  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.08
+  pca_bridge_future_window_rod_tip_balance_min_brightness: 0.09
   pca_bridge_future_window_rod_tip_midpoint_parent_fraction: 1.00
   # When daughter centers came from the immediate future frame, only let clean
   # future support override current-frame dim/cost gates for very rod-like
@@ -257,9 +257,9 @@ prob:
   rod_tip_axis_place_min_shape: 1.65
   rod_tip_axis_place_max_shape: 2.05
   rod_tip_axis_place_min_future_brightness: 0.20
-  rod_tip_immediate_future_min_brightness: 0.20
-  rod_tip_immediate_future_min_parent_balance: 0.45
-  rod_tip_immediate_future_high_shape_min_parent_balance: 0.35
+  rod_tip_immediate_future_min_brightness: 0.09
+  rod_tip_immediate_future_min_parent_balance: 0.35
+  rod_tip_immediate_future_high_shape_min_parent_balance: 0.30
   pca_bridge_low_balance_future_min_brightness: 0.29
   pca_bridge_low_balance_support_min_parent_balance: 0.08
   pca_bridge_current_fallback_low_balance_min_parent_balance: 0.15
@@ -400,9 +400,9 @@ prob:
   split_stable_future_bridge_max_gap_density: 0.20
   split_stable_future_bridge_max_valley_from_bright: 0.70
   split_stable_future_bridge_min_axis_length_scale: 0.85
-  split_future_rod_tip_primary_min_brightness: 0.18
+  split_future_rod_tip_primary_min_brightness: 0.12
   split_future_rod_tip_primary_min_parent_balance: 0.45
-  split_future_rod_tip_primary_max_gap_density: 0.30
+  split_future_rod_tip_primary_max_gap_density: 0.34
   split_future_rod_tip_primary_max_valley_from_bright: 1.10
   split_future_rod_tip_primary_min_axis_length_scale: 1.10
   split_future_rod_tip_primary_max_drift_abs: 55.0

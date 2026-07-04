@@ -77,6 +77,11 @@ struct BridgeSplitProposal
     int zStackPromotedCandidateId = -1;
     float zStackPromotionZShift = 0.0f;
     bool parentAnchored = false;
+    bool currentFrameNoWindowParentAnchorRescue = false;
+    float currentFrameNoWindowParentAnchorMaxTotalWorsening = 0.0f;
+    float currentFrameNoWindowParentAnchorMaxImageWorsening = 0.0f;
+    float currentFrameNoWindowParentAnchorMaxBridgeValleyRatio = 1.0f;
+    float currentFrameNoWindowParentAnchorMaxSoftPenaltyFraction = 0.0f;
     int gapStartBin = -1;
     int gapEndBin = -1;
     int leftPixelCount = 0;

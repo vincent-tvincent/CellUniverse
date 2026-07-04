@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -17,6 +18,40 @@
 
 namespace
 {
+std::int64_t stableFloatRank(float value, double scale = 1000000.0)
+{
+    if (!std::isfinite(value))
+    {
+        return value < 0.0f
+            ? std::numeric_limits<std::int64_t>::min()
+            : std::numeric_limits<std::int64_t>::max();
+    }
+    return static_cast<std::int64_t>(std::llround(static_cast<double>(value) * scale));
+}
+
+bool centerYxzLess(const cv::Point3f &lhs, const cv::Point3f &rhs)
+{
+    const std::int64_t lhsY = stableFloatRank(lhs.y);
+    const std::int64_t rhsY = stableFloatRank(rhs.y);
+    if (lhsY != rhsY)
+    {
+        return lhsY < rhsY;
+    }
+    const std::int64_t lhsX = stableFloatRank(lhs.x);
+    const std::int64_t rhsX = stableFloatRank(rhs.x);
+    if (lhsX != rhsX)
+    {
+        return lhsX < rhsX;
+    }
+    return stableFloatRank(lhs.z) < stableFloatRank(rhs.z);
+}
+
+bool detectedCellCenterYxzLess(const CellLumen::DetectedCell &lhs,
+                               const CellLumen::DetectedCell &rhs)
+{
+    return centerYxzLess(lhs.centerScaled, rhs.centerScaled);
+}
+
 std::vector<float> collectSampledValues(const std::vector<cv::Mat> &volume)
 {
     std::vector<float> values;
@@ -1036,7 +1071,21 @@ std::vector<EmbryoBrightTracker::Comp3DStat> CellLumen::extractLocalMaximumSeeds
     }
 
     std::sort(peaks.begin(), peaks.end(), [](const Peak &lhs, const Peak &rhs) {
-        return lhs.value > rhs.value;
+        const std::int64_t lhsValue = stableFloatRank(lhs.value);
+        const std::int64_t rhsValue = stableFloatRank(rhs.value);
+        if (lhsValue != rhsValue)
+        {
+            return lhsValue > rhsValue;
+        }
+        if (lhs.z != rhs.z)
+        {
+            return lhs.z < rhs.z;
+        }
+        if (lhs.y != rhs.y)
+        {
+            return lhs.y < rhs.y;
+        }
+        return lhs.x < rhs.x;
     });
 
     const float minDistance = std::max(1.0f, config.cellLumen.localMaxSeedMinDistance);
@@ -1243,7 +1292,21 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsBySeededWatershed(
     }
 
     std::sort(peaks.begin(), peaks.end(), [](const Peak &lhs, const Peak &rhs) {
-        return lhs.value > rhs.value;
+        const std::int64_t lhsValue = stableFloatRank(lhs.value);
+        const std::int64_t rhsValue = stableFloatRank(rhs.value);
+        if (lhsValue != rhsValue)
+        {
+            return lhsValue > rhsValue;
+        }
+        if (lhs.z != rhs.z)
+        {
+            return lhs.z < rhs.z;
+        }
+        if (lhs.y != rhs.y)
+        {
+            return lhs.y < rhs.y;
+        }
+        return lhs.x < rhs.x;
     });
 
     const float minSeedDistance = std::max(1.0f, config.cellLumen.seededWatershedMinSeedDistance);
@@ -1348,7 +1411,21 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsBySeededWatershed(
         {
             bool operator()(const DistanceNode &lhs, const DistanceNode &rhs) const
             {
-                return lhs.distance > rhs.distance;
+                const std::int64_t lhsDistance = stableFloatRank(lhs.distance);
+                const std::int64_t rhsDistance = stableFloatRank(rhs.distance);
+                if (lhsDistance != rhsDistance)
+                {
+                    return lhsDistance > rhsDistance;
+                }
+                if (lhs.z != rhs.z)
+                {
+                    return lhs.z > rhs.z;
+                }
+                if (lhs.y != rhs.y)
+                {
+                    return lhs.y > rhs.y;
+                }
+                return lhs.x > rhs.x;
             }
         };
         const std::array<cv::Point3i, 6> distanceNeighbors = {
@@ -1476,7 +1553,25 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsBySeededWatershed(
     {
         bool operator()(const GrowNode &lhs, const GrowNode &rhs) const
         {
-            return lhs.priority < rhs.priority;
+            const std::int64_t lhsPriority = stableFloatRank(lhs.priority);
+            const std::int64_t rhsPriority = stableFloatRank(rhs.priority);
+            if (lhsPriority != rhsPriority)
+            {
+                return lhsPriority < rhsPriority;
+            }
+            if (lhs.seedIndex != rhs.seedIndex)
+            {
+                return lhs.seedIndex > rhs.seedIndex;
+            }
+            if (lhs.z != rhs.z)
+            {
+                return lhs.z > rhs.z;
+            }
+            if (lhs.y != rhs.y)
+            {
+                return lhs.y > rhs.y;
+            }
+            return lhs.x > rhs.x;
         }
     };
 
@@ -1654,13 +1749,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsBySeededWatershed(
 
     cells = applyBiologicalPriors(cells, volume, "seeded_watershed");
 
-    std::sort(cells.begin(), cells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-        if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-        {
-            return lhs.centerScaled.y < rhs.centerScaled.y;
-        }
-        return lhs.centerScaled.x < rhs.centerScaled.x;
-    });
+    std::sort(cells.begin(), cells.end(), detectedCellCenterYxzLess);
 
     for (size_t i = 0; i < cells.size(); ++i)
     {
@@ -1963,13 +2052,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsAtPercentile(
         cells.push_back(coarseCell);
     }
 
-    std::sort(cells.begin(), cells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-        if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-        {
-            return lhs.centerScaled.y < rhs.centerScaled.y;
-        }
-        return lhs.centerScaled.x < rhs.centerScaled.x;
-    });
+    std::sort(cells.begin(), cells.end(), detectedCellCenterYxzLess);
 
     for (size_t i = 0; i < cells.size(); ++i)
     {
@@ -3561,13 +3644,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::splitCellsByLocalZPeaks(
 
     if (splitParents > 0)
     {
-        std::sort(splitCells.begin(), splitCells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(splitCells.begin(), splitCells.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < splitCells.size(); ++i)
         {
             splitCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -3665,21 +3742,8 @@ std::vector<CellLumen::DetectedCell> CellLumen::addZProfileRescueCandidates(
     const float minExistingDistanceSq = minExistingDistance * minExistingDistance;
     const float radiusScale =
         clampf(config.cellLumen.finalZProfileRescueRadiusScale, 0.30f, 1.0f);
-    int maxAdded = std::max(0, config.cellLumen.finalZProfileRescueMaxAdded);
-    const bool boostWindowMatches =
-        config.cellLumen.finalZProfileRescueBoostMaxAdded > maxAdded &&
-        (config.cellLumen.finalZProfileRescueBoostMinCells <= 0 ||
-         cellCount >= config.cellLumen.finalZProfileRescueBoostMinCells) &&
-        (config.cellLumen.finalZProfileRescueBoostMaxCells <= 0 ||
-         cellCount <= config.cellLumen.finalZProfileRescueBoostMaxCells);
-    if (boostWindowMatches)
-    {
-        // This narrow recall boost is for sparse frames where collapse leaves a
-        // small, clean-looking candidate set but one true z-separated center is
-        // still present in lower-ranked image evidence. A global budget raise
-        // creates too many internal fragments, so the boost is count-gated.
-        maxAdded = config.cellLumen.finalZProfileRescueBoostMaxAdded;
-    }
+    const int baseMaxAdded = std::max(0, config.cellLumen.finalZProfileRescueMaxAdded);
+    int maxAdded = baseMaxAdded;
 
     std::vector<RescueOption> options;
     options.reserve(cells.size());
@@ -3815,8 +3879,64 @@ std::vector<CellLumen::DetectedCell> CellLumen::addZProfileRescueCandidates(
 
     std::sort(options.begin(), options.end(), [](const RescueOption &lhs,
                                                  const RescueOption &rhs) {
-        return lhs.priority > rhs.priority;
+        const std::int64_t lhsPriority = stableFloatRank(lhs.priority);
+        const std::int64_t rhsPriority = stableFloatRank(rhs.priority);
+        if (lhsPriority != rhsPriority)
+        {
+            return lhsPriority > rhsPriority;
+        }
+        const std::int64_t lhsScore = stableFloatRank(lhs.score);
+        const std::int64_t rhsScore = stableFloatRank(rhs.score);
+        if (lhsScore != rhsScore)
+        {
+            return lhsScore > rhsScore;
+        }
+        const std::int64_t lhsShift = stableFloatRank(lhs.shift);
+        const std::int64_t rhsShift = stableFloatRank(rhs.shift);
+        if (lhsShift != rhsShift)
+        {
+            return lhsShift < rhsShift;
+        }
+        if (!centerYxzLess(lhs.parentCenter, rhs.parentCenter) &&
+            !centerYxzLess(rhs.parentCenter, lhs.parentCenter))
+        {
+            return centerYxzLess(lhs.cell.centerScaled, rhs.cell.centerScaled);
+        }
+        return centerYxzLess(lhs.parentCenter, rhs.parentCenter);
     });
+
+    bool evidenceBoost = false;
+    int evidenceBoostQualified = 0;
+    float evidenceBoostThreshold = 0.0f;
+    const int evidenceBoostMaxAdded =
+        std::max(0, config.cellLumen.finalZProfileRescueEvidenceBoostMaxAdded);
+    const float evidenceBoostMinPriorityRatio =
+        clampf(config.cellLumen.finalZProfileRescueEvidenceBoostMinPriorityRatio, 0.0f, 1.0f);
+    if (config.cellLumen.finalZProfileRescueEvidenceBoostEnabled &&
+        evidenceBoostMaxAdded > maxAdded &&
+        static_cast<int>(options.size()) > maxAdded &&
+        !options.empty())
+    {
+        const float topPriority = options.front().priority;
+        if (std::isfinite(topPriority) && topPriority > 0.0f)
+        {
+            evidenceBoostThreshold = topPriority * evidenceBoostMinPriorityRatio;
+            const int optionLimit =
+                std::min<int>(evidenceBoostMaxAdded, static_cast<int>(options.size()));
+            for (int i = 0; i < optionLimit; ++i)
+            {
+                if (options[static_cast<size_t>(i)].priority >= evidenceBoostThreshold)
+                {
+                    evidenceBoostQualified = i + 1;
+                }
+            }
+            if (evidenceBoostQualified > maxAdded)
+            {
+                maxAdded = evidenceBoostQualified;
+                evidenceBoost = true;
+            }
+        }
+    }
 
     // Keep this diagnostic attached to the rescue stage rather than a separate
     // ad hoc script. The whole purpose of this default-off rescue is to recover
@@ -3854,14 +3974,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::addZProfileRescueCandidates(
 
     if (added > 0)
     {
-        std::sort(output.begin(), output.end(), [](const DetectedCell &lhs,
-                                                   const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(output.begin(), output.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < output.size(); ++i)
         {
             output[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -3876,8 +3989,13 @@ std::vector<CellLumen::DetectedCell> CellLumen::addZProfileRescueCandidates(
               << " considered=" << considered
               << " options=" << options.size()
               << " added=" << added
+              << " base_max_added=" << baseMaxAdded
               << " max_added=" << maxAdded
-              << " boost_window=" << boostWindowMatches
+              << " evidence_boost=" << evidenceBoost
+              << " evidence_boost_max_added=" << evidenceBoostMaxAdded
+              << " evidence_boost_min_priority_ratio=" << evidenceBoostMinPriorityRatio
+              << " evidence_boost_threshold=" << evidenceBoostThreshold
+              << " evidence_boost_qualified=" << evidenceBoostQualified
               << " min_shift=" << minShift
               << " max_shift=" << maxShift
               << " min_score_fraction=" << minScoreFraction
@@ -5251,14 +5369,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
 
     if (collapsed.size() != cells.size())
     {
-        std::sort(collapsed.begin(), collapsed.end(), [](const DetectedCell &lhs,
-                                                         const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(collapsed.begin(), collapsed.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < collapsed.size(); ++i)
         {
             collapsed[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -5965,13 +6076,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInVolume(
             ++added;
         }
 
-        std::sort(bestCells.begin(), bestCells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(bestCells.begin(), bestCells.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < bestCells.size(); ++i)
         {
             bestCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -6302,13 +6407,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInVolume(
                       << std::endl;
         }
 
-        std::sort(bestCells.begin(), bestCells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(bestCells.begin(), bestCells.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < bestCells.size(); ++i)
         {
             bestCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -6569,13 +6668,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInVolume(
             bestCells = std::move(merged);
         }
 
-        std::sort(bestCells.begin(), bestCells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(bestCells.begin(), bestCells.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < bestCells.size(); ++i)
         {
             bestCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -6606,13 +6699,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInVolume(
     }
     if (bestCells.size() != beforeZPeakSplit)
     {
-        std::sort(bestCells.begin(), bestCells.end(), [](const DetectedCell &lhs, const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(bestCells.begin(), bestCells.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < bestCells.size(); ++i)
         {
             bestCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -6805,14 +6892,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInVolume(
         bestCells = splitCellsByLocalZPeaks(volume, bestCells, frameStem);
         if (bestCells.size() != beforePostCollapseZPeakSplit)
         {
-            std::sort(bestCells.begin(), bestCells.end(), [](const DetectedCell &lhs,
-                                                             const DetectedCell &rhs) {
-                if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-                {
-                    return lhs.centerScaled.y < rhs.centerScaled.y;
-                }
-                return lhs.centerScaled.x < rhs.centerScaled.x;
-            });
+            std::sort(bestCells.begin(), bestCells.end(), detectedCellCenterYxzLess);
             for (size_t i = 0; i < bestCells.size(); ++i)
             {
                 bestCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));
@@ -6825,14 +6905,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::detectCellsInVolume(
     bestCells = addZProfileRescueCandidates(volume, bestCells, frameStem);
     if (bestCells.size() != beforeZProfileRescue)
     {
-        std::sort(bestCells.begin(), bestCells.end(), [](const DetectedCell &lhs,
-                                                         const DetectedCell &rhs) {
-            if (std::abs(lhs.centerScaled.y - rhs.centerScaled.y) > 1e-3f)
-            {
-                return lhs.centerScaled.y < rhs.centerScaled.y;
-            }
-            return lhs.centerScaled.x < rhs.centerScaled.x;
-        });
+        std::sort(bestCells.begin(), bestCells.end(), detectedCellCenterYxzLess);
         for (size_t i = 0; i < bestCells.size(); ++i)
         {
             bestCells[i].name = makeCellName(frameStem, static_cast<int>(i + 1));

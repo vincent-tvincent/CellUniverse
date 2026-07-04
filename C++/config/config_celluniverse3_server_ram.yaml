@@ -7,10 +7,11 @@ base_config: config_celluniverse3_server_fast.yaml
 # remains the CPU/server throughput baseline; this overlay only changes the
 # memory retention policy.
 simulation:
-  # Keep all prepared frame stacks in RAM for the duration of the run.
-  # Disk cache remains enabled in the base profile as a recovery/backstop path,
-  # but in-memory prepared frames should not be evicted by the CU3 pruning pass.
+  # Keep prepared frame stacks in RAM for the duration of the run and avoid
+  # writing disk-backed prepared-frame binaries on quota-limited shared storage.
   celluniverse3_frame_cache_prune_enabled: false
+  celluniverse3_prepared_frame_disk_cache_enabled: false
+  celluniverse3_prepared_frame_disk_cache_signal_map_enabled: false
 
   # Preserve the full CU3 lookahead policy from the fast profile for readers and
   # for any future code path that consults these limits when pruning is enabled.

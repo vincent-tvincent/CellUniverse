@@ -36,10 +36,10 @@ simulation:
   celluniverse3_frame_cache_keep_future: 20
   celluniverse3_frame_cache_min_available_gb: 6.0
   celluniverse3_frame_cache_pressure_keep_future: 4
-  # Exact disk-backed prepared-frame cache for CellUniverse3 only. This lets
-  # pruned frames reload from the run output folder instead of re-running
-  # preprocessing and signal-map construction.
-  celluniverse3_prepared_frame_disk_cache_enabled: true
+  # Disk-backed prepared-frame cache for CellUniverse3. Disabled by
+  # default on shared/quota-limited servers; in-memory future windows
+  # avoid writing hundreds of MB per frame to the job folder.
+  celluniverse3_prepared_frame_disk_cache_enabled: false
   celluniverse3_prepared_frame_disk_cache_signal_map_enabled: true
   # Movement guidance from the same future local Wmax/Wsum maps:
   # allowed_region = dilate(Wmax > threshold), probability follows

@@ -23,9 +23,9 @@ simulation:
   celluniverse3_frame_cache_min_available_gb: 64.0
   celluniverse3_frame_cache_pressure_keep_future: 20
 
-  # Cache signal maps too. This uses more disk per prepared frame, but avoids
-  # rebuilding signal maps every time a cached prepared frame is reused.
-  celluniverse3_prepared_frame_disk_cache_enabled: true
+  # Disk-backed prepared-frame cache is disabled by default on this
+  # shared server profile to avoid writing hundreds of MB per frame.
+  celluniverse3_prepared_frame_disk_cache_enabled: false
   celluniverse3_prepared_frame_disk_cache_signal_map_enabled: true
 
   # Moderate throughput tuning. These reduce the most expensive sampling loops

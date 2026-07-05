@@ -677,18 +677,43 @@ profiles:
         fusionSplitPriorTemporalRepairWideCleanSelectableMaxScore: 0.0
         fusionSplitPriorTemporalRepairWideCleanSelectableSelectionBonus: 80.0
         # Sparse early frames can contain a real first division inside a center
-        # cluster that was collapsed to fight over-splitting. Keep those wide,
-        # strong pairs as soft candidates only when the parent itself is still
-        # elongated enough; otherwise broad low-shape cells can gain artificial
-        # daughters from internal texture peaks.
+        # cluster that was collapsed to fight over-splitting. The full f000
+        # reproducibility audit caught f004 regressing because this path still
+        # used parent shape and parent-distance balance as hard vetoes. Keep the
+        # evidence requirements strong, but score low shape, asymmetric parent
+        # balance, or borderline watershed voxel/signal support as penalties so
+        # early true daughter pairs remain selectable instead of disappearing
+        # outside the split graph.
         fusionSplitPriorCollapsedCenterPairSoftRescueEnabled: true
-        fusionSplitPriorCollapsedCenterPairSoftRescueRequireParentShape: true
+        fusionSplitPriorCollapsedCenterPairSoftRescueRequireParentShape: false
+        fusionSplitPriorCollapsedCenterPairSoftRescueAllowAsymmetricBalance: true
         fusionSplitPriorCollapsedCenterPairSoftRescueMaxCells: 48
         fusionSplitPriorCollapsedCenterPairSoftRescueMinSeparationFraction: 0.90
         fusionSplitPriorCollapsedCenterPairSoftRescueMinVoxels: 2200
         fusionSplitPriorCollapsedCenterPairSoftRescueMinSignal: 70.0
+        fusionSplitPriorCollapsedCenterPairSoftRescueAllowWeakEvidencePenalty: true
+        # 20260705 f033: collapsed soft rescue must not enter GlobalSelect from
+        # separation/voxel evidence alone when the sparse-frame 3D slab bridge
+        # preview sees no real saddle. This keeps f004/f007/f018 close-daughter
+        # hypotheses alive only when the same pre-GlobalSelect bridge evidence
+        # supports them.
+        fusionSplitPriorCollapsedCenterPairSoftRescueRequireBridgePreviewWeak: true
+        # 20260705 f033: before GlobalSelect, penalize the shape-aware risk
+        # pattern that later Frame.cpp rejects as overlap with no real valley:
+        # low-shape parent, short collapsed pair, and only borderline slab
+        # valley. This is a soft selection cost, not a hard frame-specific veto.
+        fusionSplitPriorCollapsedCenterPairSoftRescueBridgeShapeRiskPenaltyEnabled: true
+        fusionSplitPriorCollapsedCenterPairSoftRescueBridgeShapeRiskMaxParentShape: 1.90
+        fusionSplitPriorCollapsedCenterPairSoftRescueBridgeShapeRiskMaxSeparation: 35.0
+        fusionSplitPriorCollapsedCenterPairSoftRescueBridgeShapeRiskMinValley: 0.80
+        fusionSplitPriorCollapsedCenterPairSoftRescueBridgeShapeRiskPenalty: 90.0
+        fusionSplitPriorCollapsedCenterPairSoftRescueMinWeakVoxelFraction: 0.75
+        fusionSplitPriorCollapsedCenterPairSoftRescueMinWeakSignalFraction: 0.85
         fusionSplitPriorCollapsedCenterPairSoftRescueSeparationPenaltyWeight: 1.0
         fusionSplitPriorCollapsedCenterPairSoftRescueShapePenaltyWeight: 4.0
+        fusionSplitPriorCollapsedCenterPairSoftRescueBalancePenaltyWeight: 8.0
+        fusionSplitPriorCollapsedCenterPairSoftRescueVoxelPenaltyWeight: 0.01
+        fusionSplitPriorCollapsedCenterPairSoftRescueSignalPenaltyWeight: 0.25
         # f017 showed one strong Cell Lumen center just outside the ordinary
         # 24px center prior range. Allow this only in sparse early frames so
         # fast moving early cells can reanchor without opening dense-frame risk.
@@ -705,6 +730,10 @@ profiles:
         # remain conservative.
         fusionCenterPriorYoungFarSingleEnabled: true
         fusionCenterPriorYoungFarSingleMaxAgeFrames: 2
+        # Full f000 reproducibility audit showed that age alone treats initial
+        # root cells as newborns. Require an actual lineage suffix so this path
+        # remains a daughter continuation rescue instead of moving f000 roots.
+        fusionCenterPriorYoungFarSingleRequireLineageParent: true
         fusionCenterPriorYoungFarSingleMaxCells: 90
         fusionCenterPriorYoungFarSingleMinDistance: 24.0
         fusionCenterPriorYoungFarSingleMaxDistance: 38.0
@@ -801,6 +830,14 @@ profiles:
         fusionSplitPriorEarlyLargeSeparationMinParentDistanceBalance: 0.35
         fusionSplitPriorEarlyLargeSeparationMinParentShape: 1.2
         fusionSplitPriorEarlyLargeSeparationMaxScore: 22.0
+        # Early sparse true daughter pairs can be recognized by Cell Lumen but
+        # receive a higher local split score when one center is slightly weaker
+        # or when the future window still sees parent persistence. Keep the
+        # geometry as the hard floor, then let a soft selection bonus decide in
+        # GlobalSelect instead of hard rejecting by the old score cutoff.
+        fusionSplitPriorEarlyLargeSeparationSoftScoreSelectionEnabled: true
+        fusionSplitPriorEarlyLargeSeparationSoftMaxScore: 50.0
+        fusionSplitPriorEarlyLargeSeparationSelectionBonus: 40.0
         fusionSplitPriorEarlyLargeSeparationMinWindowBoth: 0
         fusionSplitPriorEarlyLargeSeparationMaxWindowMissing: 3
         fusionSplitPriorEarlyLargeSeparationMaxWindowParentPersists: 1
@@ -846,6 +883,58 @@ profiles:
         fusionSplitPriorCurrentFrameNoWindowParentAnchorMaxImageWorsening: 50000.0
         fusionSplitPriorCurrentFrameNoWindowParentAnchorMaxBridgeValleyRatio: 1.15
         fusionSplitPriorCurrentFrameNoWindowParentAnchorMaxSoftPenaltyFraction: 0.20
+        fusionSplitPriorCurrentFrameNoWindowParentAnchorRequireBridgePreviewStrong: true
+        # 20260705 f018 manual GT audit: close early daughters can have a
+        # continuous bridge and be classified as internal peaks before
+        # GlobalSelect. Keep only clean two-window, no-parent-persistence,
+        # two-real CellLumen pairs selectable; the final split bridge and cost
+        # gates still decide acceptance.
+        fusionSplitPriorEarlyCloseDaughterTemporalSelectableEnabled: true
+        fusionSplitPriorEarlyCloseDaughterTemporalRequireBridgePreviewWeak: true
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxFrame: 24
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxCells: 48
+        fusionSplitPriorEarlyCloseDaughterTemporalMinSeparation: 14.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxSeparation: 32.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMinLateralSeparation: 12.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxZDominance: 0.80
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxMidpointDistance: 32.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMinParentShape: 1.50
+        fusionSplitPriorEarlyCloseDaughterTemporalMinParentDistanceBalance: 0.35
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxParentDistanceBalance: 0.95
+        fusionSplitPriorEarlyCloseDaughterTemporalMinWindowBoth: 2
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxWindowMissing: 0
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxWindowParentPersists: 0
+        fusionSplitPriorEarlyCloseDaughterTemporalMinWeakVoxels: 750
+        fusionSplitPriorEarlyCloseDaughterTemporalMinStrongVoxels: 3000
+        fusionSplitPriorEarlyCloseDaughterTemporalMinWeakSignal: 60.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMinStrongSignal: 65.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxNeighborClaimPenalty: 0.00001
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxContinuationClaimPenalty: 0.00001
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxParentPersistencePenalty: 0.00001
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxRankingSoftPenalty: 45.0
+        fusionSplitPriorEarlyCloseDaughterTemporalMaxScore: 40.0
+        fusionSplitPriorEarlyCloseDaughterTemporalSelectionBonus: 55.0
+        # 20260705 f018: move the strongest 3D slab bridge evidence before
+        # GlobalSelect. This does not accept a split; it only lets plausible
+        # close-daughter CellLumen pairs compete before the final Frame.cpp
+        # bridge and cost gates make the real decision.
+        fusionSplitPriorBridgePreviewEnabled: true
+        fusionSplitPriorBridgePreviewMaxFrame: -1
+        fusionSplitPriorBridgePreviewMaxCells: 48
+        fusionSplitPriorBridgePreviewCrossRadius: 6.0
+        fusionSplitPriorBridgePreviewMinVoxelsPerSlab: 3
+        fusionSplitPriorBridgePreviewStrongMaxValleyRatio: 0.82
+        fusionSplitPriorBridgePreviewWeakMaxValleyRatio: 0.88
+        fusionSplitPriorBridgePreviewMinEdgeBrightness: 0.01
+        fusionSplitPriorBridgePreviewCollapsedPairSelectionBonus: 40.0
+        fusionSplitPriorBridgePreviewSelectionBonus: 45.0
+        # 20260705 f034: bridge preview rescued a real f035 split one frame
+        # early because the future window already supported daughters while
+        # the current frame still had a strong continuation explanation. Keep
+        # bridge-preview-only selection for no-window current-frame evidence;
+        # future-backed timing should be handled by temporal scoring paths.
+        fusionSplitPriorBridgePreviewSelectableRequireNoWindowSupport: true
+        fusionSplitPriorBridgePreviewRejectParentPersistingPartialWindow: true
         fusionSplitPriorContinuationClaimGuardEnabled: true
         fusionSplitPriorContinuationClaimRadiusScale: 1.35
         fusionSplitPriorContinuationClaimTieMargin: 4.0
@@ -1697,8 +1786,12 @@ profiles:
         initialPriorClusterCollapseSkipAboveGroupCount: 25
         initialPriorClusterCollapseSkipDiameterGuardMinCells: 55
         initialPriorClusterCollapseSkipDiameterGuardMaxCells: 63
+        # 20260705 f018 manual audit: LowRescue found bright close-daughter
+        # members, but initial-prior collapse removed them before split scoring.
+        # This keeps a few far-from-centroid bright members as hypotheses only;
+        # CellUniverse still decides through split selection and temporal evidence.
         initialPriorClusterCollapseAmbiguousAddbackEnabled: true
-        initialPriorClusterCollapseAmbiguousAddbackMinCells: 44
+        initialPriorClusterCollapseAmbiguousAddbackMinCells: 26
         initialPriorClusterCollapseAmbiguousAddbackMaxCells: 63
         initialPriorClusterCollapseAmbiguousAddbackMaxAdded: 8
         initialPriorClusterCollapseAmbiguousAddbackMaxPerGroup: 1
@@ -1708,6 +1801,15 @@ profiles:
         initialPriorClusterCollapseValleyGuardEnabled: false
         initialPriorClusterCollapseValleyMaxQ20Ratio: 0.72
         initialPriorClusterCollapseValleyMinDrop: 15.0
+        # 20260705 f018 manual GT audit: replace the fragile center-line q20
+        # collapse protection with a 3D slab-min bridge check before GlobalSelect
+        # can lose close daughter hypotheses. This only prevents early CellLumen
+        # candidate merging; it does not accept a lineage split.
+        initialPriorClusterCollapseSlabValleyGuardEnabled: true
+        initialPriorClusterCollapseSlabValleyMaxRatio: 0.85
+        initialPriorClusterCollapseSlabValleyMinDrop: 0.0
+        initialPriorClusterCollapseSlabValleyCrossRadius: 6.0
+        initialPriorClusterCollapseSlabValleyMinVoxelsPerSlab: 3
         finalDominatedDuplicateFilterEnabled: false
         finalDominatedDuplicateFilterMinCells: -1
         finalDominatedDuplicateFilterMaxCells: -1
@@ -2291,6 +2393,62 @@ profiles:
         fusionSplitPriorCleanTwoRealParentAnchorReplacementMinSeparationRadiusScale: 1.0
         fusionSplitPriorCleanTwoRealParentAnchorReplacementMaxMidpointDistance: 22.0
         fusionSplitPriorCleanTwoRealParentAnchorReplacementSelectionBonus: 45.0
+        # Ultrack-inspired complementary selector: keep CellUniverse/CellLumen as
+        # the candidate and cost generator, but let clean two-real Cell Lumen
+        # hypotheses receive a soft global-selection bonus when temporal
+        # evidence supports both daughters. This is enabled only in the
+        # f085-f120 transition profile to test whether multi-evidence scoring
+        # reduces gate-by-gate tuning without copying Ultrack's full optimizer.
+        fusionSplitPriorCompositeEvidenceSelectorEnabled: true
+        fusionSplitPriorCompositeEvidenceMinWindowBoth: 2
+        fusionSplitPriorCompositeEvidenceMaxWindowMissing: 0
+        fusionSplitPriorCompositeEvidenceMaxWindowParentPersists: 0
+        fusionSplitPriorCompositeEvidenceMinWeakVoxels: 1500
+        fusionSplitPriorCompositeEvidenceMinStrongVoxels: 2000
+        fusionSplitPriorCompositeEvidenceMinWeakSignal: 90.0
+        fusionSplitPriorCompositeEvidenceMinStrongSignal: 120.0
+        fusionSplitPriorCompositeEvidenceMinSeparationRadiusScale: 1.4
+        fusionSplitPriorCompositeEvidenceMaxMidpointDistance: 16.0
+        fusionSplitPriorCompositeEvidenceMaxRankingSoftPenalty: 12.0
+        fusionSplitPriorCompositeEvidenceMaxNeighborPenalty: 0.00001
+        fusionSplitPriorCompositeEvidenceMaxParentPersistencePenalty: 0.00001
+        fusionSplitPriorCompositeEvidenceMaxContinuationPenalty: 0.00001
+        fusionSplitPriorCompositeEvidenceMaxScore: 30.0
+        fusionSplitPriorCompositeEvidenceSelectionBonus: 45.0
+        # Keep the composite selector as a soft scorer, not a bypass around the
+        # existing duplicate protections. f120 showed that a z-column internal
+        # texture pair can have clean two-frame CellLumen support and still be a
+        # continuing cell, so this profile requires composite evidence to
+        # respect the same low-shape/z-stack guards as ordinary split priors.
+        fusionSplitPriorCompositeEvidenceRespectDuplicateGuardsEnabled: true
+        # Ultrack-inspired ownership competition: strong parent-anchor
+        # continuation candidates are treated as soft ownership claims during
+        # global split selection. This prevents one parent from stealing another
+        # parent's likely continuation/daughter center and then leaving a
+        # half-executed split plan when the stolen split later fails overlap
+        # validation.
+        fusionSplitPriorParentAnchorOwnershipProtectionEnabled: true
+        fusionSplitPriorParentAnchorOwnershipMinWindowBoth: 2
+        fusionSplitPriorParentAnchorOwnershipMaxWindowMissing: 0
+        fusionSplitPriorParentAnchorOwnershipMaxWindowParentPersists: 0
+        fusionSplitPriorParentAnchorOwnershipMinVoxels: 1000
+        fusionSplitPriorParentAnchorOwnershipMinSignal: 80.0
+        fusionSplitPriorParentAnchorOwnershipMaxScore: 20.0
+        fusionSplitPriorParentAnchorOwnershipPenalty: 80.0
+        # f118 has one daughter almost on the old parent center and one strong
+        # separated daughter. Keep that continuation-style split as an opt-in
+        # subcase instead of lowering the balanced replacement thresholds that
+        # protect other close-daughter frames.
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementEnabled: true
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMaxParentDistanceBalance: 0.25
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMaxNearParentDistance: 6.0
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMinFarParentDistance: 24.0
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMinSeparationRadiusScale: 2.2
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMaxMidpointDistance: 14.0
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMinVoxels: 1800
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMinSignal: 120.0
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementMaxScore: 20.0
+        fusionSplitPriorCleanTwoRealParentAnchorContinuationReplacementSelectionBonus: 45.0
         # f103 Cell type 1_4110 exposed a one-frame-early compact replacement:
         # only one future window had both daughters, another still had the
         # parent, and the selected pair had short separation plus marginal
@@ -2826,6 +2984,20 @@ profiles:
         fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowMissing: 0
         fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxWindowParentPersists: 0
         fusionTemporalCenterRepairParentAnchorStrongLowShapeMaxScore: 2.0
+        # f119 exposed the risk of relaxing PCA with future evidence but not
+        # first anchoring the cell to the supported Cell Lumen center. Treat a
+        # same-parent one-real split prior as continuation evidence when the
+        # current center is strong and the future window supports it; this keeps
+        # CellLumen as the center source while adding an Ultrack-style temporal
+        # consistency layer before final PCA shape fitting.
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorEnabled: true
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorMinWindowBoth: 2
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorMaxWindowMissing: 0
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorMaxWindowParentPersists: 0
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorMinVoxels: 1500
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorMinSignal: 120.0
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorMaxScore: 5.0
+        fusionTemporalCenterRepairSplitPriorTemporalAnchorScoreBonus: 18.0
         # In the f085-f120 density stage, a rejected same-parent split center can
         # still be the correct continuation anchor. f088/f089 showed this for
         # strong Cell Lumen centers that were not selected as divisions but were
@@ -2860,6 +3032,14 @@ profiles:
         # stale old center, so the old-support guard blocks the repair target
         # itself. Enable only this own-support case in the f085-f120 profile.
         fusionTemporalCenterRepairWeakSameParentContinuationOwnSupportBypassEnabled: true
+        # f117 exposed a delayed center miss caused by f116 Cell type 1_3011:
+        # a weak own-support parent-anchor repair moved an already
+        # future-supported center downward in Z without increasing future
+        # support. Keep weak own-support bypass available, but block this
+        # no-gain downward-drift pattern when the candidate signal stays weak.
+        fusionTemporalCenterRepairWeakOwnSupportNoGainDownwardGuardEnabled: true
+        fusionTemporalCenterRepairWeakOwnSupportNoGainDownwardMinZShift: 6.0
+        fusionTemporalCenterRepairWeakOwnSupportNoGainDownwardMaxSignal: 95.0
         # f089 clean-run failure: a strong same-parent Cell Lumen center was
         # reserved by a split prior, the split was rejected, and the old center
         # still passed a loose future-window check. Let center repair use the

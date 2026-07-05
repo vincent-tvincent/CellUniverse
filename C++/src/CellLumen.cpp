@@ -611,6 +611,205 @@ struct LineIntensityProfile
     float median = 0.0f;
 };
 
+struct SlabBridgeProfile
+{
+    int gapCount = 0;
+    int edgeCount = 0;
+    int minSlabIndex = -1;
+    float gapBright = 0.0f;
+    float gapBrightMean = 0.0f;
+    float edge1Bright = 0.0f;
+    float edge2Bright = 0.0f;
+    float edgeBright = 0.0f;
+    float valleyFromBright = 1.0f;
+};
+
+std::optional<SlabBridgeProfile> sampleSlabBridgeProfile(
+    const std::vector<cv::Mat> &volume,
+    const cv::Point3f &aScaled,
+    const cv::Point3f &bScaled,
+    float zScale,
+    float crossRadius,
+    int minVoxelsPerSlab)
+{
+    if (volume.empty() || zScale <= 0.0f)
+    {
+        return std::nullopt;
+    }
+
+    const int Z = static_cast<int>(volume.size());
+    const int Y = volume.front().rows;
+    const int X = volume.front().cols;
+    if (Z <= 0 || Y <= 0 || X <= 0)
+    {
+        return std::nullopt;
+    }
+
+    cv::Point3f axis = bScaled - aScaled;
+    const float axisLen = static_cast<float>(cv::norm(axis));
+    if (axisLen <= 1e-3f)
+    {
+        return std::nullopt;
+    }
+    axis.x /= axisLen;
+    axis.y /= axisLen;
+    axis.z /= axisLen;
+
+    const cv::Point3f midpoint(
+        0.5f * (aScaled.x + bScaled.x),
+        0.5f * (aScaled.y + bScaled.y),
+        0.5f * (aScaled.z + bScaled.z));
+    const float halfLen = 0.5f * axisLen;
+    const float gapHalf = std::max(0.15f * halfLen, 1.0f);
+    const float radius = std::max(1.0f, crossRadius);
+    const float radiusSq = radius * radius;
+
+    const int x0 = std::clamp(
+        static_cast<int>(std::floor(std::min(aScaled.x, bScaled.x) - radius - 2.0f)),
+        0,
+        X - 1);
+    const int x1 = std::clamp(
+        static_cast<int>(std::ceil(std::max(aScaled.x, bScaled.x) + radius + 2.0f)),
+        0,
+        X - 1);
+    const int y0 = std::clamp(
+        static_cast<int>(std::floor(std::min(aScaled.y, bScaled.y) - radius - 2.0f)),
+        0,
+        Y - 1);
+    const int y1 = std::clamp(
+        static_cast<int>(std::ceil(std::max(aScaled.y, bScaled.y) + radius + 2.0f)),
+        0,
+        Y - 1);
+    const int z0 = std::clamp(
+        static_cast<int>(std::floor((std::min(aScaled.z, bScaled.z) - radius - 2.0f) / zScale)),
+        0,
+        Z - 1);
+    const int z1 = std::clamp(
+        static_cast<int>(std::ceil((std::max(aScaled.z, bScaled.z) + radius + 2.0f) / zScale)),
+        0,
+        Z - 1);
+    if (x1 < x0 || y1 < y0 || z1 < z0)
+    {
+        return std::nullopt;
+    }
+
+    static constexpr int kGapSlabs = 5;
+    std::array<double, kGapSlabs> slabSum{};
+    std::array<int, kGapSlabs> slabCount{};
+    const float slabWidth = (2.0f * gapHalf) / static_cast<float>(kGapSlabs);
+    double gapSum = 0.0;
+    double edge1Sum = 0.0;
+    double edge2Sum = 0.0;
+    int gapCount = 0;
+    int edge1Count = 0;
+    int edge2Count = 0;
+
+    for (int z = z0; z <= z1; ++z)
+    {
+        const cv::Mat &slice = volume[static_cast<size_t>(z)];
+        const float zScaled = static_cast<float>(z) * zScale;
+        for (int y = y0; y <= y1; ++y)
+        {
+            const float *row = slice.ptr<float>(y);
+            for (int x = x0; x <= x1; ++x)
+            {
+                const float value = row[x];
+                if (!std::isfinite(value))
+                {
+                    continue;
+                }
+                const cv::Point3f rel(
+                    static_cast<float>(x) - midpoint.x,
+                    static_cast<float>(y) - midpoint.y,
+                    zScaled - midpoint.z);
+                const float proj = rel.x * axis.x + rel.y * axis.y + rel.z * axis.z;
+                if (std::abs(proj) > halfLen * 1.5f)
+                {
+                    continue;
+                }
+                const float closestX = proj * axis.x;
+                const float closestY = proj * axis.y;
+                const float closestZ = proj * axis.z;
+                const float perpX = rel.x - closestX;
+                const float perpY = rel.y - closestY;
+                const float perpZ = rel.z - closestZ;
+                const float perpSq = perpX * perpX + perpY * perpY + perpZ * perpZ;
+                if (perpSq > radiusSq)
+                {
+                    continue;
+                }
+
+                if (std::abs(proj) < gapHalf)
+                {
+                    gapSum += value;
+                    ++gapCount;
+                    int bin = slabWidth > 0.0f
+                        ? static_cast<int>((proj + gapHalf) / slabWidth)
+                        : 0;
+                    bin = std::clamp(bin, 0, kGapSlabs - 1);
+                    slabSum[static_cast<size_t>(bin)] += value;
+                    slabCount[static_cast<size_t>(bin)] += 1;
+                }
+                else if (proj < -gapHalf && proj > -halfLen * 1.1f)
+                {
+                    edge1Sum += value;
+                    ++edge1Count;
+                }
+                else if (proj > gapHalf && proj < halfLen * 1.1f)
+                {
+                    edge2Sum += value;
+                    ++edge2Count;
+                }
+            }
+        }
+    }
+
+    const int edgeCount = edge1Count + edge2Count;
+    if (gapCount <= 0 || edgeCount <= 0)
+    {
+        return std::nullopt;
+    }
+
+    const float gapBrightMean =
+        static_cast<float>(gapSum / static_cast<double>(gapCount));
+    const int minPerSlab =
+        std::max(1, std::max(minVoxelsPerSlab, gapCount / (kGapSlabs * 3)));
+    float gapBrightMinSlab = std::numeric_limits<float>::infinity();
+    int minSlabIndex = -1;
+    for (int i = 0; i < kGapSlabs; ++i)
+    {
+        if (slabCount[static_cast<size_t>(i)] < minPerSlab)
+        {
+            continue;
+        }
+        const float slabMean =
+            static_cast<float>(slabSum[static_cast<size_t>(i)] /
+                               static_cast<double>(slabCount[static_cast<size_t>(i)]));
+        if (slabMean < gapBrightMinSlab)
+        {
+            gapBrightMinSlab = slabMean;
+            minSlabIndex = i;
+        }
+    }
+
+    SlabBridgeProfile profile;
+    profile.gapCount = gapCount;
+    profile.edgeCount = edgeCount;
+    profile.minSlabIndex = minSlabIndex;
+    profile.gapBrightMean = gapBrightMean;
+    profile.gapBright = minSlabIndex >= 0 ? gapBrightMinSlab : gapBrightMean;
+    profile.edge1Bright =
+        edge1Count > 0 ? static_cast<float>(edge1Sum / static_cast<double>(edge1Count)) : 0.0f;
+    profile.edge2Bright =
+        edge2Count > 0 ? static_cast<float>(edge2Sum / static_cast<double>(edge2Count)) : 0.0f;
+    profile.edgeBright =
+        static_cast<float>((edge1Sum + edge2Sum) / static_cast<double>(edgeCount));
+    const float brighterEdge = std::max(profile.edge1Bright, profile.edge2Bright);
+    profile.valleyFromBright =
+        brighterEdge > 1e-6f ? profile.gapBright / brighterEdge : 1.0f;
+    return profile;
+}
+
 std::optional<LineIntensityProfile> sampleLineProfile(const std::vector<cv::Mat> &volume,
                                                       const cv::Point3f &a,
                                                       const cv::Point3f &b,
@@ -4888,12 +5087,26 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
         initialPriorMode &&
         config.cellLumen.initialPriorClusterCollapseValleyGuardEnabled &&
         !volume.empty();
+    const bool slabValleyGuardEnabled =
+        initialPriorMode &&
+        config.cellLumen.initialPriorClusterCollapseSlabValleyGuardEnabled &&
+        !volume.empty();
     const float valleyMaxQ20Ratio = clampf(
         config.cellLumen.initialPriorClusterCollapseValleyMaxQ20Ratio,
         0.05f,
         0.99f);
     const float valleyMinDrop =
         std::max(0.0f, config.cellLumen.initialPriorClusterCollapseValleyMinDrop);
+    const float slabValleyMaxRatio = clampf(
+        config.cellLumen.initialPriorClusterCollapseSlabValleyMaxRatio,
+        0.05f,
+        0.99f);
+    const float slabValleyMinDrop =
+        std::max(0.0f, config.cellLumen.initialPriorClusterCollapseSlabValleyMinDrop);
+    const float slabValleyCrossRadius =
+        std::max(1.0f, config.cellLumen.initialPriorClusterCollapseSlabValleyCrossRadius);
+    const int slabValleyMinVoxelsPerSlab =
+        std::max(1, config.cellLumen.initialPriorClusterCollapseSlabValleyMinVoxelsPerSlab);
     const bool densityShapeEnabled =
         initialPriorMode &&
         config.cellLumen.initialPriorClusterCollapseDensityShapeEnabled &&
@@ -4915,7 +5128,34 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
         (config.cellLumen.initialPriorClusterCollapseAmbiguousAddbackMaxCells <= 0 ||
          cellCount <= config.cellLumen.initialPriorClusterCollapseAmbiguousAddbackMaxCells);
     const float zScale = effectiveZScaling();
+    int slabValleyGuardedPairs = 0;
     auto hasBlockingValley = [&](const DetectedCell &lhs, const DetectedCell &rhs) {
+        if (slabValleyGuardEnabled)
+        {
+            const auto slabProfile = sampleSlabBridgeProfile(
+                volume,
+                lhs.centerScaled,
+                rhs.centerScaled,
+                zScale,
+                slabValleyCrossRadius,
+                slabValleyMinVoxelsPerSlab);
+            if (slabProfile)
+            {
+                const float brighterEdge =
+                    std::max(slabProfile->edge1Bright, slabProfile->edge2Bright);
+                const float valleyDrop = brighterEdge - slabProfile->gapBright;
+                if (slabProfile->valleyFromBright <= slabValleyMaxRatio &&
+                    valleyDrop >= slabValleyMinDrop)
+                {
+                    slabValleyGuardedPairs++;
+                    return true;
+                }
+            }
+        }
+        if (!valleyGuardEnabled)
+        {
+            return false;
+        }
         const cv::Point3f a(lhs.centerScaled.x, lhs.centerScaled.y, lhs.zForCsv);
         const cv::Point3f b(rhs.centerScaled.x, rhs.centerScaled.y, rhs.zForCsv);
         const auto profile = sampleLineProfile(volume, a, b, zScale);
@@ -4944,7 +5184,7 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
             if (squaredDistance(annotated[i].centerScaled,
                                 annotated[j].centerScaled) <= linkDistanceSq)
             {
-                if (valleyGuardEnabled &&
+                if ((valleyGuardEnabled || slabValleyGuardEnabled) &&
                     hasBlockingValley(annotated[i], annotated[j]))
                 {
                     valleyGuardedPairs++;
@@ -4981,6 +5221,8 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
                   << config.cellLumen.initialPriorClusterCollapseSkipAboveGroupCount
                   << " link_distance=" << linkDistance
                   << " valley_guarded_pairs=" << valleyGuardedPairs
+                  << " slab_valley_guard=" << slabValleyGuardEnabled
+                  << " slab_valley_guarded_pairs=" << slabValleyGuardedPairs
                   << std::endl;
         return annotated;
     }
@@ -5041,6 +5283,8 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
                       << config.cellLumen.initialPriorClusterCollapseSkipDiameterGuardMaxCells
                       << " link_distance=" << linkDistance
                       << " valley_guarded_pairs=" << valleyGuardedPairs
+                      << " slab_valley_guard=" << slabValleyGuardEnabled
+                      << " slab_valley_guarded_pairs=" << slabValleyGuardedPairs
                       << std::endl;
             return annotated;
         }
@@ -5401,6 +5645,8 @@ std::vector<CellLumen::DetectedCell> CellLumen::collapseClusteredCandidates(
               << " ambiguous_addback_rejected_near=" << ambiguousAddbackRejectedNear
               << " valley_guard=" << valleyGuardEnabled
               << " valley_guarded_pairs=" << valleyGuardedPairs
+              << " slab_valley_guard=" << slabValleyGuardEnabled
+              << " slab_valley_guarded_pairs=" << slabValleyGuardedPairs
               << " link_distance=" << linkDistance
               << " max_group_diameter=" << maxGroupDiameter
               << " min_cluster_size=" << minClusterSize

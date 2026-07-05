@@ -114,6 +114,11 @@ private:
    // but may still be valid continuation evidence. This stays switch-gated in
    // YAML so middle-density repairs do not silently affect other profiles.
    std::unordered_map<int, std::unordered_map<std::string, std::set<int>>> cellLumenWeakSameParentContinuationCandidateIds;
+   // Unselected one-real parent-anchor split priors that have strong
+   // multi-frame CellLumen support. Center repair can use these as temporal
+   // anchors before PCA, so a good lumen center is not lost only because the
+   // split itself was not globally selected.
+   std::unordered_map<int, std::unordered_map<std::string, std::set<int>>> cellLumenSplitPriorTemporalAnchorCandidateIds;
    // Parents whose best CellLumen split pair looked unsafe. The pre-pass
    // fallback may not resurrect these parents, otherwise a weak Lumen pair can
    // be rejected in ranking and then re-enter through the fallback path.
@@ -166,7 +171,8 @@ private:
    float computeFrameMedianNearestNeighbor(int frameIndex) const;
    void applyRuntimeDensityProfileForFrame(int frameIndex,
                                            const std::string &phase);
-   void applyCellLumenRescue(int frameIndex);
+   void applyCellLumenRescue(int frameIndex,
+                             const std::vector<cv::Mat> *bridgePreviewFrame = nullptr);
    void writeDensityBrightnessMetrics(int frameIndex, const std::string &phase);
    const std::vector<CellLumenLookaheadCandidate> &getCellLumenLookaheadCandidates(int frameIndex);
 };

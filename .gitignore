@@ -391,3 +391,8 @@ dask-worker-space/
 
 # Ignore ChangeLog folder
 C++/ChangeLog/
+
+/Ultrack/
+
+# Local algorithm debugging notes
+**/ALGORITHM_ERROR_LOG.md

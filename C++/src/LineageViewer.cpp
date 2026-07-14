@@ -29,25 +29,23 @@ std::string LineageViewer::parentNameOf(const std::string &name)
 
 cv::Scalar LineageViewer::colorFromPalette(int idx)
 {
-    // BGR palette (high contrast on black background)
     static const std::vector<cv::Scalar> palette = {
-        cv::Scalar(0, 255, 0),     // green
-        cv::Scalar(255, 0, 255),   // purple
-        cv::Scalar(0, 255, 255),   // yellow
-        cv::Scalar(255, 255, 0),   // cyan
-        cv::Scalar(0, 128, 255),   // orange
-        cv::Scalar(255, 0, 0),     // blue
-        cv::Scalar(0, 0, 255),     // red
-        cv::Scalar(180, 180, 180), // gray
-        cv::Scalar(255, 128, 0),   // light blue-ish
-        cv::Scalar(128, 0, 255)    // magenta-ish
+        cv::Scalar(0, 255, 0),
+        cv::Scalar(255, 0, 255),
+        cv::Scalar(0, 255, 255),
+        cv::Scalar(255, 255, 0),
+        cv::Scalar(0, 128, 255),
+        cv::Scalar(255, 0, 0),
+        cv::Scalar(0, 0, 255),
+        cv::Scalar(180, 180, 180),
+        cv::Scalar(255, 128, 0),
+        cv::Scalar(128, 0, 255)
     };
-    return palette[idx % (int)palette.size()];
+    return palette[idx % static_cast<int>(palette.size())];
 }
 
 cv::Scalar LineageViewer::lighten(const cv::Scalar &bgr, double amount01)
 {
-    // amount01: 0 -> same, 1 -> white
     double a = std::clamp(amount01, 0.0, 1.0);
     double b = bgr[0] + (255.0 - bgr[0]) * a;
     double g = bgr[1] + (255.0 - bgr[1]) * a;
@@ -64,7 +62,6 @@ void LineageViewer::ensureNodeExists(const std::string &rawName)
     n.parentRaw = parentNameOf(rawName);
     n.isRoot = n.parentRaw.empty();
 
-    // root: assign new integer label + palette color
     if (n.isRoot)
     {
         int ridx = nextRootIndex++;
@@ -75,10 +72,8 @@ void LineageViewer::ensureNodeExists(const std::string &rawName)
         return;
     }
 
-    // daughter: ensure parent exists first
     ensureNodeExists(n.parentRaw);
 
-    // inherit root index from parent
     int rootIdx = 0;
     auto itRoot = rootIndexByRaw.find(n.parentRaw);
     if (itRoot != rootIndexByRaw.end())
@@ -87,19 +82,16 @@ void LineageViewer::ensureNodeExists(const std::string &rawName)
     }
     else
     {
-        // fallback: treat parent as root
         int ridx = nextRootIndex++;
         rootIndexByRaw[n.parentRaw] = ridx;
         rootIdx = ridx;
     }
 
-    // daughter label: parentShort + ".1/.2" based on last char 0/1
     const Node &parentNode = nodesByRaw[n.parentRaw];
     char c = rawName.back();
     std::string suffix = (c == '0') ? ".1" : ".2";
     n.shortLabel = parentNode.shortLabel + suffix;
 
-    // daughter color: lighter version of root color
     cv::Scalar base = colorFromPalette(rootIdx);
     n.colorBGR = lighten(base, 0.55);
 
@@ -114,17 +106,15 @@ void LineageViewer::render2D(int frameIndex, const std::vector<CellViz> &cells)
         windowReady = true;
     }
 
-    // Canvas settings
     const int W = 1100;
     const int H = 650;
     const int margin = 60;
 
-    cv::Mat canvas(H, W, CV_8UC3, cv::Scalar(0, 0, 0)); // black background
+    cv::Mat canvas(H, W, CV_8UC3, cv::Scalar(0, 0, 0));
 
-    //Title
-    std::string title = "Realtime Lineage (2D)  |  frame=" + std::to_string(frameIndex) +
-                        "  |  nodes(current)=" + std::to_string(cells.size()) +
-                        "  |  nodes(total)=" + std::to_string(nodesByRaw.size());
+    std::string title = "Realtime Lineage (2D) | frame=" + std::to_string(frameIndex) +
+                        " | nodes(current)=" + std::to_string(cells.size()) +
+                        " | nodes(total)=" + std::to_string(nodesByRaw.size());
     cv::putText(canvas, title, cv::Point(20, 35),
                 cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
@@ -135,9 +125,10 @@ void LineageViewer::render2D(int frameIndex, const std::vector<CellViz> &cells)
         return;
     }
 
-    // Determine bounding box in data space (x,y)
-    float minX = cells[0].x, maxX = cells[0].x;
-    float minY = cells[0].y, maxY = cells[0].y;
+    float minX = cells[0].x;
+    float maxX = cells[0].x;
+    float minY = cells[0].y;
+    float maxY = cells[0].y;
     for (const auto &c : cells)
     {
         minX = std::min(minX, c.x);
@@ -146,41 +137,33 @@ void LineageViewer::render2D(int frameIndex, const std::vector<CellViz> &cells)
         maxY = std::max(maxY, c.y);
     }
 
-    // Avoid zero range
     float dx = std::max(1.0f, maxX - minX);
     float dy = std::max(1.0f, maxY - minY);
 
-    // Scale to fit canvas (keep aspect)
-    double sx = (double)(W - 2 * margin) / dx;
-    double sy = (double)(H - 2 * margin) / dy;
+    double sx = static_cast<double>(W - 2 * margin) / dx;
+    double sy = static_cast<double>(H - 2 * margin) / dy;
     double s = std::min(sx, sy);
 
-    // map data (x,y) to pixel
     auto toPixel = [&](float x, float y) -> cv::Point
     {
-        // Map x right, y down (standard screen). If you want y-up, invert here.
-        int px = margin + (int)std::lround((x - minX) * s);
-        int py = margin + (int)std::lround((y - minY) * s);
-        // Keep inside
+        int px = margin + static_cast<int>(std::lround((x - minX) * s));
+        int py = margin + static_cast<int>(std::lround((y - minY) * s));
         px = std::clamp(px, 0, W - 1);
         py = std::clamp(py, 0, H - 1);
         return cv::Point(px, py);
     };
-    // Draw axes box
+
     cv::rectangle(canvas, cv::Rect(margin, margin, W - 2 * margin, H - 2 * margin),
                   cv::Scalar(60, 60, 60), 1, cv::LINE_AA);
 
-    // Draw each cell
     for (const auto &c : cells)
     {
         auto it = nodesByRaw.find(c.rawName);
         if (it == nodesByRaw.end()) continue;
         const Node &n = it->second;
         cv::Point p = toPixel(c.x, c.y);
-        // node
         cv::circle(canvas, p, 10, n.colorBGR, -1, cv::LINE_AA);
         cv::circle(canvas, p, 10, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
-        // label (short)
         cv::putText(canvas, n.shortLabel, p + cv::Point(14, 5),
                     cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
     }
@@ -191,7 +174,6 @@ void LineageViewer::render2D(int frameIndex, const std::vector<CellViz> &cells)
 
 void LineageViewer::update(int frameIndex, const std::vector<CellViz> &cells)
 {
-    // Persist mapping for newly seen raw names
     for (const auto &c : cells)
     {
         ensureNodeExists(c.rawName);

@@ -1,0 +1,23 @@
+# Smoke test config for the optional fine shape exporter.
+#
+# This file is intentionally separate from the production density switch YAML.
+# It enables the new center anchored brightness mask export and lossless TIFF
+# compression only for one-off review runs, so the verified PCA tracking path
+# is not changed by accident.
+base_config: ../00_FINAL_ACTIVE_RUNTIME_CONFIGS/FINAL_STANDALONE_CLEAN__config_cell_lumen_embryo_standalone_clean.yaml
+
+simulation:
+  export_frame_tiff_compression_enabled: true
+  export_frame_tiff_compression: 5
+
+cell_lumen:
+  fineShapeModelEnabled: true
+  fineShapeModelExportCsv: true
+  fineShapeModelRadiusScale: 1.25
+  fineShapeModelMinRadius: 8.0
+  fineShapeModelMaxRadius: 64.0
+  fineShapeModelThresholdQuantile: 0.55
+  fineShapeModelThresholdFloor: 0.08
+  fineShapeModelSeedSearchRadius: 10.0
+  fineShapeModelSeedFallbackFraction: 0.85
+  fineShapeModelMaxVoxelsPerCell: 200000

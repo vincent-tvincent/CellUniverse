@@ -43,6 +43,37 @@ def read_gt(gt_csv: Path, frame: int) -> list[dict[str, str]]:
     return rows
 
 
+def frame_tif_path(run: Path, frame: int, kind: str) -> Path:
+    flat = run / f"{frame}_{kind}.tif"
+    if flat.is_file():
+        return flat
+    return run / "tiff" / kind / f"{frame}.tif"
+
+
+def volume_looks_z_unstretched(image: np.ndarray, z_scale: float) -> bool:
+    if image.ndim < 3 or z_scale <= 1.0:
+        return False
+    z_size, y_size, x_size = image.shape[-3:]
+    lateral_size = min(y_size, x_size)
+    if lateral_size <= 0:
+        return False
+    stretched_z_threshold = lateral_size / max(2.0, z_scale * 0.7)
+    return z_size < stretched_z_threshold
+
+
+def apply_image_layer_z_scale(image_layers, z_scale: float) -> None:
+    if z_scale <= 1.0:
+        return
+    scale = (float(z_scale), 1.0, 1.0)
+    for layer in image_layers:
+        layer_scale = tuple(float(value) for value in layer.scale)
+        if len(layer_scale) != 3:
+            continue
+        if not np.allclose(layer_scale, (1.0, 1.0, 1.0)):
+            continue
+        layer.scale = scale
+
+
 def float_value(row: dict[str, str], key: str, fallback: float) -> float:
     try:
         return float(row.get(key, fallback))
@@ -606,16 +637,43 @@ def main() -> int:
     parser.add_argument("--ring-levels", type=int, default=None)
     parser.add_argument("--ring-segments", type=int, default=72)
     parser.add_argument("--ring-edge-width", type=float, default=0.16)
+    parser.add_argument("--z-scale", type=float, default=7.0)
+    parser.add_argument(
+        "--z-scale-mode",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="Set napari layer scale for anisotropic raw z-stacks.",
+    )
     args = parser.parse_args()
 
     run = args.run.expanduser().resolve()
     frame = args.frame
     cells_csv = run / "cells.csv"
-    real_tif = run / "tiff" / "real" / f"{frame}.tif"
-    synth_tif = run / "tiff" / "synth" / f"{frame}.tif"
+    real_tif = frame_tif_path(run, frame, "real")
+    synth_tif = frame_tif_path(run, frame, "synth")
 
     pred = read_prediction(cells_csv, frame)
     gt = read_gt(args.gt, frame)
+    real_image = tifffile.imread(real_tif)
+    synth_image = tifffile.imread(synth_tif)
+    if args.z_scale_mode == "always":
+        display_z_scale = args.z_scale
+    elif args.z_scale_mode == "never":
+        display_z_scale = 1.0
+    else:
+        display_z_scale = (
+            args.z_scale if volume_looks_z_unstretched(real_image, args.z_scale) else 1.0
+        )
+    if display_z_scale > 1.0:
+        print(
+            f"[napari review] applying z layer scale "
+            f"({display_z_scale:g}, 1, 1) for real image shape {real_image.shape}"
+        )
+    else:
+        print(
+            f"[napari review] keeping z layer scale (1, 1, 1) "
+            f"for real image shape {real_image.shape}"
+        )
     miss_labels = parse_csv_set(args.miss_labels)
     extra_names = parse_csv_set(args.extra_names)
     related_names = parse_csv_set(args.related_names)
@@ -651,8 +709,8 @@ def main() -> int:
     )
 
     viewer = napari.Viewer(title=f"f{frame} review: {run.name}", ndisplay=3)
-    viewer.add_image(tifffile.imread(real_tif), name="real", colormap="gray", opacity=1.0)
-    viewer.add_image(tifffile.imread(synth_tif), name="synth", colormap="cyan", opacity=0.22)
+    real_layer = viewer.add_image(real_image, name="real", colormap="gray", opacity=1.0)
+    synth_layer = viewer.add_image(synth_image, name="synth", colormap="cyan", opacity=0.22)
 
     rings_by_name = make_wire_rings(
         pred,
@@ -751,6 +809,7 @@ def main() -> int:
         args.error_opacity,
     )
 
+    apply_image_layer_z_scale([real_layer, synth_layer], display_z_scale)
     viewer.dims.ndisplay = 3
     napari.run()
     return 0

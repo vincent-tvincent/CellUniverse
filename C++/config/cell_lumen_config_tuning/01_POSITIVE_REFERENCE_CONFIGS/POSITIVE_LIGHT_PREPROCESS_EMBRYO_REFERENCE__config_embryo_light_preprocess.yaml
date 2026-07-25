@@ -4,7 +4,7 @@
 # duplicating it. The old light/iterative code paths are removed; this preset
 # keeps normalized raw input unless preprocess_mode is set to n2v2.
 
-base_config: ../config.yaml
+base_config: ../../Shared_base/config.yaml
 
 simulation:
   # Keep the original voxel values after percentile normalization and z

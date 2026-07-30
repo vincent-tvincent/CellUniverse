@@ -787,6 +787,8 @@ void Frame::loadImageStacks(const std::vector<cv::Mat> &realFrame)
     if (!_backgroundFrame.empty() &&
         _backgroundFrame.size() != _realFrame.size()) {
         _backgroundFrame.clear();
+        _backgroundFrameOffset = 0.0f;
+        _backgroundFrameOffsetUpdates.clear();
     }
     _synthFrame = generateSynthFrame();
     refreshFullCostCache();
@@ -794,6 +796,8 @@ void Frame::loadImageStacks(const std::vector<cv::Mat> &realFrame)
 
 void Frame::setBackgroundFrame(std::vector<cv::Mat> backgroundFrame)
 {
+    _backgroundFrameOffset = 0.0f;
+    _backgroundFrameOffsetUpdates.clear();
     if (!backgroundFrame.empty() && !_realFrame.empty() &&
         backgroundFrame.size() != _realFrame.size()) {
         std::cout << "[Background Frame] ignored size_mismatch expected="
@@ -814,6 +818,34 @@ void Frame::setBackgroundFrame(std::vector<cv::Mat> backgroundFrame)
     _backgroundFrame = std::move(backgroundFrame);
 }
 
+float Frame::backgroundAt(int z, int y, int x) const
+{
+    if (z < 0 || static_cast<size_t>(z) >= _backgroundFrame.size()) {
+        return _backgroundValue;
+    }
+    const cv::Mat &background = _backgroundFrame[static_cast<size_t>(z)];
+    if (background.empty() || background.type() != CV_32F ||
+        y < 0 || y >= background.rows ||
+        x < 0 || x >= background.cols) {
+        return _backgroundValue;
+    }
+    const float value = background.ptr<float>(y)[x];
+    return std::isfinite(value) ? value : _backgroundValue;
+}
+
+float Frame::backgroundAt(const cv::Point3f &point) const
+{
+    if (!std::isfinite(point.x) ||
+        !std::isfinite(point.y) ||
+        !std::isfinite(point.z)) {
+        return _backgroundValue;
+    }
+    return backgroundAt(
+        cvRound(point.z),
+        cvRound(point.y),
+        cvRound(point.x));
+}
+
 void Frame::addBackgroundOffset(float backgroundDelta)
 {
     if (!std::isfinite(backgroundDelta) ||
@@ -821,6 +853,8 @@ void Frame::addBackgroundOffset(float backgroundDelta)
         return;
     }
 
+    _backgroundFrameOffset += backgroundDelta;
+    _backgroundFrameOffsetUpdates.push_back(backgroundDelta);
     _backgroundValue = std::clamp(_backgroundValue + backgroundDelta, 0.0f, 1.0f);
     for (cv::Mat &background : _backgroundFrame) {
         if (background.empty() || background.type() != CV_32F) {
@@ -2094,7 +2128,7 @@ struct GatherStats
 // raw intensities above background.
 std::vector<BrightPixel> gatherBrightPixelsVoronoi(
     const std::vector<cv::Mat> &realFrame,
-    float backgroundValue,
+    const Frame &backgroundProvider,
     const cv::Point3f &center,
     float radius,
     const std::vector<cv::Point3f> &selfClaimPoints,
@@ -2132,11 +2166,6 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Brightness cutoff: pixels above (background + small margin). The margin
-    // keeps us above sensor noise without being strict enough to lose dim
-    // inter-daughter regions.
-    const float brightnessCutoff = std::max(0.05f, backgroundValue + 0.02f);
-
     for (int z = minZ; z <= maxZ; ++z) {
         const cv::Mat &slice = realFrame[z];
         if (slice.type() != CV_32F || slice.empty()) continue;
@@ -2155,6 +2184,13 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
                 if (stats) ++stats->inSphere;
 
                 const float v = row[x];
+                const float backgroundValue =
+                    backgroundProvider.backgroundAt(z, y, x);
+                // Brightness cutoff: pixels above their local background plus
+                // a small sensor-noise margin. With no spatial background
+                // installed, backgroundAt() returns the legacy scalar value.
+                const float brightnessCutoff =
+                    std::max(0.05f, backgroundValue + 0.02f);
                 if (v <= brightnessCutoff) continue;
                 if (stats) ++stats->aboveBrightness;
 
@@ -2710,7 +2746,7 @@ bool Frame::imageGroundExpectedDaughters(
     GatherStats gstats;
     auto pixels = gatherBrightPixelsVoronoi(
         _realFrame,
-        _backgroundValue,
+        *this,
         snapshot.position,
         boxRadius,
         selfClaim,
@@ -2779,7 +2815,7 @@ bool Frame::evaluateSplitSeedPairByPca(
     GatherStats gstats;
     const auto pixels = gatherBrightPixelsVoronoi(
         _realFrame,
-        _backgroundValue,
+        *this,
         gatherCenter,
         gatherRadius,
         selfClaim,
@@ -2886,7 +2922,7 @@ bool Frame::calibrateCellPositionViaCentroid(
     GatherStats gstats;
     auto pixels = gatherBrightPixelsVoronoi(
         _realFrame,
-        _backgroundValue,
+        *this,
         snapshot.position,
         boxRadius,
         selfClaim,
@@ -3322,10 +3358,10 @@ bool Frame::calibrateCellShapeViaPca(
     // applies brightness cutoff, then Voronoi-filters against neighbor
     // claim points. The expensive step is the box scan + Voronoi test —
     // O(boxVolume * nNeighbors). Per shape-fit iteration the gather inputs
-    // are mostly invariant: `_realFrame`, `_backgroundValue`, `sphereR`,
-    // `otherCellsClaimSets` never change; only `center` can change (and
-    // only when `updatePosition=true`). Cache the raw pixel set keyed on
-    // `center`; re-gather only when the centroid moves.
+    // are mostly invariant: `_realFrame`, the installed background,
+    // `sphereR`, and `otherCellsClaimSets` never change; only `center`
+    // can change, and only when `updatePosition=true`. Cache the raw pixel
+    // set keyed on `center`; re-gather only when the centroid moves.
     cv::Point3f cachedCenter{std::numeric_limits<float>::quiet_NaN(),
                              std::numeric_limits<float>::quiet_NaN(),
                              std::numeric_limits<float>::quiet_NaN()};
@@ -3372,7 +3408,7 @@ bool Frame::calibrateCellShapeViaPca(
             std::vector<cv::Point3f> selfClaim{center};
             GatherStats gstats;
             cachedRaw = gatherBrightPixelsVoronoi(
-                _realFrame, _backgroundValue, center, sphereR,
+                _realFrame, *this, center, sphereR,
                 selfClaim, otherCellsClaimSets, &gstats);
             cachedCenter = center;
             ++cachedMisses;
@@ -4661,7 +4697,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     GatherStats gstats;
     std::vector<BrightPixel> pixels = gatherBrightPixelsVoronoi(
         _realFrame,
-        _backgroundValue,
+        *this,
         snapshot.position,
         boxRadius,
         selfClaim,
@@ -5393,9 +5429,12 @@ CostCallbackPair Frame::trySplitCellPhased(
     if (simulationConfig.celluniverse3_enabled && !_realFrame.empty()) {
         const auto parentCandidateBrightness =
             parent.measureBrightnessStats(_realFrame);
+        const cv::Point3f parentCandidatePosition(
+            parent.getX(), parent.getY(), parent.getZ());
         parentSignalForCandidateGate =
             std::max(0.0f,
-                     parentCandidateBrightness.first - _backgroundValue);
+                     parentCandidateBrightness.first -
+                         backgroundAt(parentCandidatePosition));
     }
     int savedNonTrashCellCount = 0;
     for (const auto &cell : savedCells) {
@@ -5853,8 +5892,13 @@ CostCallbackPair Frame::trySplitCellPhased(
             bridgeProposal != nullptr &&
             bridgeProposal->signalCenterScore >= 0.0f &&
             (futureBackedBridgeRescue || futureSupportedPcaBridgeDimBypass);
+        const float signalCenterCurrentBackground = std::max(
+            backgroundAt(cv::Point3f(
+                candD1.getX(), candD1.getY(), candD1.getZ())),
+            backgroundAt(cv::Point3f(
+                candD2.getX(), candD2.getY(), candD2.getZ())));
         const float signalCenterCurrentDensityFloor =
-            _backgroundValue +
+            signalCenterCurrentBackground +
             std::max(
                 std::max(0.0f,
                          probConfig
@@ -6851,9 +6895,20 @@ CostCallbackPair Frame::trySplitCellPhased(
                     cells[d1IdxRefine].measureBrightnessStats(_realFrame);
                 const auto d2BrightnessStats =
                     cells[d2IdxRefine].measureBrightnessStats(_realFrame);
-                const float localBackground = _backgroundValue;
+                const float parentBackground = backgroundAt(cv::Point3f(
+                    parent.getX(), parent.getY(), parent.getZ()));
+                const float localBackground = std::max(
+                    backgroundAt(cv::Point3f(
+                        cells[d1IdxRefine].getX(),
+                        cells[d1IdxRefine].getY(),
+                        cells[d1IdxRefine].getZ())),
+                    backgroundAt(cv::Point3f(
+                        cells[d2IdxRefine].getX(),
+                        cells[d2IdxRefine].getY(),
+                        cells[d2IdxRefine].getZ())));
                 const float parentSignal =
-                    std::max(0.0f, parentBrightnessStats.first - localBackground);
+                    std::max(0.0f,
+                             parentBrightnessStats.first - parentBackground);
                 const float adaptiveSignalThreshold = std::max(
                     std::max(0.0f,
                              probConfig
@@ -7033,7 +7088,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                                                 static_cast<float>(y),
                                                 static_cast<float>(z));
                             if (!cell.isPointInsideEllipsoid(p, 1.0f)) continue;
-                            const float w = std::max(0.0f, row[x] - _backgroundValue);
+                            const float w = std::max(
+                                0.0f, row[x] - backgroundAt(z, y, x));
                             if (w <= 0.0f) continue;
                             triggerWeightSum += static_cast<double>(w);
                             triggerWeightSqSum += static_cast<double>(w) * w;
@@ -7204,8 +7260,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                                     ++excludedNeighborVoxels;
                                     continue;
                                 }
-                                const float w =
-                                    std::max(0.0f, row[x] - _backgroundValue);
+                                const float w = std::max(
+                                    0.0f, row[x] - backgroundAt(z, y, x));
                                 if (w <= 0.0f) continue;
                                 weightSum += static_cast<double>(w);
                                 sumX += static_cast<double>(x) * w;
@@ -7409,7 +7465,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                         const std::vector<cv::Point3f> selfPlaneClaim{prePos};
                         const auto planePixels = gatherBrightPixelsVoronoi(
                             _realFrame,
-                            _backgroundValue,
+                            *this,
                             prePos,
                             planeRadius,
                             selfPlaneClaim,
@@ -10602,9 +10658,16 @@ CostCallbackPair Frame::trySplitCellPhased(
         const auto parentBrightnessStats = parent.measureBrightnessStats(_realFrame);
         const auto d1BrightnessStats = bestD1.measureBrightnessStats(_realFrame);
         const auto d2BrightnessStats = bestD2.measureBrightnessStats(_realFrame);
-        const float localBackground = _backgroundValue;
+        const float parentBackground = backgroundAt(cv::Point3f(
+            parent.getX(), parent.getY(), parent.getZ()));
+        const float localBackground = std::max(
+            backgroundAt(cv::Point3f(
+                bestD1.getX(), bestD1.getY(), bestD1.getZ())),
+            backgroundAt(cv::Point3f(
+                bestD2.getX(), bestD2.getY(), bestD2.getZ())));
         const float parentSignal =
-            std::max(0.0f, parentBrightnessStats.first - localBackground);
+            std::max(0.0f,
+                     parentBrightnessStats.first - parentBackground);
         const float adaptiveSignalThreshold = std::max(
             minDaughterBackgroundMargin,
             minDaughterMeanParentFraction * parentSignal);

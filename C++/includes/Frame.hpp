@@ -491,6 +491,9 @@ public:
         _synthFrame.shrink_to_fit();
         _backgroundFrame.clear();
         _backgroundFrame.shrink_to_fit();
+        _backgroundFrameOffset = 0.0f;
+        _backgroundFrameOffsetUpdates.clear();
+        _backgroundFrameOffsetUpdates.shrink_to_fit();
         _signalProbability.clear();
         _signalProbability.shrink_to_fit();
         _signalMap.clear();
@@ -501,9 +504,24 @@ public:
     void setBackgroundColor(float backgroundColor) { _backgroundValue = backgroundColor; }
     void addBackgroundOffset(float backgroundDelta);
     float getBackgroundValue() const { return _backgroundValue; }
+    float backgroundAt(int z, int y, int x) const;
+    float backgroundAt(const cv::Point3f &point) const;
     void setBackgroundFrame(std::vector<cv::Mat> backgroundFrame);
-    void clearBackgroundFrame() { _backgroundFrame.clear(); }
+    void clearBackgroundFrame() {
+        _backgroundFrame.clear();
+        _backgroundFrameOffset = 0.0f;
+        _backgroundFrameOffsetUpdates.clear();
+    }
     bool hasBackgroundFrame() const { return !_backgroundFrame.empty(); }
+    const std::vector<cv::Mat>& getBackgroundFrame() const {
+        return _backgroundFrame;
+    }
+    float getBackgroundFrameOffset() const {
+        return _backgroundFrameOffset;
+    }
+    const std::vector<float>& getBackgroundFrameOffsetUpdates() const {
+        return _backgroundFrameOffsetUpdates;
+    }
     // Signal centers for signal-guided perturbation (yp ffc1917). Populated
     // during frame preparation/preload after preprocessing is loaded.
     void setSignalCenters(std::vector<SignalCenter> centers) { _signalCenters = std::move(centers); }
@@ -585,6 +603,10 @@ private:
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
     std::vector<cv::Mat> _backgroundFrame;
+    // Cumulative deltas applied to the currently installed spatial
+    // background. Reset whenever that field is replaced or cleared.
+    float _backgroundFrameOffset = 0.0f;
+    std::vector<float> _backgroundFrameOffsetUpdates;
     // Signal centers (yp ffc1917) — bright clusters in the real image that
     // signal-guided perturbation snaps cells onto.
     std::vector<SignalCenter> _signalCenters;

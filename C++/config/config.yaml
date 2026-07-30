@@ -451,6 +451,11 @@ simulation:
   # current cell center and the cell name drawn next to that cube.
   # Keep this off for production runs; turn on manually when diagnosing.
   export_perturb_cell_center_debug_images: false
+  # Frame export representation:
+  #   full    - existing PNG/TIFF real and synthetic stacks
+  #   compact - reconstruction metadata without frame image files
+  #   both    - full stacks plus compact reconstruction metadata
+  export_mode: full
   export_frame_png: false
   export_frame_tiff: true
   quit_after_preprocessing: false

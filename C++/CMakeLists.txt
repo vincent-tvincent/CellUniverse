@@ -200,6 +200,8 @@ add_executable(${PROJECT_NAME}
         ${cwd}/src/CellLumen.cpp
         ${cwd}/src/CsvHandler.cpp
         ${cwd}/src/CellUniverse.cpp
+        ${cwd}/src/CompactExporter.cpp
+        ${cwd}/src/BackgroundRegionTracker.cpp
         ${cwd}/src/EmbryoBrightTracker.cpp
         ${cwd}/src/Frame.cpp
         ${cwd}/src/ImageHandler.cpp
@@ -276,6 +278,28 @@ target_include_directories(brightness_volume_analyzer PRIVATE
 
 target_link_libraries(brightness_volume_analyzer ${OpenCV_LIBS})
 target_link_libraries(brightness_volume_analyzer yaml-cpp)
+
+add_executable(initial_csv_background_test EXCLUDE_FROM_ALL
+        ${cwd}/tests/InitialCsvBackgroundTest.cpp
+        ${cwd}/src/CsvHandler.cpp
+        ${cwd}/src/BackgroundRegionTracker.cpp
+        ${cwd}/src/Ellipsoid.cpp
+)
+target_include_directories(initial_csv_background_test PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${cwd}/includes
+        ${cwd}/src
+        lib/yaml-cpp/include
+)
+target_link_libraries(initial_csv_background_test
+        ${OpenCV_LIBS}
+        yaml-cpp
+)
+target_compile_definitions(initial_csv_background_test PRIVATE
+        CELLUNIVERSE_TEST_FIXTURE_DIR="${cwd}/tests/fixtures"
+)
+add_test(NAME initial_csv_background_test
+         COMMAND initial_csv_background_test)
 
 # Tests disabled 2026-04-08: they reference SimulationConfig fields
 # (background_color, cell_color) that were removed in the sigmoid-pipeline

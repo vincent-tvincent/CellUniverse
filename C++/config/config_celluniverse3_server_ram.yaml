@@ -15,8 +15,8 @@ simulation:
 
   # Preserve the full CU3 lookahead policy from the fast profile for readers and
   # for any future code path that consults these limits when pruning is enabled.
-  celluniverse3_frame_cache_keep_future: 20
-  celluniverse3_frame_cache_pressure_keep_future: 20
+  celluniverse3_frame_cache_keep_future: 10
+  celluniverse3_frame_cache_pressure_keep_future: 10
   celluniverse3_frame_cache_min_available_gb: 64.0
 
 # Runtime guardrail: this profile assumes the web backend caps concurrent

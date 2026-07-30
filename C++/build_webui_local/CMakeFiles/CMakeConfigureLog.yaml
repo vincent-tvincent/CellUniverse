@@ -1125,3 +1125,151 @@ events:
         
       exitCode: 0
 ...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CheckIPOSupported.cmake:138 (try_compile)"
+      - "/usr/share/cmake-3.28/Modules/CheckIPOSupported.cmake:266 (_ipo_run_language_check)"
+      - "CMakeLists.txt:57 (check_ipo_supported)"
+    directories:
+      source: "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src"
+      binary: "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin"
+    buildResult:
+      variable: "_IPO_LANGUAGE_CHECK_RESULT"
+      cached: true
+      stdout: |
+        Change Dir: '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile
+        gmake[1]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        gmake[1]: Warning: File 'Makefile' has modification time 2.2 s in the future
+        /usr/bin/cmake -S/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src -B/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin --check-build-system CMakeFiles/Makefile.cmake 0
+        /usr/bin/cmake -E cmake_progress_start /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin//CMakeFiles/progress.marks
+        /usr/bin/gmake  -f CMakeFiles/Makefile2 all
+        gmake[2]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        gmake[2]: Warning: File 'CMakeFiles/Makefile2' has modification time 2.2 s in the future
+        /usr/bin/gmake  -f CMakeFiles/foo.dir/build.make CMakeFiles/foo.dir/depend
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        gmake[3]: Warning: File 'CMakeFiles/foo.dir/flags.make' has modification time 2.1 s in the future
+        cd /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir/DependInfo.cmake
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir/DependInfo.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir/depend.internal".
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir/depend.internal".
+        Scanning dependencies of target foo
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        /usr/bin/gmake  -f CMakeFiles/foo.dir/build.make CMakeFiles/foo.dir/build
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        gmake[3]: Warning: File 'CMakeFiles/foo.dir/flags.make' has modification time 2 s in the future
+        [ 25%] Building CXX object CMakeFiles/foo.dir/foo.cpp.o
+        /usr/bin/c++   -flto=auto -fno-fat-lto-objects -o CMakeFiles/foo.dir/foo.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src/foo.cpp
+        [ 50%] Linking CXX static library libfoo.a
+        /usr/bin/cmake -P CMakeFiles/foo.dir/cmake_clean_target.cmake
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/foo.dir/link.txt --verbose=1
+        "/usr/bin/gcc-ar-13" cr libfoo.a CMakeFiles/foo.dir/foo.cpp.o
+        "/usr/bin/gcc-ranlib-13" libfoo.a
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        [ 50%] Built target foo
+        /usr/bin/gmake  -f CMakeFiles/boo.dir/build.make CMakeFiles/boo.dir/depend
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        gmake[3]: Warning: File 'CMakeFiles/boo.dir/flags.make' has modification time 2 s in the future
+        cd /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir/DependInfo.cmake
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir/DependInfo.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir/depend.internal".
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir/depend.internal".
+        Scanning dependencies of target boo
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        /usr/bin/gmake  -f CMakeFiles/boo.dir/build.make CMakeFiles/boo.dir/build
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        gmake[3]: Warning: File 'CMakeFiles/boo.dir/flags.make' has modification time 1.9 s in the future
+        [ 75%] Building CXX object CMakeFiles/boo.dir/main.cpp.o
+        /usr/bin/c++   -flto=auto -fno-fat-lto-objects -o CMakeFiles/boo.dir/main.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/src/main.cpp
+        [100%] Linking CXX executable boo
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/boo.dir/link.txt --verbose=1
+        /usr/bin/c++ -flto=auto -fno-fat-lto-objects CMakeFiles/boo.dir/main.cpp.o -o boo  libfoo.a 
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        [100%] Built target boo
+        gmake[2]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[2]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        /usr/bin/cmake -E cmake_progress_start /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles 0
+        gmake[1]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[1]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        
+      exitCode: 0
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/CheckIPOSupported.cmake:138 (try_compile)"
+      - "/usr/share/cmake-3.28/Modules/CheckIPOSupported.cmake:266 (_ipo_run_language_check)"
+      - "CMakeLists.txt:57 (check_ipo_supported)"
+    directories:
+      source: "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src"
+      binary: "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin"
+    buildResult:
+      variable: "_IPO_LANGUAGE_CHECK_RESULT"
+      cached: true
+      stdout: |
+        Change Dir: '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile
+        gmake[1]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        gmake[1]: Warning: File 'Makefile' has modification time 2.2 s in the future
+        /usr/bin/cmake -S/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src -B/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin --check-build-system CMakeFiles/Makefile.cmake 0
+        /usr/bin/cmake -E cmake_progress_start /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin//CMakeFiles/progress.marks
+        /usr/bin/gmake  -f CMakeFiles/Makefile2 all
+        gmake[2]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        gmake[2]: Warning: File 'CMakeFiles/Makefile2' has modification time 2.2 s in the future
+        /usr/bin/gmake  -f CMakeFiles/foo.dir/build.make CMakeFiles/foo.dir/depend
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        gmake[3]: Warning: File 'CMakeFiles/foo.dir/flags.make' has modification time 2.1 s in the future
+        cd /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/foo.dir/DependInfo.cmake
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/foo.dir/DependInfo.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/foo.dir/depend.internal".
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/foo.dir/depend.internal".
+        Scanning dependencies of target foo
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        /usr/bin/gmake  -f CMakeFiles/foo.dir/build.make CMakeFiles/foo.dir/build
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        gmake[3]: Warning: File 'CMakeFiles/foo.dir/flags.make' has modification time 2 s in the future
+        [ 25%] Building C object CMakeFiles/foo.dir/foo.c.o
+        /usr/bin/cc   -flto=auto -fno-fat-lto-objects -o CMakeFiles/foo.dir/foo.c.o -c /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src/foo.c
+        [ 50%] Linking C static library libfoo.a
+        /usr/bin/cmake -P CMakeFiles/foo.dir/cmake_clean_target.cmake
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/foo.dir/link.txt --verbose=1
+        "/usr/bin/gcc-ar-13" cr libfoo.a CMakeFiles/foo.dir/foo.c.o
+        "/usr/bin/gcc-ranlib-13" libfoo.a
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        [ 50%] Built target foo
+        /usr/bin/gmake  -f CMakeFiles/boo.dir/build.make CMakeFiles/boo.dir/depend
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        gmake[3]: Warning: File 'CMakeFiles/boo.dir/flags.make' has modification time 2 s in the future
+        cd /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/boo.dir/DependInfo.cmake
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/boo.dir/DependInfo.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/boo.dir/depend.internal".
+        Dependee "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles/boo.dir/depend.internal".
+        Scanning dependencies of target boo
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        /usr/bin/gmake  -f CMakeFiles/boo.dir/build.make CMakeFiles/boo.dir/build
+        gmake[3]: Entering directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        gmake[3]: Warning: File 'CMakeFiles/boo.dir/flags.make' has modification time 1.9 s in the future
+        [ 75%] Building C object CMakeFiles/boo.dir/main.c.o
+        /usr/bin/cc   -flto=auto -fno-fat-lto-objects -o CMakeFiles/boo.dir/main.c.o -c /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/src/main.c
+        [100%] Linking C executable boo
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/boo.dir/link.txt --verbose=1
+        /usr/bin/cc -flto=auto -fno-fat-lto-objects CMakeFiles/boo.dir/main.c.o -o boo  libfoo.a 
+        gmake[3]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[3]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        [100%] Built target boo
+        gmake[2]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[2]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        /usr/bin/cmake -E cmake_progress_start /home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin/CMakeFiles 0
+        gmake[1]: warning:  Clock skew detected.  Your build may be incomplete.
+        gmake[1]: Leaving directory '/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles/_CMakeLTOTest-C/bin'
+        
+      exitCode: 0
+...

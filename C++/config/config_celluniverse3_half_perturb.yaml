@@ -11,7 +11,7 @@ base_config: config_celluniverse2_tuning.yaml
 # evidence comes from the map algebra below.
 simulation:
   celluniverse3_enabled: true
-  celluniverse3_window_radius: 20
+  celluniverse3_window_radius: 10
   celluniverse3_window_overlap_radius: 2
   celluniverse3_window_background_percentile: 95.0
   celluniverse3_window_dual_background_enabled: false
@@ -29,11 +29,11 @@ simulation:
   celluniverse3_window_export_debug: false
   export_perturb_cell_center_debug_images: false
   celluniverse3_window_merge_centers: false
-  # Keep CellUniverse3's 20-frame window maps, but discard prepared TIFF stacks
+  # Keep CellUniverse3's 10-frame window maps, but discard prepared TIFF stacks
   # after map construction unless they are still near enough for immediate
   # future validation.
   celluniverse3_frame_cache_prune_enabled: true
-  celluniverse3_frame_cache_keep_future: 20
+  celluniverse3_frame_cache_keep_future: 10
   celluniverse3_frame_cache_min_available_gb: 6.0
   celluniverse3_frame_cache_pressure_keep_future: 4
   # Disk-backed prepared-frame cache for CellUniverse3. Disabled by

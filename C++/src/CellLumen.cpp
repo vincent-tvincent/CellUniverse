@@ -1,4 +1,5 @@
 #include "../includes/CellLumen.hpp"
+#include "../includes/CompactExporter.hpp"
 #include "../includes/CsvHandler.hpp"
 #include "../includes/ImageHandler.hpp"
 
@@ -922,15 +923,17 @@ std::string CellLumen::toLowerCopy(std::string value)
 std::string CellLumen::extractFrameFolderName(const fs::path &imageFile)
 {
     const std::string stem = imageFile.stem().string();
-    std::string digits;
-    for (char ch : stem)
+    const auto firstTrailingDigit = std::find_if(
+        stem.rbegin(), stem.rend(),
+        [](unsigned char ch) {
+            return std::isdigit(ch) == 0;
+        }).base();
+    if (firstTrailingDigit == stem.end())
     {
-        if (std::isdigit(static_cast<unsigned char>(ch)))
-        {
-            digits.push_back(ch);
-        }
+        return stem;
     }
-    return digits.empty() ? stem : std::to_string(std::stoi(digits));
+    const std::string digits(firstTrailingDigit, stem.end());
+    return std::to_string(std::stoi(digits));
 }
 
 std::string CellLumen::makeCellName(const std::string &frameStem, int index)
@@ -7554,16 +7557,10 @@ void CellLumen::saveFrameOutputs(const fs::path &imageFile,
                                               const std::vector<cv::Mat> &realFrame,
                                               const std::vector<DetectedCell> &cells) const
 {
-    if (shouldSkipCellLumenTiffOutput())
-    {
-        std::cout << "[CellLumen Output] skip_tiff=1 frame=" << imageFile.filename().string()
-                  << " reason=CELLUNIVERSE_CELL_LUMEN_SKIP_TIFF"
-                  << std::endl;
-        return;
-    }
-
     std::vector<DetectedCell> displayCells = cells;
     const float zScale = effectiveZScaling();
+    const int displayZInterpolationFactor =
+        std::max(1, static_cast<int>(std::lround(zScale)));
     for (auto &cell : displayCells)
     {
         cell.centerScaled.z = cell.zForCsv * zScale;
@@ -7571,7 +7568,7 @@ void CellLumen::saveFrameOutputs(const fs::path &imageFile,
 
     std::vector<cv::Mat> displayFrame = interpolateStackForPreview(
         normalizeStackForPreview(realFrame),
-        static_cast<int>(std::lround(zScale)));
+        displayZInterpolationFactor);
 
     const EllipsoidConfig previousCellConfig = Ellipsoid::cellConfig;
     if (config.cell)
@@ -7593,10 +7590,55 @@ void CellLumen::saveFrameOutputs(const fs::path &imageFile,
     frame.setBackgroundColor(0.0f);
     frame.regenerateSynthFrame();
 
+    const std::string frameDirName = extractFrameFolderName(imageFile);
+    if (celluniverse::compact::CompactExporter::writesCompact(
+            config.simulation.export_mode))
+    {
+        int compactFrame = 0;
+        if (!frameDirName.empty() &&
+            std::all_of(frameDirName.begin(), frameDirName.end(),
+                        [](unsigned char ch) {
+                            return std::isdigit(ch) != 0;
+                        }))
+        {
+            compactFrame = std::stoi(frameDirName);
+        }
+        const auto record =
+            celluniverse::compact::CompactExporter::captureFrame(
+                frame,
+                compactFrame,
+                "celllumen",
+                static_cast<float>(displayZInterpolationFactor),
+                "cell_lumen_profile",
+                "scaled");
+        celluniverse::compact::CompactExporter::writeFrame(outputDir, record);
+        std::cout << "[CellLumen Compact Export] frame=" << compactFrame
+                  << " cells=" << record.cells.size()
+                  << " output=" << (outputDir / "compact")
+                  << std::endl;
+    }
+
+    if (!celluniverse::compact::CompactExporter::writesFull(
+            config.simulation.export_mode))
+    {
+        std::cout << "[CellLumen Output] skip_tiff=1 frame="
+                  << imageFile.filename().string()
+                  << " reason=compact_export_mode"
+                  << std::endl;
+        return;
+    }
+    if (shouldSkipCellLumenTiffOutput())
+    {
+        std::cout << "[CellLumen Output] skip_tiff=1 frame="
+                  << imageFile.filename().string()
+                  << " reason=CELLUNIVERSE_CELL_LUMEN_SKIP_TIFF"
+                  << std::endl;
+        return;
+    }
+
     std::vector<cv::Mat> realImages = frame.generateOutputFrame();
     std::vector<cv::Mat> synthImages = frame.generateOutputSynthFrame();
 
-    const std::string frameDirName = extractFrameFolderName(imageFile);
     fs::create_directories(outputDir);
     const fs::path realTiffPath = outputDir / (frameDirName + "_real.tif");
     const fs::path synthTiffPath = outputDir / (frameDirName + "_synth.tif");

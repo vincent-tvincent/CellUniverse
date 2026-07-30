@@ -7,16 +7,21 @@
 #include <opencv2/core/utils/logger.hpp>
 #include "ConfigTypes.hpp"
 #include "CellFactory.hpp"
+#include "CsvHandler.hpp"
+#include "BackgroundRegionTracker.hpp"
 #include "yaml-cpp/yaml.h"
 #include "Ellipsoid.hpp"
 #include "CellUniverse.hpp"
 #include "CellLumen.hpp"
+#include "CompactExporter.hpp"
 #include "ImageHandler.hpp"
 #include "LineageTreeCreator.hpp"
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <thread>
 #ifdef _OPENMP
 #include <omp.h>
@@ -113,6 +118,18 @@ void applyRuntimeOverrides(BaseConfig &config)
               << " realtime=iterations_per_second"
               << " note=split_attempts_are_reported_separately_because_they_are_much_more_expensive"
               << std::endl;
+}
+
+bool pathsReferToSameOutput(const fs::path &left, const fs::path &right)
+{
+    std::error_code leftError;
+    std::error_code rightError;
+    const fs::path leftAbsolute = fs::absolute(left, leftError);
+    const fs::path rightAbsolute = fs::absolute(right, rightError);
+    if (leftError || rightError) {
+        return left.lexically_normal() == right.lexically_normal();
+    }
+    return leftAbsolute.lexically_normal() == rightAbsolute.lexically_normal();
 }
 
 int computeFutureContextLookahead(const BaseConfig &config)
@@ -291,6 +308,12 @@ int main(int argc, char *argv[])
         config.printConfig();
 
         fs::create_directories(args.output);
+        if (celluniverse::compact::CompactExporter::writesCompact(
+                config.simulation.export_mode))
+        {
+            celluniverse::compact::CompactExporter::beginRun(
+                args.output, 0);
+        }
         CellLumen cellLumen(config, fs::path(args.output));
         cellLumen.buildInitialCsvForFrame(fs::path(args.inputFile), fs::path(args.csvOutput));
         return 0;
@@ -322,10 +345,72 @@ int main(int argc, char *argv[])
     }
 
     applyRuntimeOverrides(config);
+
+    // Schema-v2 initializer metadata is authoritative for the coordinate
+    // contract. Read it before discovering/loading images so z interpolation
+    // uses the same ratio that produced the CSV. Legacy CSVs have no metadata
+    // marker and therefore retain the YAML configuration unchanged.
+    const InitialCsvMetadata initialCsvMetadata =
+        CsvHandler::loadInitialCsvMetadata(args.initial);
+    if (initialCsvMetadata.present) {
+        const float roundedRatio =
+            std::round(initialCsvMetadata.zInterpolationRatio);
+        if (std::abs(initialCsvMetadata.zInterpolationRatio - roundedRatio) >
+                1.0e-5f ||
+            roundedRatio < 1.0f) {
+            throw std::runtime_error(
+                "initializer schema-v2 zInterpolationRatio must be a positive "
+                "integer for the current CellUniverse interpolation engine; "
+                "refusing to truncate " +
+                std::to_string(initialCsvMetadata.zInterpolationRatio));
+        }
+        const float configuredRatio = config.simulation.z_scaling;
+        const std::string configuredSpace =
+            config.simulation.initial_z_space;
+        config.simulation.z_scaling = roundedRatio;
+        config.simulation.z_scaling_source = "initial_csv";
+        config.simulation.initial_z_space =
+            initialCsvMetadata.zCoordinateSpace;
+        std::cout << "[Initial CSV Metadata] schema="
+                  << initialCsvMetadata.initializerSchemaVersion
+                  << " zInterpolationRatio="
+                  << config.simulation.z_scaling
+                  << " zCoordinateSpace="
+                  << config.simulation.initial_z_space
+                  << " overrides=config"
+                  << " previous_z_scaling=" << configuredRatio
+                  << " previous_z_space=" << configuredSpace
+                  << '\n';
+    } else {
+        std::cout << "[Initial CSV Metadata] schema=legacy"
+                  << " action=use_regular_configuration"
+                  << " z_scaling=" << config.simulation.z_scaling
+                  << " initial_z_space="
+                  << config.simulation.initial_z_space
+                  << '\n';
+    }
     config.printConfig();
 
-    if (config.cellType == "ellipsoid" && config.cell) {
-        Ellipsoid::cellConfig = *config.cell;
+    if (celluniverse::compact::CompactExporter::writesCompact(
+            config.simulation.export_mode))
+    {
+        const bool preserveExistingFrames =
+            config.simulation.resume_from > 0 &&
+            !config.simulation.resume_source_dir.empty() &&
+            pathsReferToSameOutput(
+                args.output, config.simulation.resume_source_dir);
+        const int preserveFramesBefore =
+            preserveExistingFrames
+                ? config.simulation.resume_from
+                : 0;
+        celluniverse::compact::CompactExporter::beginRun(
+            args.output, preserveFramesBefore);
+        std::cout << "[Compact Export] session="
+                  << (preserveExistingFrames
+                          ? "in_place_resume"
+                          : "fresh_manifest")
+                  << " output=" << (fs::path(args.output) / "compact")
+                  << '\n';
     }
 
     // Load selected frames plus optional future context. The selected range
@@ -369,10 +454,69 @@ int main(int argc, char *argv[])
         std::cerr << "[WARN] imageFilePaths is empty; cannot determine initial frame filename." << '\n';
     }
 
+    std::optional<BackgroundRegionTracker::SeedRecord>
+        initialCsvBackgroundSeed;
+    if (initialCsvMetadata.present) {
+        const float initialRadiusScale =
+            config.cell ? config.cell->initialRadiusScale : 1.0f;
+        const InitialCsvDocument initialCsv = CsvHandler::loadInitialCsv(
+            args.initial,
+            firstFrameFile,
+            config.simulation.z_scaling,
+            initialRadiusScale,
+            config.simulation.initial_z_space);
+        if (initialCsv.hasBackground) {
+            BackgroundRegionTracker::SeedRecord seed;
+            seed.center = cv::Point3f(
+                initialCsv.background.x,
+                initialCsv.background.y,
+                initialCsv.background.z);
+            seed.radii = cv::Vec3f(
+                initialCsv.background.aRadius,
+                initialCsv.background.bRadius,
+                initialCsv.background.cRadius);
+            seed.rotation = cv::Vec3f(
+                initialCsv.background.thetaX,
+                initialCsv.background.thetaY,
+                initialCsv.background.thetaZ);
+            seed.coldBackground =
+                initialCsv.background.coldBackgroundBrightness;
+            seed.hotBackground =
+                initialCsv.background.hotBackgroundBrightness;
+            seed.softMargin =
+                initialCsv.background.backgroundSoftMargin;
+            initialCsvBackgroundSeed = seed;
+
+            // Keep scalar-only code paths safe while the spatial background
+            // field is installed during frame preparation.
+            if (config.cell) {
+                config.cell->backgroundColor = seed.coldBackground;
+            }
+            std::cout << "[Initial CSV Background] source="
+                      << initialCsv.background.name
+                      << " center=(" << seed.center.x << ","
+                      << seed.center.y << "," << seed.center.z << ")"
+                      << " radii=(" << seed.radii[0] << ","
+                      << seed.radii[1] << "," << seed.radii[2] << ")"
+                      << " rotation=(" << seed.rotation[0] << ","
+                      << seed.rotation[1] << "," << seed.rotation[2] << ")"
+                      << " cold=" << seed.coldBackground
+                      << " hot=" << seed.hotBackground
+                      << " softMargin=" << seed.softMargin
+                      << " dynamic_tracking=enabled"
+                      << '\n';
+        }
+    }
+
+    if (config.cellType == "ellipsoid" && config.cell) {
+        Ellipsoid::cellConfig = *config.cell;
+    }
+
     if (config.simulation.quit_after_preprocessing) {
         CellUniverse preprocessOnlyLineage({}, imageFilePaths, config, args.output,
                                            args.firstFrame, args.continueFrom,
-                                           selectedFrameCount);
+                                           selectedFrameCount,
+                                           initialCsvBackgroundSeed);
         preprocessOnlyLineage.preprocessAllFramesAlignedToMinimumBackground(false);
         std::cout << "[DEBUG] quit_after_preprocessing=true; exiting after preprocessing/load phase." << std::endl;
         return 0;
@@ -386,7 +530,8 @@ int main(int argc, char *argv[])
     // create lineage
     CellUniverse lineage = CellUniverse(cells, imageFilePaths, config,
                                         args.output, args.firstFrame,
-                                        args.continueFrom, selectedFrameCount);
+                                        args.continueFrom, selectedFrameCount,
+                                        initialCsvBackgroundSeed);
     const bool prepareAnalyzeOneFrame =
         (config.simulation.prepare_analyze_one_frame ||
          config.simulation.celluniverse3_enabled ||
@@ -457,6 +602,7 @@ int main(int argc, char *argv[])
         lineage.copyCellsForward(frame + 1);
 
         lineage.saveImages(frame);
+        lineage.saveCompactFrame(frame);
 
         lineage.saveCells(frame);
 

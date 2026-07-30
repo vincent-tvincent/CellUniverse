@@ -6,6 +6,7 @@
 #include "Frame.hpp"
 #include "types.hpp"
 #include "Ellipsoid.hpp"
+#include "BackgroundRegionTracker.hpp"
 
 #include <array>
 #include <iostream>
@@ -18,6 +19,7 @@
 #include <stdexcept>
 #include <set>
 #include <unordered_map>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -30,10 +32,13 @@ public:
                  std::string outputPath,
                  int firstFrame = 0,
                  int continueFrom = -1,
-                 int selectedFrameCount = -1);
+                 int selectedFrameCount = -1,
+                 std::optional<BackgroundRegionTracker::SeedRecord>
+                     initialCsvBackgroundSeed = std::nullopt);
 
     void optimize(int frameIndex);
     void saveImages(int frameIndex, const std::string &stage = "");
+    void saveCompactFrame(int frameIndex);
     void saveCells(int frameIndex);
     void copyCellsForward(size_t to);
     // Memory optimization (M1): after this frame has been optimized, saved,
@@ -132,6 +137,11 @@ private:
    // image data.
    std::vector<float> perFrameAdaptiveBackground;
    std::vector<float> perFrameMeanBrightness;
+   // Optional schema-v2 background envelope. When configured, this tracker
+   // supplies a rotated, soft two-region background to every Frame. Its
+   // geometry changes only after conservative image-evidence checks.
+   BackgroundRegionTracker initialCsvBackgroundTracker;
+   std::set<int> initialCsvBackgroundStateWrittenFrames;
    bool resumePreviousFrameSummaryValid = false;
    float resumePreviousAdaptiveBackground = 0.0f;
    float resumePreviousMeanBrightness = 0.0f;
@@ -204,6 +214,9 @@ private:
    void prepareSignalCentersForFrame(int frameIndex,
                                      const std::vector<cv::Mat> &realFrame,
                                      bool keepLoaded);
+   void installInitialCsvBackground(int frameIndex,
+                                    const std::vector<cv::Mat> &realFrame);
+   void writeInitialCsvBackgroundState(int frameIndex);
    std::vector<Frame::SignalCenter> buildCellUniverse3WindowCenters(
        int frameIndex,
        const std::vector<cv::Mat> &currentFrame);

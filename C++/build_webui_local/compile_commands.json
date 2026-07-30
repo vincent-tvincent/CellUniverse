@@ -31,6 +31,18 @@
 },
 {
   "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
+  "command": "/usr/bin/c++ -DCELLUNIVERSE_HAS_N2V2_PREPROCESS=1 -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -isystem /home/puv/celluniverse/CellUniverse/C++/external/libtorch/include -isystem /home/puv/celluniverse/CellUniverse/C++/external/libtorch/include/torch/csrc/api/include -O3 -DNDEBUG -std=gnu++17 -D_GLIBCXX_USE_CXX11_ABI=1 -O3 -DNDEBUG -march=native -fopenmp -o CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/CompactExporter.cpp",
+  "file": "/home/puv/celluniverse/CellUniverse/C++/src/CompactExporter.cpp",
+  "output": "CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o"
+},
+{
+  "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
+  "command": "/usr/bin/c++ -DCELLUNIVERSE_HAS_N2V2_PREPROCESS=1 -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -isystem /home/puv/celluniverse/CellUniverse/C++/external/libtorch/include -isystem /home/puv/celluniverse/CellUniverse/C++/external/libtorch/include/torch/csrc/api/include -O3 -DNDEBUG -std=gnu++17 -D_GLIBCXX_USE_CXX11_ABI=1 -O3 -DNDEBUG -march=native -fopenmp -o CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp",
+  "file": "/home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp",
+  "output": "CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o"
+},
+{
+  "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
   "command": "/usr/bin/c++ -DCELLUNIVERSE_HAS_N2V2_PREPROCESS=1 -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -isystem /home/puv/celluniverse/CellUniverse/C++/external/libtorch/include -isystem /home/puv/celluniverse/CellUniverse/C++/external/libtorch/include/torch/csrc/api/include -O3 -DNDEBUG -std=gnu++17 -D_GLIBCXX_USE_CXX11_ABI=1 -O3 -DNDEBUG -march=native -fopenmp -o CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/EmbryoBrightTracker.cpp",
   "file": "/home/puv/celluniverse/CellUniverse/C++/src/EmbryoBrightTracker.cpp",
   "output": "CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o"
@@ -94,6 +106,30 @@
   "command": "/usr/bin/c++ -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -O3 -DNDEBUG -std=gnu++17 -o CMakeFiles/brightness_volume_analyzer.dir/src/LineageViewer.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/LineageViewer.cpp",
   "file": "/home/puv/celluniverse/CellUniverse/C++/src/LineageViewer.cpp",
   "output": "CMakeFiles/brightness_volume_analyzer.dir/src/LineageViewer.cpp.o"
+},
+{
+  "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
+  "command": "/usr/bin/c++ -DCELLUNIVERSE_TEST_FIXTURE_DIR=\\\"/home/puv/celluniverse/CellUniverse/C++/tests/fixtures\\\" -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -O3 -DNDEBUG -std=gnu++17 -o CMakeFiles/initial_csv_background_test.dir/tests/InitialCsvBackgroundTest.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/tests/InitialCsvBackgroundTest.cpp",
+  "file": "/home/puv/celluniverse/CellUniverse/C++/tests/InitialCsvBackgroundTest.cpp",
+  "output": "CMakeFiles/initial_csv_background_test.dir/tests/InitialCsvBackgroundTest.cpp.o"
+},
+{
+  "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
+  "command": "/usr/bin/c++ -DCELLUNIVERSE_TEST_FIXTURE_DIR=\\\"/home/puv/celluniverse/CellUniverse/C++/tests/fixtures\\\" -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -O3 -DNDEBUG -std=gnu++17 -o CMakeFiles/initial_csv_background_test.dir/src/CsvHandler.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/CsvHandler.cpp",
+  "file": "/home/puv/celluniverse/CellUniverse/C++/src/CsvHandler.cpp",
+  "output": "CMakeFiles/initial_csv_background_test.dir/src/CsvHandler.cpp.o"
+},
+{
+  "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
+  "command": "/usr/bin/c++ -DCELLUNIVERSE_TEST_FIXTURE_DIR=\\\"/home/puv/celluniverse/CellUniverse/C++/tests/fixtures\\\" -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -O3 -DNDEBUG -std=gnu++17 -o CMakeFiles/initial_csv_background_test.dir/src/BackgroundRegionTracker.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp",
+  "file": "/home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp",
+  "output": "CMakeFiles/initial_csv_background_test.dir/src/BackgroundRegionTracker.cpp.o"
+},
+{
+  "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local",
+  "command": "/usr/bin/c++ -DCELLUNIVERSE_TEST_FIXTURE_DIR=\\\"/home/puv/celluniverse/CellUniverse/C++/tests/fixtures\\\" -DYAML_CPP_STATIC_DEFINE -I/home/puv/celluniverse/CellUniverse/C++/includes -I/home/puv/celluniverse/CellUniverse/C++/src -I/home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include -isystem /usr/include/opencv4 -O3 -DNDEBUG -std=gnu++17 -o CMakeFiles/initial_csv_background_test.dir/src/Ellipsoid.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/Ellipsoid.cpp",
+  "file": "/home/puv/celluniverse/CellUniverse/C++/src/Ellipsoid.cpp",
+  "output": "CMakeFiles/initial_csv_background_test.dir/src/Ellipsoid.cpp.o"
 },
 {
   "directory": "/home/puv/celluniverse/CellUniverse/C++/build_webui_local/lib/yaml-cpp",

@@ -15,13 +15,13 @@ simulation:
     device: cpu
     inference_batch_size: 24
 
-  # With 500 GB RAM, keep the whole 20-frame future context resident and avoid
+  # With 500 GB RAM, keep the whole 10-frame future context resident and avoid
   # aggressive pressure pruning. This should reduce repeated frame reloads and
   # window-map rebuild churn compared with the workstation profile.
   celluniverse3_frame_cache_prune_enabled: true
-  celluniverse3_frame_cache_keep_future: 20
+  celluniverse3_frame_cache_keep_future: 10
   celluniverse3_frame_cache_min_available_gb: 64.0
-  celluniverse3_frame_cache_pressure_keep_future: 20
+  celluniverse3_frame_cache_pressure_keep_future: 10
 
   # Disk-backed prepared-frame cache is disabled by default on this
   # shared server profile to avoid writing hundreds of MB per frame.

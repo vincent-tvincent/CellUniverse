@@ -21,8 +21,10 @@ std::map<Path, std::vector<Ellipsoid>> CellFactory::createCells(const Path &init
                                                                const std::string& firstFrameFile,
                                                                const std::string& initialZSpace) {
     std::map<Path, std::vector<Ellipsoid>> initialCells;
-    const std::vector<InitialCellRecord> records =
-        CsvHandler::loadInitialCells(init_params_path, firstFrameFile, z_scaling, initialRadiusScale, initialZSpace);
+    const InitialCsvDocument initialCsv =
+        CsvHandler::loadInitialCsv(init_params_path, firstFrameFile, z_scaling,
+                                   initialRadiusScale, initialZSpace);
+    const std::vector<InitialCellRecord> &records = initialCsv.cells;
 
     for (const InitialCellRecord &record : records) {
         EllipsoidParams params(record.cellName,
@@ -31,10 +33,10 @@ std::map<Path, std::vector<Ellipsoid>> CellFactory::createCells(const Path &init
                               record.z,
                               record.aRadius,
                               record.cRadius,
-                              0.0f,
-                              0.0f,
-                              0.0f,
-                              initialBrightness);
+                              record.hasRotation ? record.thetaX : 0.0f,
+                              record.hasRotation ? record.thetaY : 0.0f,
+                              record.hasRotation ? record.thetaZ : 0.0f,
+                              record.hasBrightness ? record.brightness : initialBrightness);
         params.bRadius = record.bRadius;
         params.isTrash = record.isTrash;
         initialCells[record.filePath].push_back(Ellipsoid(params));

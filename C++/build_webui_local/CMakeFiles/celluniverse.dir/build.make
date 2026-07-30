@@ -139,10 +139,38 @@ CMakeFiles/celluniverse.dir/src/CellUniverse.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/celluniverse.dir/src/CellUniverse.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/puv/celluniverse/CellUniverse/C++/src/CellUniverse.cpp -o CMakeFiles/celluniverse.dir/src/CellUniverse.cpp.s
 
+CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o: CMakeFiles/celluniverse.dir/flags.make
+CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/CompactExporter.cpp
+CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o -MF CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o.d -o CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/CompactExporter.cpp
+
+CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/puv/celluniverse/CellUniverse/C++/src/CompactExporter.cpp > CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.i
+
+CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/puv/celluniverse/CellUniverse/C++/src/CompactExporter.cpp -o CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.s
+
+CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o: CMakeFiles/celluniverse.dir/flags.make
+CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp
+CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o -MF CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o.d -o CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp
+
+CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp > CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.i
+
+CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/puv/celluniverse/CellUniverse/C++/src/BackgroundRegionTracker.cpp -o CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.s
+
 CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/EmbryoBrightTracker.cpp
 CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o -MF CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o.d -o CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/EmbryoBrightTracker.cpp
 
 CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.i: cmake_force
@@ -156,7 +184,7 @@ CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.s: cmake_force
 CMakeFiles/celluniverse.dir/src/Frame.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/Frame.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/Frame.cpp
 CMakeFiles/celluniverse.dir/src/Frame.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/celluniverse.dir/src/Frame.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/celluniverse.dir/src/Frame.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/Frame.cpp.o -MF CMakeFiles/celluniverse.dir/src/Frame.cpp.o.d -o CMakeFiles/celluniverse.dir/src/Frame.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/Frame.cpp
 
 CMakeFiles/celluniverse.dir/src/Frame.cpp.i: cmake_force
@@ -170,7 +198,7 @@ CMakeFiles/celluniverse.dir/src/Frame.cpp.s: cmake_force
 CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/ImageHandler.cpp
 CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o -MF CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o.d -o CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/ImageHandler.cpp
 
 CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.i: cmake_force
@@ -184,7 +212,7 @@ CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.s: cmake_force
 CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/LineageTreeCreator.cpp
 CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o -MF CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o.d -o CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/LineageTreeCreator.cpp
 
 CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.i: cmake_force
@@ -198,7 +226,7 @@ CMakeFiles/celluniverse.dir/src/LineageTreeCreator.cpp.s: cmake_force
 CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/LineageViewer.cpp
 CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o -MF CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o.d -o CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/LineageViewer.cpp
 
 CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.i: cmake_force
@@ -212,7 +240,7 @@ CMakeFiles/celluniverse.dir/src/LineageViewer.cpp.s: cmake_force
 CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/Ellipsoid.cpp
 CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building CXX object CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o -MF CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o.d -o CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/Ellipsoid.cpp
 
 CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.i: cmake_force
@@ -226,7 +254,7 @@ CMakeFiles/celluniverse.dir/src/Ellipsoid.cpp.s: cmake_force
 CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o: CMakeFiles/celluniverse.dir/flags.make
 CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o: /home/puv/celluniverse/CellUniverse/C++/src/N2V2Preprocessor.cpp
 CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o: CMakeFiles/celluniverse.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Building CXX object CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o -MF CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o.d -o CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.o -c /home/puv/celluniverse/CellUniverse/C++/src/N2V2Preprocessor.cpp
 
 CMakeFiles/celluniverse.dir/src/N2V2Preprocessor.cpp.i: cmake_force
@@ -244,6 +272,8 @@ celluniverse_OBJECTS = \
 "CMakeFiles/celluniverse.dir/src/CellLumen.cpp.o" \
 "CMakeFiles/celluniverse.dir/src/CsvHandler.cpp.o" \
 "CMakeFiles/celluniverse.dir/src/CellUniverse.cpp.o" \
+"CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o" \
+"CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o" \
 "CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o" \
 "CMakeFiles/celluniverse.dir/src/Frame.cpp.o" \
 "CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o" \
@@ -260,6 +290,8 @@ celluniverse: CMakeFiles/celluniverse.dir/src/CellFactory.cpp.o
 celluniverse: CMakeFiles/celluniverse.dir/src/CellLumen.cpp.o
 celluniverse: CMakeFiles/celluniverse.dir/src/CsvHandler.cpp.o
 celluniverse: CMakeFiles/celluniverse.dir/src/CellUniverse.cpp.o
+celluniverse: CMakeFiles/celluniverse.dir/src/CompactExporter.cpp.o
+celluniverse: CMakeFiles/celluniverse.dir/src/BackgroundRegionTracker.cpp.o
 celluniverse: CMakeFiles/celluniverse.dir/src/EmbryoBrightTracker.cpp.o
 celluniverse: CMakeFiles/celluniverse.dir/src/Frame.cpp.o
 celluniverse: CMakeFiles/celluniverse.dir/src/ImageHandler.cpp.o
@@ -331,7 +363,7 @@ celluniverse: /usr/lib/gcc/x86_64-linux-gnu/13/libgomp.so
 celluniverse: /usr/lib/x86_64-linux-gnu/libpthread.a
 celluniverse: /home/puv/celluniverse/CellUniverse/C++/external/libtorch/lib/libc10.so
 celluniverse: CMakeFiles/celluniverse.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Linking CXX executable celluniverse"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/puv/celluniverse/CellUniverse/C++/build_webui_local/CMakeFiles --progress-num=$(CMAKE_PROGRESS_15) "Linking CXX executable celluniverse"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/celluniverse.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

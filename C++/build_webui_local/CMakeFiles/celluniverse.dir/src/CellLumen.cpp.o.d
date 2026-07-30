@@ -203,8 +203,9 @@ CMakeFiles/celluniverse.dir/src/CellLumen.cpp.o: \
  /usr/include/c++/13/bits/algorithmfwd.h \
  /usr/include/c++/13/bits/stl_heap.h \
  /usr/include/c++/13/pstl/glue_algorithm_defs.h \
- /usr/include/c++/13/stdexcept /usr/include/c++/13/filesystem \
- /usr/include/c++/13/bits/fs_fwd.h /usr/include/c++/13/system_error \
+ /usr/include/c++/13/atomic /usr/include/c++/13/stdexcept \
+ /usr/include/c++/13/filesystem /usr/include/c++/13/bits/fs_fwd.h \
+ /usr/include/c++/13/system_error \
  /usr/include/x86_64-linux-gnu/c++/13/bits/error_constants.h \
  /usr/include/c++/13/bits/chrono.h /usr/include/c++/13/ratio \
  /usr/include/c++/13/ctime /usr/include/c++/13/bits/parse_numbers.h \
@@ -275,7 +276,6 @@ CMakeFiles/celluniverse.dir/src/CellLumen.cpp.o: \
  /usr/include/c++/13/iterator /usr/include/c++/13/bits/stream_iterator.h \
  /home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include/yaml-cpp/node/iterator.h \
  /home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include/yaml-cpp/node/detail/iterator.h \
- /usr/include/c++/13/atomic \
  /home/puv/celluniverse/CellUniverse/C++/lib/yaml-cpp/include/yaml-cpp/node/convert.h \
  /usr/include/c++/13/array /usr/include/c++/13/compare \
  /usr/include/c++/13/unordered_map \
@@ -512,6 +512,9 @@ CMakeFiles/celluniverse.dir/src/CellLumen.cpp.o: \
  /home/puv/celluniverse/CellUniverse/C++/src/../includes/Frame.hpp \
  /home/puv/celluniverse/CellUniverse/C++/src/../includes/types.hpp \
  /usr/include/c++/13/optional \
+ /home/puv/celluniverse/CellUniverse/C++/src/../includes/CompactExporter.hpp \
+ /home/puv/celluniverse/CellUniverse/C++/src/../includes/BackgroundRegionTracker.hpp \
+ /home/puv/celluniverse/CellUniverse/C++/src/../includes/CsvHandler.hpp \
  /home/puv/celluniverse/CellUniverse/C++/src/../includes/ImageHandler.hpp \
  /usr/include/c++/13/fstream \
  /usr/include/x86_64-linux-gnu/c++/13/bits/basic_file.h \

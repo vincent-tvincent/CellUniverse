@@ -452,6 +452,10 @@ public:
     int celluniverse2_conditional_perturb_recent_daughter_frames = 3;
     float celluniverse2_conditional_perturb_recent_daughter_min_shape = 1.65f;
     float z_scaling;
+    // Runtime provenance for the effective interpolation ratio. This is not
+    // read from YAML: main changes it only when schema-v2 initial.csv metadata
+    // overrides the configured ratio.
+    std::string z_scaling_source = "config";
     float blur_sigma;
     int z_slices;
     // Preprocessing mode:
@@ -521,6 +525,10 @@ public:
     bool export_signal_debug_images = false;
     bool export_perturb_debug_images = false;
     bool export_perturb_cell_center_debug_images = false;
+    // full: legacy PNG/TIFF frame exports only
+    // compact: reconstruction metadata only
+    // both: write both representations
+    std::string export_mode = "full";
     bool export_frame_png = true;
     bool export_frame_tiff = false;
     // Default-off TIFF compression. Historical preview TIFFs were written
@@ -1073,6 +1081,7 @@ public:
         if (node["export_signal_debug_images"]) export_signal_debug_images = node["export_signal_debug_images"].as<bool>();
         if (node["export_perturb_debug_images"]) export_perturb_debug_images = node["export_perturb_debug_images"].as<bool>();
         if (node["export_perturb_cell_center_debug_images"]) export_perturb_cell_center_debug_images = node["export_perturb_cell_center_debug_images"].as<bool>();
+        if (node["export_mode"]) export_mode = node["export_mode"].as<std::string>();
         if (node["export_frame_png"]) export_frame_png = node["export_frame_png"].as<bool>();
         if (node["export_frame_tiff"]) export_frame_tiff = node["export_frame_tiff"].as<bool>();
         if (node["export_frame_tiff_compression_enabled"]) export_frame_tiff_compression_enabled = node["export_frame_tiff_compression_enabled"].as<bool>();
@@ -1193,6 +1202,16 @@ public:
         explodeN2V2Config(node["n2v2_preprocess"]);
         parallel_threads = std::max(1, parallel_threads);
         parallel_min_slices = std::max(1, parallel_min_slices);
+        std::transform(export_mode.begin(), export_mode.end(), export_mode.begin(),
+                       [](unsigned char ch) {
+                           return static_cast<char>(std::tolower(ch));
+                       });
+        if (export_mode != "full" &&
+            export_mode != "compact" &&
+            export_mode != "both") {
+            throw std::invalid_argument(
+                "simulation.export_mode must be one of: full, compact, both");
+        }
         if (initial_z_space != "auto" &&
             initial_z_space != "raw" &&
             initial_z_space != "scaled") {
@@ -1488,6 +1507,7 @@ public:
         std::cout << "celluniverse2_conditional_perturb_recent_daughter_frames: " << celluniverse2_conditional_perturb_recent_daughter_frames << '\n';
         std::cout << "celluniverse2_conditional_perturb_recent_daughter_min_shape: " << celluniverse2_conditional_perturb_recent_daughter_min_shape << '\n';
         std::cout << "z_scaling: " << z_scaling << '\n';
+        std::cout << "z_scaling_source: " << z_scaling_source << '\n';
         std::cout << "blur_sigma: " << blur_sigma << '\n';
         std::cout << "preprocess_mode: " << preprocess_mode << '\n';
         std::cout << "light_preprocess_gamma: " << light_preprocess_gamma << '\n';
@@ -1553,6 +1573,7 @@ public:
         std::cout << "export_signal_debug_images: " << export_signal_debug_images << '\n';
         std::cout << "export_perturb_debug_images: " << export_perturb_debug_images << '\n';
         std::cout << "export_perturb_cell_center_debug_images: " << export_perturb_cell_center_debug_images << '\n';
+        std::cout << "export_mode: " << export_mode << '\n';
         std::cout << "export_frame_png: " << export_frame_png << '\n';
         std::cout << "export_frame_tiff: " << export_frame_tiff << '\n';
         std::cout << "export_frame_tiff_compression_enabled: " << export_frame_tiff_compression_enabled << '\n';

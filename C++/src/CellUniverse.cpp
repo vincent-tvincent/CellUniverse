@@ -1,4 +1,5 @@
 #include "../includes/CellUniverse.hpp"
+#include "../includes/CompactExporter.hpp"
 #include "../includes/ImageHandler.hpp"
 #include "../includes/CellLumen.hpp"
 #include <set>
@@ -2422,26 +2423,38 @@ static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
                 const int x0 = ix * boxSizeX;
                 const int x1 = x0 + boxSizeX;
                 double sum = 0.0;
+                double backgroundSum = 0.0;
                 int voxels = 0;
                 for (int z = z0; z < z1; ++z) {
                     for (int y = y0; y < y1; ++y) {
                         const float *row = realFrame[z].ptr<float>(y);
                         for (int x = x0; x < x1; ++x) {
                             sum += row[x];
+                            backgroundSum += frame.backgroundAt(z, y, x);
                             ++voxels;
                         }
                     }
                 }
                 if (voxels <= 0) continue;
-                const float meanBrightness = static_cast<float>(sum / static_cast<double>(voxels));
-                if (meanBrightness <= backgroundValue + minDelta) continue;
+                const float meanBrightness =
+                    static_cast<float>(sum / static_cast<double>(voxels));
+                const float meanBackground =
+                    static_cast<float>(
+                        backgroundSum / static_cast<double>(voxels));
+                if (meanBrightness <= meanBackground + minDelta) continue;
+                // BrightBox consumers historically subtract one scalar
+                // background. Rebase the local signal onto that scalar so
+                // their thresholds remain unchanged while localization uses
+                // the spatial background field.
+                const float rebasedBrightness =
+                    backgroundValue + (meanBrightness - meanBackground);
                 boxes.push_back({
                     ix, iy, iz,
                     cv::Point3f(
                         static_cast<float>(x0 + x1 - 1) * 0.5f,
                         static_cast<float>(y0 + y1 - 1) * 0.5f,
                         static_cast<float>(z0 + z1 - 1) * 0.5f),
-                    meanBrightness, voxels
+                    rebasedBrightness, voxels
                 });
             }
         }
@@ -2739,7 +2752,6 @@ static int applySignalCenterRescueBeforePca(
         return 0;
     }
 
-    const float background = frame.getBackgroundValue();
     const float bgDelta =
         std::max(0.0f, simulation.signal_center_rescue_background_delta);
     const float maxStddev =
@@ -2750,6 +2762,7 @@ static int applySignalCenterRescueBeforePca(
         bool isTrash = false;
         std::pair<float, float> stats{0.0f, 0.0f};
         cv::Point3f oldPos{0.0f, 0.0f, 0.0f};
+        float background = 0.0f;
         std::string siblingName;
         bool siblingHalfspace = false;
         int rejectedBySiblingHalfspace = 0;
@@ -2770,12 +2783,13 @@ static int applySignalCenterRescueBeforePca(
             continue;
         }
 
+        const cv::Point3f oldPos(cell.getX(), cell.getY(), cell.getZ());
+        const float background = frame.backgroundAt(oldPos);
         const auto stats = cell.measureBrightnessStats(frame.getRealFrame());
         const bool bodyLooksBackground =
             stats.first <= background + bgDelta &&
             stats.second <= maxStddev;
 
-        const cv::Point3f oldPos(cell.getX(), cell.getY(), cell.getZ());
         std::string siblingName;
         cv::Point3f siblingHalfspaceMidpoint;
         cv::Point3f siblingHalfspaceDirection;
@@ -3163,6 +3177,7 @@ static int applySignalCenterRescueBeforePca(
         probe.isTrash = cell.isTrash();
         probe.stats = stats;
         probe.oldPos = oldPos;
+        probe.background = background;
         probe.siblingName = siblingName;
         probe.siblingHalfspace = (halfspaceMidpointPtr != nullptr);
         probe.rejectedBySiblingHalfspace = rejectedBySiblingHalfspace;
@@ -3247,7 +3262,7 @@ static int applySignalCenterRescueBeforePca(
                   << " splitDaughterAge=" << probe.splitDaughterAge
                   << " bodyMean=" << probe.stats.first
                   << " bodyStd=" << probe.stats.second
-                  << " background=" << background
+                  << " background=" << probe.background
                   << " from=(" << probe.oldPos.x << "," << probe.oldPos.y << "," << probe.oldPos.z << ")"
                   << " to=(" << probe.match.position.x << "," << probe.match.position.y << "," << probe.match.position.z << ")"
                   << " centerIdx=" << probe.match.centerIndex
@@ -4263,7 +4278,9 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
                            std::string outputPath,
                            int firstFrame,
                            int continueFrom,
-                           int selectedFrameCount)
+                           int selectedFrameCount,
+                           std::optional<BackgroundRegionTracker::SeedRecord>
+                               initialCsvBackgroundSeed)
 : config(config), outputPath(outputPath), firstFrame(firstFrame),
   imagePaths(imagePaths),
   selectedFrameCount(selectedFrameCount > 0
@@ -4271,6 +4288,26 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
                          : imagePaths.size()),
   initialCells(initialCells), continueFrom(continueFrom)
 {
+    if (initialCsvBackgroundSeed.has_value()) {
+        initialCsvBackgroundTracker.configure(*initialCsvBackgroundSeed);
+        const auto &options = initialCsvBackgroundTracker.options();
+        std::cout << "[Initial CSV Background Tracker] enabled=1"
+                  << " rotation=fixed"
+                  << " geometry=conservative_center_and_radii"
+                  << " geometry_ema=" << options.geometryEmaAlpha
+                  << " max_center_step_fraction="
+                  << options.maximumCenterShiftFraction
+                  << " max_radius_step_fraction="
+                  << options.maximumRadiusChangeFraction
+                  << " min_confidence=" << options.minimumConfidence
+                  << " fallback=freeze_previous_then_seed"
+                  << '\n';
+    } else {
+        std::cout << "[Initial CSV Background Tracker] enabled=0"
+                  << " fallback=regular_configuration"
+                  << '\n';
+    }
+
     std::cout << "[Frame Range] selected_count=" << this->selectedFrameCount
               << " loaded_count=" << imagePaths.size()
               << " lookahead_context_count="
@@ -6842,7 +6879,25 @@ std::vector<Frame::SignalCenter> CellUniverse::buildCellUniverse3WindowCenters(
         return true;
     };
 
+    const bool useInitialCsvBackground =
+        initialCsvBackgroundTracker.isConfigured() &&
+        frames[static_cast<size_t>(frameIndex)].hasBackgroundFrame();
+    const std::vector<cv::Mat> *initialCsvMembership = nullptr;
+    auto initialCsvMembershipIt =
+        cellUniverse3WindowBackgroundRegionByFrame.find(frameIndex);
+    if (useInitialCsvBackground &&
+        initialCsvMembershipIt !=
+            cellUniverse3WindowBackgroundRegionByFrame.end() &&
+        stackMatchesCurrent(initialCsvMembershipIt->second)) {
+        initialCsvMembership = &initialCsvMembershipIt->second;
+    }
+
     auto ensureGlobalBackgroundMaxMap = [&]() -> bool {
+        if (useInitialCsvBackground) {
+            // The CSV envelope is a per-frame rotated soft region and
+            // supersedes the legacy dataset-wide max-map detector.
+            return false;
+        }
         if (!sim.celluniverse3_window_dual_background_enabled) {
             return false;
         }
@@ -7113,6 +7168,15 @@ std::vector<Frame::SignalCenter> CellUniverse::buildCellUniverse3WindowCenters(
                     stackPtr->size() != currentFrame.size()) {
                     continue;
                 }
+                if (useInitialCsvBackground) {
+                    const auto &state =
+                        initialCsvBackgroundTracker.currentState();
+                    WindowBackground background;
+                    background.cold = state.coldBackground;
+                    background.hot = state.hotBackground;
+                    frameBackgrounds.push_back(background);
+                    continue;
+                }
                 std::vector<float> coldValues;
                 std::vector<float> hotValues;
                 const auto &stack = *stackPtr;
@@ -7249,24 +7313,46 @@ std::vector<Frame::SignalCenter> CellUniverse::buildCellUniverse3WindowCenters(
                             backgroundSampleSlice != nullptr
                                 ? backgroundSampleSlice->ptr<float>(y)
                                 : nullptr;
+                        const float *csvMembershipRow =
+                            initialCsvMembership != nullptr
+                                ? (*initialCsvMembership)
+                                      [static_cast<size_t>(z)]
+                                          .ptr<float>(y)
+                                : nullptr;
                         for (int x = 0; x < sizeX; ++x) {
+                            const float csvMembership =
+                                csvMembershipRow != nullptr
+                                    ? csvMembershipRow[x]
+                                    : 0.0f;
                             const bool globalHotRegion =
-                                sim.celluniverse3_window_dual_background_enabled &&
-                                useGlobalBackgroundMap &&
-                                globalMaxRow[x] > cellUniverse3GlobalHotThreshold;
+                                useInitialCsvBackground
+                                    ? csvMembership > 0.5f
+                                    : (sim.celluniverse3_window_dual_background_enabled &&
+                                       useGlobalBackgroundMap &&
+                                       globalMaxRow[x] >
+                                           cellUniverse3GlobalHotThreshold);
                             const bool localOccupiedRegion =
+                                !useInitialCsvBackground &&
                                 sim.celluniverse3_window_dual_background_enabled &&
                                 rawMaxRow[x] > out.rawHotThreshold;
                             const bool coldSample = !globalHotRegion;
                             const bool hotSample =
                                 globalHotRegion && !localOccupiedRegion;
                             const float localBackground =
-                                globalHotRegion ? background.hot : background.cold;
+                                useInitialCsvBackground
+                                    ? frames[static_cast<size_t>(frameIndex)]
+                                          .backgroundAt(z, y, x)
+                                    : (globalHotRegion
+                                           ? background.hot
+                                           : background.cold);
                             if (bgRow != nullptr) {
                                 bgRow[x] = localBackground;
                             }
                             if (bgRegionRow != nullptr) {
-                                bgRegionRow[x] = globalHotRegion ? 1.0f : 0.0f;
+                                bgRegionRow[x] =
+                                    useInitialCsvBackground
+                                        ? csvMembership
+                                        : (globalHotRegion ? 1.0f : 0.0f);
                             }
                             if (bgSampleRow != nullptr) {
                                 bgSampleRow[x] = hotSample ? 1.0f
@@ -7291,7 +7377,16 @@ std::vector<Frame::SignalCenter> CellUniverse::buildCellUniverse3WindowCenters(
                           << (firstFrame + frameIndex)
                           << " label=" << label
                           << " dual="
-                          << (sim.celluniverse3_window_dual_background_enabled ? 1 : 0)
+                          << ((sim.celluniverse3_window_dual_background_enabled ||
+                               useInitialCsvBackground)
+                                  ? 1
+                                  : 0)
+                          << " region_source="
+                          << (useInitialCsvBackground
+                                  ? "initial_csv_dynamic_ellipsoid"
+                                  : (useGlobalBackgroundMap
+                                         ? "legacy_global_map"
+                                         : "scalar"))
                           << " frames=" << backgroundCount
                           << " coldBackground=" << out.meanColdBackground
                           << " hotBackground=" << out.meanHotBackground
@@ -7350,7 +7445,8 @@ std::vector<Frame::SignalCenter> CellUniverse::buildCellUniverse3WindowCenters(
         return centers;
     }
 
-    if (sim.celluniverse3_window_dual_background_enabled &&
+    if ((sim.celluniverse3_window_dual_background_enabled ||
+         useInitialCsvBackground) &&
         !futureSignal.backgroundFrame.empty()) {
         cellUniverse3WindowBackgroundByFrame[frameIndex] =
             cloneMatStack(futureSignal.backgroundFrame);
@@ -7361,6 +7457,10 @@ std::vector<Frame::SignalCenter> CellUniverse::buildCellUniverse3WindowCenters(
         std::cout << "[CellUniverse3 Window Background Install Ready] frame="
                   << (firstFrame + frameIndex)
                   << " source=future_window"
+                  << " region_source="
+                  << (useInitialCsvBackground
+                          ? "initial_csv_dynamic_ellipsoid"
+                          : "legacy_global_map")
                   << " slices=" << futureSignal.backgroundFrame.size()
                   << " coldBackground=" << futureSignal.meanColdBackground
                   << " hotBackground=" << futureSignal.meanHotBackground
@@ -7760,6 +7860,125 @@ void CellUniverse::prepareFrame(int frameIndex)
     prepareSignalCentersForFrame(frameIndex, prepared.realFrame, true);
 }
 
+void CellUniverse::writeInitialCsvBackgroundState(int frameIndex)
+{
+    if (!initialCsvBackgroundTracker.isConfigured() ||
+        !initialCsvBackgroundStateWrittenFrames.insert(frameIndex).second) {
+        return;
+    }
+
+    const fs::path statePath =
+        fs::path(outputPath) / "initial_csv_background_states.csv";
+    fs::create_directories(statePath.parent_path());
+    const bool writeHeader =
+        !fs::exists(statePath) || fs::file_size(statePath) == 0;
+    std::ofstream out(statePath, std::ios::app);
+    if (!out.is_open()) {
+        std::cerr << "[Initial CSV Background Tracker] frame="
+                  << (firstFrame + frameIndex)
+                  << " warning=unable_to_write_state"
+                  << " path=" << statePath.string()
+                  << '\n';
+        return;
+    }
+    if (writeHeader) {
+        out << "frame,x,y,z,aRadius,bRadius,cRadius,"
+               "theta_x,theta_y,theta_z,coldBackgroundBrightness,"
+               "hotBackgroundBrightness,backgroundSoftMargin,"
+               "confidence,frozen,shellSamples,evidenceSamples,"
+               "coldSamples,hotSamples\n";
+    }
+    const auto &state = initialCsvBackgroundTracker.currentState();
+    out << (firstFrame + frameIndex) << ','
+        << state.center.x << ','
+        << state.center.y << ','
+        << state.center.z << ','
+        << state.radii[0] << ','
+        << state.radii[1] << ','
+        << state.radii[2] << ','
+        << state.rotation[0] << ','
+        << state.rotation[1] << ','
+        << state.rotation[2] << ','
+        << state.coldBackground << ','
+        << state.hotBackground << ','
+        << state.softMargin << ','
+        << state.confidence << ','
+        << (state.frozen ? 1 : 0) << ','
+        << state.shellSamples << ','
+        << state.evidenceSamples << ','
+        << state.coldSamples << ','
+        << state.hotSamples << '\n';
+}
+
+void CellUniverse::installInitialCsvBackground(
+    int frameIndex,
+    const std::vector<cv::Mat> &realFrame)
+{
+    if (!initialCsvBackgroundTracker.isConfigured() ||
+        realFrame.empty() ||
+        frameIndex < 0 ||
+        static_cast<size_t>(frameIndex) >= frames.size()) {
+        return;
+    }
+
+    Frame &frame = frames[static_cast<size_t>(frameIndex)];
+    const int absoluteFrame = firstFrame + frameIndex;
+    if (initialCsvBackgroundTracker.currentState().frameIndex !=
+        absoluteFrame) {
+        initialCsvBackgroundTracker.update(
+            absoluteFrame, realFrame, frame.cells);
+    }
+
+    BackgroundRegionTracker::RenderedStacks rendered =
+        initialCsvBackgroundTracker.render(
+            static_cast<int>(realFrame.size()),
+            realFrame.front().rows,
+            realFrame.front().cols);
+    const auto &state = initialCsvBackgroundTracker.currentState();
+    frame.setBackgroundColor(state.coldBackground);
+
+    // Preserve the continuous membership stack for CellUniverse3 window
+    // subtraction/debug before moving the background field into Frame.
+    if (config.simulation.celluniverse3_enabled) {
+        cellUniverse3WindowBackgroundRegionByFrame[frameIndex] =
+            cloneMatStack(rendered.membership);
+    }
+    if (config.simulation.celluniverse3_window_background_export_debug) {
+        const fs::path framePath =
+            imagePaths[static_cast<size_t>(frameIndex)];
+        exportStackToSubdir(
+            rendered.background,
+            fs::path(outputPath),
+            "initial_csv_background",
+            framePath,
+            config.simulation.export_frame_png,
+            config.simulation.export_frame_tiff);
+        exportStackToSubdir(
+            rendered.membership,
+            fs::path(outputPath),
+            "initial_csv_background_membership",
+            framePath,
+            config.simulation.export_frame_png,
+            config.simulation.export_frame_tiff);
+    }
+    frame.setBackgroundFrame(std::move(rendered.background));
+    frame.regenerateSynthFrame();
+    writeInitialCsvBackgroundState(frameIndex);
+
+    std::cout << "[Initial CSV Background Installed] frame="
+              << absoluteFrame
+              << " slices=" << realFrame.size()
+              << " center=(" << state.center.x << ","
+              << state.center.y << "," << state.center.z << ")"
+              << " radii=(" << state.radii[0] << ","
+              << state.radii[1] << "," << state.radii[2] << ")"
+              << " cold=" << state.coldBackground
+              << " hot=" << state.hotBackground
+              << " confidence=" << state.confidence
+              << " frozen=" << (state.frozen ? 1 : 0)
+              << '\n';
+}
+
 void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
                                                 const std::vector<cv::Mat> &realFrame,
                                                 bool keepLoaded)
@@ -7773,6 +7992,11 @@ void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
     if (!frame.hasImageStacks()) {
         frame.loadImageStacks(realFrame);
     }
+
+    // Install the schema-v2 spatial background before any signal/PCA
+    // localization. With no schema-v2 envelope this is a no-op and every
+    // existing scalar/configured background path remains unchanged.
+    installInitialCsvBackground(frameIndex, realFrame);
 
     if (config.simulation.signal_guided_position_enabled ||
         config.simulation.signal_center_rescue_enabled ||
@@ -7842,7 +8066,7 @@ void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
                           << (firstFrame + frameIndex)
                           << " slices=" << frame.getRealFrame().size()
                           << std::endl;
-            } else {
+            } else if (!initialCsvBackgroundTracker.isConfigured()) {
                 frame.clearBackgroundFrame();
                 if (backgroundRegionIt != cellUniverse3WindowBackgroundRegionByFrame.end()) {
                     cellUniverse3WindowBackgroundRegionByFrame.erase(backgroundRegionIt);
@@ -8975,7 +9199,6 @@ void CellUniverse::optimize(int frameIndex)
             }
 
             const auto &realFrame = frame.getRealFrame();
-            const float background = frame.getBackgroundValue();
             const int maxZ = static_cast<int>(realFrame.size()) - 1;
             const int maxY = realFrame.empty() ? -1 : realFrame[0].rows - 1;
             const int maxX = realFrame.empty() ? -1 : realFrame[0].cols - 1;
@@ -9089,7 +9312,8 @@ void CellUniverse::optimize(int frameIndex)
                                             static_cast<float>(y),
                                             static_cast<float>(z));
                         if (!cell.isPointInsideEllipsoid(p, 1.0f)) continue;
-                        const float w = std::max(0.0f, row[x] - background);
+                        const float w = std::max(
+                            0.0f, row[x] - frame.backgroundAt(z, y, x));
                         if (w <= 0.0f) continue;
                         triggerWeightSum += static_cast<double>(w);
                         triggerWeightSqSum += static_cast<double>(w) * w;
@@ -9253,7 +9477,8 @@ void CellUniverse::optimize(int frameIndex)
                                 ++excludedNeighborVoxels;
                                 continue;
                             }
-                            const float w = std::max(0.0f, row[x] - background);
+                            const float w = std::max(
+                                0.0f, row[x] - frame.backgroundAt(z, y, x));
                             if (w <= 0.0f) {
                                 continue;
                             }
@@ -9459,7 +9684,10 @@ void CellUniverse::optimize(int frameIndex)
                 !frame.getRealFrame().empty()) {
                 const auto currentStats =
                     frame.cells[ci].measureBrightnessStats(frame.getRealFrame());
-                const float background = frame.getBackgroundValue();
+                const float background = frame.backgroundAt(cv::Point3f(
+                    frame.cells[ci].getX(),
+                    frame.cells[ci].getY(),
+                    frame.cells[ci].getZ()));
                 const float bodyUnit = std::max(1.0f, prePcaMaxR);
                 const float searchRadius =
                     std::max(1.0f,
@@ -20342,7 +20570,8 @@ void CellUniverse::optimize(int frameIndex)
             }
 
             const auto stats = cell.measureBrightnessStats(frame.getRealFrame());
-            const float background = frame.getBackgroundValue();
+            const float background = frame.backgroundAt(cv::Point3f(
+                cell.getX(), cell.getY(), cell.getZ()));
             const float signalMean = std::max(0.0f, stats.first - background);
             const float dimMargin = std::max(
                 0.0f,
@@ -23788,6 +24017,22 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
         throw std::invalid_argument("Invalid frame index");
     }
 
+    if (!celluniverse::compact::CompactExporter::writesFull(
+            config.simulation.export_mode))
+    {
+        std::cout << "[Frame Export] frame=" << (firstFrame + frameIndex)
+                  << " full_images=0 export_mode="
+                  << config.simulation.export_mode << '\n';
+        return;
+    }
+    if (!config.simulation.export_frame_png &&
+        !config.simulation.export_frame_tiff)
+    {
+        std::cout << "[Frame Export] frame=" << (firstFrame + frameIndex)
+                  << " full_images=0 reason=all_full_image_formats_disabled\n";
+        return;
+    }
+
     std::vector<Image> realImages = frames[frameIndex].generateOutputFrame();
     std::vector<Image> synthImages = frames[frameIndex].generateOutputSynthFrame();
     int displayFrame = firstFrame + frameIndex;
@@ -23837,6 +24082,70 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
     }
 
     std::cout << "Done" << '\n';
+}
+
+void CellUniverse::saveCompactFrame(int frameIndex)
+{
+    if (!celluniverse::compact::CompactExporter::writesCompact(
+            config.simulation.export_mode))
+    {
+        return;
+    }
+    if (frameIndex < 0 || static_cast<size_t>(frameIndex) >= frames.size())
+    {
+        throw std::invalid_argument("Invalid compact export frame index");
+    }
+
+    Frame &frame = frames[static_cast<size_t>(frameIndex)];
+    const int absoluteFrame = firstFrame + frameIndex;
+    const BackgroundRegionTracker::State *analyticBackground = nullptr;
+    if (initialCsvBackgroundTracker.isConfigured() &&
+        frame.hasBackgroundFrame() &&
+        initialCsvBackgroundTracker.currentState().frameIndex ==
+            absoluteFrame)
+    {
+        analyticBackground = &initialCsvBackgroundTracker.currentState();
+    }
+
+    std::string pipelineMode = "traditional";
+    if (config.simulation.celluniverse3_enabled)
+    {
+        pipelineMode = "celluniverse3";
+    }
+    else if (config.simulation.celluniverse2_enabled)
+    {
+        pipelineMode = "celluniverse2";
+    }
+    if (config.cellLumen.enabled && config.cellLumen.fusionEnabled)
+    {
+        pipelineMode = "cell_lumen_fusion";
+    }
+
+    // ImageHandler expands Z with an integer factor converted from the
+    // configured value. Record that actual runtime factor rather than a
+    // potentially fractional YAML value that was not used as such.
+    const int effectiveZInterpolationFactor =
+        static_cast<int>(config.simulation.z_scaling);
+    if (effectiveZInterpolationFactor < 1)
+    {
+        throw std::runtime_error(
+            "compact export requires a positive runtime Z interpolation factor");
+    }
+
+    const auto record =
+        celluniverse::compact::CompactExporter::captureFrame(
+            frame,
+            absoluteFrame,
+            pipelineMode,
+            static_cast<float>(effectiveZInterpolationFactor),
+            config.simulation.z_scaling_source,
+            config.simulation.initial_z_space,
+            analyticBackground);
+    celluniverse::compact::CompactExporter::writeFrame(outputPath, record);
+    std::cout << "[Compact Export] frame=" << absoluteFrame
+              << " cells=" << record.cells.size()
+              << " output=" << (fs::path(outputPath) / "compact")
+              << '\n';
 }
 
 void CellUniverse::saveCells(int frameIndex)

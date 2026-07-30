@@ -1,0 +1,3 @@
+file,name,cellId,x,y,z,aRadius,bRadius,cRadius,theta_x,theta_y,theta_z,brightness,coldBackgroundBrightness,hotBackgroundBrightness,isTrash,isHotBackgroundRegion,backgroundSoftMargin,zInterpolationRatio,zCoordinateSpace,initializerSchemaVersion
+test.tif,embryo_envelope,,10,10,10,10,8,6,0,0,1.57079632679,0.6,0.1,0.6,0,1,0.1,4,scaled,2
+test.tif,7,7,4,5,6,3,2,1,0.1,0.2,0.3,0.9,,,0,0,,4,scaled,2

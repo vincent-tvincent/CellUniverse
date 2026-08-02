@@ -107,10 +107,14 @@ add_executable(${PROJECT_NAME}
         ${cwd}/src/CellUniverse.cpp
         ${cwd}/src/EmbryoBrightTracker.cpp
         ${cwd}/src/Frame.cpp
+        ${cwd}/src/ForegroundComponent.cpp
         ${cwd}/src/ImageHandler.cpp
         ${cwd}/src/LineageTreeCreator.cpp
         ${cwd}/src/LineageViewer.cpp
         ${cwd}/src/Ellipsoid.cpp
+        ${cwd}/src/ForegroundModel.cpp
+        ${cwd}/src/SplitScore.cpp
+        ${cwd}/src/SplitFeatureExtractor.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -140,7 +144,49 @@ endif()
 # 2026-06-24 cleanup. Its shared sources (EmbryoBrightTracker, LineageTreeCreator,
 # LineageViewer) remain — they are used by the main celluniverse target.
 
-# tests/ was removed in the 2026-06-24 cleanup (it was disabled and referenced
-# the removed Spheroid/SimulationConfig API). Re-add add_subdirectory(tests)
-# here when a test suite targeting the current triaxial Ellipsoid API exists.
+# tests/ re-introduced 2026-07-30 for the Rung-1 generative data-term work.
+# Opt-in unit tests for the new dependency-light numeric modules; built only
+# when configured with -DBUILD_CELLU_TESTS=ON. The main tracker links the same
+# modules above, so these tests exercise the exact production code.
+option(BUILD_CELLU_TESTS "Build CellUniverse unit tests" OFF)
+if(BUILD_CELLU_TESTS)
+    add_executable(celluniverse_tests
+        ${cwd}/tests/test_foreground_model.cpp
+        ${cwd}/src/ForegroundModel.cpp
+    )
+    target_include_directories(celluniverse_tests PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${cwd}/includes
+    )
+    target_link_libraries(celluniverse_tests ${OpenCV_LIBS})
+    add_test(NAME celluniverse_tests COMMAND celluniverse_tests)
+
+    # Rung 2a: SplitScore + SplitFeatureExtractor unit tests. Each test file
+    # below defines its own `int main()` (same self-contained style as
+    # test_foreground_model.cpp), so — unlike ForegroundModel, which has a
+    # single test file — they cannot be linked into ONE binary alongside
+    # test_foreground_model.cpp without a duplicate `main` symbol at link
+    # time. Built as separate executables instead, each still linking only
+    # the exact production module(s) it exercises, mirroring the
+    # one-test-file-per-executable pattern above per module.
+    add_executable(celluniverse_tests_split_score
+        ${cwd}/tests/test_split_score.cpp
+        ${cwd}/src/SplitScore.cpp
+    )
+    target_include_directories(celluniverse_tests_split_score PRIVATE
+        ${cwd}/includes
+    )
+    add_test(NAME celluniverse_tests_split_score COMMAND celluniverse_tests_split_score)
+
+    add_executable(celluniverse_tests_split_feature_extractor
+        ${cwd}/tests/test_split_feature_extractor.cpp
+        ${cwd}/src/SplitScore.cpp
+        ${cwd}/src/SplitFeatureExtractor.cpp
+    )
+    target_include_directories(celluniverse_tests_split_feature_extractor PRIVATE
+        ${cwd}/includes
+    )
+    add_test(NAME celluniverse_tests_split_feature_extractor COMMAND celluniverse_tests_split_feature_extractor)
+endif()
+
 add_subdirectory(lib/yaml-cpp)

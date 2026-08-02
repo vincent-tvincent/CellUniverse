@@ -117,6 +117,10 @@ public:
     float frame_intensity_scale_low_percentile = 0.01f;
     float frame_intensity_scale_high_percentile = 0.995f;
     float frame_intensity_hard_max = 0.0f;
+    // Robust low reference: exclude voxels below (fraction * high_ref) when
+    // computing the low percentile, so near-zero border/pedestal voxels don't
+    // drag it to ~0 (washing out raw / preprocess_mode=none frames). 0 = off.
+    float frame_intensity_low_signal_floor_fraction = 0.0f;
     bool edge_brightness_alignment_enabled = false;
     int edge_brightness_alignment_xy_margin = 24;
     int edge_brightness_alignment_left_offset = 0;
@@ -330,6 +334,7 @@ public:
         if (node["frame_intensity_scale_low_percentile"]) frame_intensity_scale_low_percentile = node["frame_intensity_scale_low_percentile"].as<float>();
         if (node["frame_intensity_scale_high_percentile"]) frame_intensity_scale_high_percentile = node["frame_intensity_scale_high_percentile"].as<float>();
         if (node["frame_intensity_hard_max"]) frame_intensity_hard_max = node["frame_intensity_hard_max"].as<float>();
+        if (node["frame_intensity_low_signal_floor_fraction"]) frame_intensity_low_signal_floor_fraction = node["frame_intensity_low_signal_floor_fraction"].as<float>();
         if (node["edge_brightness_alignment_enabled"]) edge_brightness_alignment_enabled = node["edge_brightness_alignment_enabled"].as<bool>();
         if (node["edge_brightness_alignment_xy_margin"]) edge_brightness_alignment_xy_margin = node["edge_brightness_alignment_xy_margin"].as<int>();
         if (node["edge_brightness_alignment_left_offset"]) edge_brightness_alignment_left_offset = node["edge_brightness_alignment_left_offset"].as<int>();
@@ -471,6 +476,7 @@ public:
         std::cout << "frame_intensity_scale_low_percentile: " << frame_intensity_scale_low_percentile << '\n';
         std::cout << "frame_intensity_scale_high_percentile: " << frame_intensity_scale_high_percentile << '\n';
         std::cout << "frame_intensity_hard_max: " << frame_intensity_hard_max << '\n';
+        std::cout << "frame_intensity_low_signal_floor_fraction: " << frame_intensity_low_signal_floor_fraction << '\n';
         std::cout << "edge_brightness_alignment_enabled: " << edge_brightness_alignment_enabled << '\n';
         std::cout << "edge_brightness_alignment_xy_margin: " << edge_brightness_alignment_xy_margin << '\n';
         std::cout << "edge_brightness_alignment_left_offset: " << edge_brightness_alignment_left_offset << '\n';
@@ -742,6 +748,31 @@ public:
     bool use_bbox_cost = false;
     float bbox_margin_scale = 3.0f;
 
+    // Rung 1 (generative decision core) — self-calibrating data term. All OFF
+    // by default; the legacy asymmetric-L2 residual is unchanged until enabled.
+    // See docs/superpowers/specs/2026-07-30-generative-tracking-decision-core-redesign.md
+    bool  generative_data_term_enabled = false;  // swap L2 -> fg/bg NLL in calculateBboxCost
+    bool  edge_term_enabled = false;             // additive boundary edge-alignment term
+    float edge_term_weight = 0.0f;               // weight of the edge term (0 = off)
+    float foreground_model_min_sigma = 0.001f;   // absolute sigma floor (relative floor self-calibrates)
+
+    // Rung 2a — multi-factor split decision (default OFF; CellLumen becomes guidance).
+    bool  multifactor_split_enabled = false;
+    float split_w_elong = 1.0f;
+    float split_w_planarity = 0.0f;         // weight on planarity (oblate/metaphase-pancake precursor)
+    float split_w_valley = 2.0f;
+    float split_w_center = 2.0f;
+    float split_w_volume = 1.0f;
+    float split_w_central = 1.0f;
+    float split_w_density = 2.0f;
+    float split_w_cost = 1.5f;              // weight on coverageGain (image cost as evidence)
+    float split_score_bias = -3.0f;         // logit bias
+    float split_score_accept = 0.0f;        // accept iff logit >= this
+    float split_score_attempt_min_prob = 0.05f; // skip attempt below this P(split)
+    float split_second_center_signal_ref = 100.0f;
+    float split_density_ref = 6.0f;
+    float split_density_radius_scale = 2.5f;
+
     // Per-daughter PCA radius refit in the split refine phase (A1).
     // After positional refine settles both daughters, each daughter runs
     // a short PCA shape fit (using its own built-in radii as the mask)
@@ -853,6 +884,25 @@ public:
         if (node["split_burn_in_pos_sigma_scale"]) split_burn_in_pos_sigma_scale = node["split_burn_in_pos_sigma_scale"].as<float>();
         if (node["use_bbox_cost"]) use_bbox_cost = node["use_bbox_cost"].as<bool>();
         if (node["bbox_margin_scale"]) bbox_margin_scale = node["bbox_margin_scale"].as<float>();
+        if (node["generative_data_term_enabled"]) generative_data_term_enabled = node["generative_data_term_enabled"].as<bool>();
+        if (node["edge_term_enabled"]) edge_term_enabled = node["edge_term_enabled"].as<bool>();
+        if (node["edge_term_weight"]) edge_term_weight = node["edge_term_weight"].as<float>();
+        if (node["foreground_model_min_sigma"]) foreground_model_min_sigma = node["foreground_model_min_sigma"].as<float>();
+        if (node["multifactor_split_enabled"]) multifactor_split_enabled = node["multifactor_split_enabled"].as<bool>();
+        if (node["split_w_elong"]) split_w_elong = node["split_w_elong"].as<float>();
+        if (node["split_w_planarity"]) split_w_planarity = node["split_w_planarity"].as<float>();
+        if (node["split_w_valley"]) split_w_valley = node["split_w_valley"].as<float>();
+        if (node["split_w_center"]) split_w_center = node["split_w_center"].as<float>();
+        if (node["split_w_volume"]) split_w_volume = node["split_w_volume"].as<float>();
+        if (node["split_w_central"]) split_w_central = node["split_w_central"].as<float>();
+        if (node["split_w_density"]) split_w_density = node["split_w_density"].as<float>();
+        if (node["split_w_cost"]) split_w_cost = node["split_w_cost"].as<float>();
+        if (node["split_score_bias"]) split_score_bias = node["split_score_bias"].as<float>();
+        if (node["split_score_accept"]) split_score_accept = node["split_score_accept"].as<float>();
+        if (node["split_score_attempt_min_prob"]) split_score_attempt_min_prob = node["split_score_attempt_min_prob"].as<float>();
+        if (node["split_second_center_signal_ref"]) split_second_center_signal_ref = node["split_second_center_signal_ref"].as<float>();
+        if (node["split_density_ref"]) split_density_ref = node["split_density_ref"].as<float>();
+        if (node["split_density_radius_scale"]) split_density_radius_scale = node["split_density_radius_scale"].as<float>();
         if (node["split_daughter_refit_iterations"]) split_daughter_refit_iterations = node["split_daughter_refit_iterations"].as<int>();
         if (node["split_daughter_refit_min_radius_fraction"]) split_daughter_refit_min_radius_fraction = node["split_daughter_refit_min_radius_fraction"].as<float>();
         if (node["split_daughter_refit_max_radius_fraction"]) split_daughter_refit_max_radius_fraction = node["split_daughter_refit_max_radius_fraction"].as<float>();
@@ -1081,6 +1131,15 @@ public:
     // When true, PCA centroid drives the cell's position (capped per iter).
     bool  pcaShapeUpdatePosition{true};
     float pcaShapeMaxPosShiftFraction{0.5f}; // cap per-iter shift at fraction * maxR
+    // Foreground-anchored shape fit (2026-07-31). When true AND a valid
+    // per-frame ForegroundModel is installed on the Frame, the PCA shape fit
+    // gathers voxels by flood-filling the cell's self-calibrated foreground
+    // component (pFg > 0.5) from the cell center — instead of the size-relative
+    // maskScale box — and bypasses both the ellipsoid mask pre-filter and the
+    // per-iter position-shift cap (the component is the cell's own blob).
+    // Scale-invariant and self-calibrating: no size-relative constant enters
+    // the gather. Default false → the legacy box fit is byte-identical.
+    bool  pcaShapeFgAnchored{false};
     // Per-pixel intensity exponent in the PCA centroid + covariance moments.
     // Higher values → stronger emphasis on the bright core, smaller fitted
     // radii. Lower values → halo pixels contribute more, larger fitted radii.
@@ -1219,6 +1278,7 @@ public:
         if (node["pcaShapeConvergeAngleDeg"]) pcaShapeConvergeAngleDeg = node["pcaShapeConvergeAngleDeg"].as<float>();
         if (node["pcaShapeUpdatePosition"]) pcaShapeUpdatePosition = node["pcaShapeUpdatePosition"].as<bool>();
         if (node["pcaShapeMaxPosShiftFraction"]) pcaShapeMaxPosShiftFraction = node["pcaShapeMaxPosShiftFraction"].as<float>();
+        if (node["pcaShapeFgAnchored"]) pcaShapeFgAnchored = node["pcaShapeFgAnchored"].as<bool>();
         if (node["pcaShapeWeightExponent"]) pcaShapeWeightExponent = node["pcaShapeWeightExponent"].as<float>();
         if (node["pcaShapeAdaptiveExponent"]) pcaShapeAdaptiveExponent = node["pcaShapeAdaptiveExponent"].as<bool>();
         if (node["pcaShapeWeightExponentBright"]) pcaShapeWeightExponentBright = node["pcaShapeWeightExponentBright"].as<float>();

@@ -63,6 +63,7 @@ cell:
   pcaShapeConvergeAngleDeg: 2.0
   pcaShapeUpdatePosition: true
   pcaShapeMaxPosShiftFraction: 0.5
+  pcaShapeFgAnchored: false
   pcaShapeWeightExponent: 2.2
   pcaShapeAdaptiveExponent: false
   pcaShapeWeightExponentBright: 1.15
@@ -125,6 +126,10 @@ simulation:
   frame_intensity_scale_low_percentile: 0.01
   frame_intensity_scale_high_percentile: 0.995
   frame_intensity_hard_max: 512.0
+  # Robust-low-reference knob (excludes border/pedestal below fraction*high_ref).
+  # 0 = off (Yiding/embryo_data default). Set ~0.25 only for high-pedestal raw
+  # crops like original_data that otherwise wash to near-white.
+  frame_intensity_low_signal_floor_fraction: 0.0
   edge_brightness_alignment_enabled: false
   edge_brightness_alignment_xy_margin: 5
   edge_brightness_alignment_left_offset: 0
@@ -156,7 +161,7 @@ simulation:
   export_perturb_debug_images: false
   export_perturb_cell_center_debug_images: false
   export_frame_png: false
-  export_frame_tiff: false
+  export_frame_tiff: true
   quit_after_preprocessing: false
   prepare_analyze_one_frame: true
   release_analyzed_exported_frames: true
@@ -244,6 +249,34 @@ prob:
   split_burn_in_pos_sigma_scale: 0.4
   use_bbox_cost: true
   bbox_margin_scale: 2.5
+
+  # Rung 1 (generative decision core) — self-calibrating data term. Default OFF:
+  # the tracker uses the legacy asymmetric-L2 residual until these are enabled.
+  generative_data_term_enabled: false
+  edge_term_enabled: false
+  edge_term_weight: 0.0
+  foreground_model_min_sigma: 0.001
+
+  # Rung 2a — multi-factor split decision (default OFF; when ON, CellLumen is guidance).
+  # Rung 2b pancaking retune: planarity (metaphase-plate oblateness) is the primary
+  # P(split) driver; centerSupport de-weighted (2.0->0.5) because CellLumen over-detection
+  # saturates it (~1 on 72% of cells) and it can't discriminate dividers.
+  multifactor_split_enabled: false
+  split_w_elong: 1.0
+  split_w_planarity: 8.0
+  split_w_valley: 2.0
+  split_w_center: 0.5
+  split_w_volume: 1.0
+  split_w_central: 1.0
+  split_w_density: 2.0
+  split_w_cost: 1.5
+  split_score_bias: -3.0
+  split_score_accept: 0.0
+  split_score_attempt_min_prob: 0.05
+  split_second_center_signal_ref: 100.0
+  split_density_ref: 6.0
+  split_density_radius_scale: 2.5
+
   split_daughter_refit_iterations: 3
   split_daughter_refit_min_radius_fraction: 0.85
   split_daughter_refit_max_radius_fraction: 1.05
@@ -462,7 +495,7 @@ cell_lumen:
   fusionSplitPriorWindowDaughterSupportBonus: 4.0
   fusionSplitPriorWindowMissingDaughterPenalty: 5.0
   fusionSplitPriorWindowParentPersistencePenalty: 6.0
-  fusionSplitPriorWindowBalancedDaughterBonus: 25.0
+  fusionSplitPriorWindowBalancedDaughterBonus: 10.0
   fusionSplitPriorWindowBalancedMinParentDistanceBalance: 0.65
   fusionSplitPriorWindowBalancedMinNearParentRadiusScale: 0.6
   fusionSplitPriorWindowHighConfidenceMaxOverlapCostFraction: 1.0

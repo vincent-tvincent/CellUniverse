@@ -1,5 +1,7 @@
 # Build Plan — Richer Shapes + Windowed ILP Temporal Consistency
 
+> **SHELVED (2026-07-20) — kept as notes.** The windowed-ILP direction was dropped and its offline prototypes removed (changelog Change 21). Retained for reference; not an active plan.
+
 **Date:** 2026-07-02
 **Depends on:** `docs/plans/2026-07-02-post-ultrack-directions.md` (research + rationale).
 **Goal:** Close the SEG gap (irregular / dividing nuclei) AND resolve per-frame "1 cell vs 2 cells" ambiguity using multi-frame temporal consistency — while staying **CPU, no-GPU, no-label**.

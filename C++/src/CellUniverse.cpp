@@ -1,6 +1,9 @@
 #include "../includes/CellUniverse.hpp"
 #include "../includes/ImageHandler.hpp"
 #include "../includes/CellLumen.hpp"
+#include "../includes/ForegroundModel.hpp"
+#include "../includes/SplitScore.hpp"
+#include "../includes/SplitFeatureExtractor.hpp"
 #include <set>
 #include <cmath>
 #include <algorithm>
@@ -345,7 +348,8 @@ static void writeNapariFriendlyTiffStack(const std::string &path,
 
 static float computeStackPercentile(const std::vector<cv::Mat> &stack,
                                     float percentile,
-                                    bool excludeZeros = false)
+                                    bool excludeZeros = false,
+                                    float excludeBelow = 0.0f)
 {
     std::vector<float> values;
     size_t totalCount = 0;
@@ -363,6 +367,9 @@ static float computeStackPercentile(const std::vector<cv::Mat> &stack,
                     continue;
                 }
                 if (excludeZeros && value == 0.0f) {
+                    continue;
+                }
+                if (excludeBelow > 0.0f && value < excludeBelow) {
                     continue;
                 }
                 values.push_back(value);
@@ -421,14 +428,24 @@ static void normalizeStackToFrameScale(std::vector<cv::Mat> &stack,
 static std::pair<float, float> normalizeStackToFrameIntensity(std::vector<cv::Mat> &stack,
                                                               const SimulationConfig &config)
 {
-    float lowReference = computeStackPercentile(
-        stack,
-        config.frame_intensity_scale_low_percentile,
-        config.frame_intensity_percentile_exclude_zeros);
     float highReference = computeStackPercentile(
         stack,
         config.frame_intensity_scale_high_percentile,
         config.frame_intensity_percentile_exclude_zeros);
+    // Robust low reference (2026-07-02): when a signal-floor fraction is set,
+    // exclude near-zero border/pedestal voxels (below fraction*high) so the low
+    // percentile reflects the actual signal, not the interpolated frame-border
+    // voxels. Fixes washed-out normalization for raw (preprocess_mode=none)
+    // frames whose dim rotated-border voxels otherwise drag low_ref to ~0,
+    // mapping the tissue background to ~0.84 (near-white). Default 0 = unchanged.
+    const float lowFloor = config.frame_intensity_low_signal_floor_fraction > 0.0f
+                               ? config.frame_intensity_low_signal_floor_fraction * highReference
+                               : 0.0f;
+    float lowReference = computeStackPercentile(
+        stack,
+        config.frame_intensity_scale_low_percentile,
+        config.frame_intensity_percentile_exclude_zeros,
+        lowFloor);
     if (config.frame_intensity_hard_max > 0.0f &&
         highReference > config.frame_intensity_hard_max) {
         highReference = config.frame_intensity_hard_max;
@@ -5620,6 +5637,86 @@ void CellUniverse::optimize(int frameIndex)
             frame.cells.empty() ? 0.0f : bSum / static_cast<float>(frame.cells.size()));
     }
 
+    // Rung 1 (generative data term). Estimate the per-frame foreground/background
+    // intensity model from the current synth (foreground claim indicator) + the
+    // real volume, then install it on the frame. A voxel is "inside any cell"
+    // iff the rendered synth is bright there (> 1e-4). When the flag is off,
+    // install an invalid model so calculateBboxCost stays on the legacy L2 path.
+    // Estimate the model when EITHER the generative cost term OR the
+    // foreground-anchored shape fit needs it. The `enabled` flag on
+    // setForegroundModel controls only whether calculateBboxCost swaps L2 for
+    // the fg/bg NLL cost — that stays tied to generative_data_term_enabled.
+    // The fg-anchored fit consumes the installed `_fgModel` for its flood-fill
+    // gather but must NOT flip the cost function, so it passes enabled=false.
+    const bool fgAnchoredFit = config.cell && config.cell->pcaShapeFgAnchored;
+    if (config.prob.generative_data_term_enabled || fgAnchoredFit) {
+        const auto &real = frame.getRealFrame();
+        // Foreground indicator = HARD ellipsoid membership at each non-trash
+        // cell's CURRENT fitted radii (scaleFactor 1.0), NOT the soft synth
+        // render `synth > 1e-4`. The synth's diffuse Gaussian tail bleeds far
+        // past the nucleus into background, dragging muFg down to ≈muBg so the
+        // fg/bg model can't separate (Change 40 flag-ON failure). Hard
+        // membership makes the fg population the actual nucleus interior, so
+        // muFg tracks the nucleus and pFg>0.5 cleanly splits fg from bg. Tested
+        // only inside each cell's bounding box (2×maxR) for efficiency; the
+        // per-voxel test inlines the same `l·invR² <= 1` form the PCA mask uses
+        // with a precomputed inverse-rotation matrix (no per-voxel trig).
+        const int rows = real.empty() ? 0 : real[0].rows;
+        const int cols = real.empty() ? 0 : real[0].cols;
+        const int slices = static_cast<int>(real.size());
+        const size_t sliceStride = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+        std::vector<uint8_t> insideAnyCell(sliceStride * static_cast<size_t>(slices), 0);
+        for (const auto &c : frame.cells) {
+            if (c.isTrash()) continue;
+            const float ca = c.getARadius();
+            const float cb = c.getBRadius();
+            const float cc = c.getCRadius();
+            if (ca <= 0.0f || cb <= 0.0f || cc <= 0.0f) continue;
+            const float cx = c.getX(), cy = c.getY(), cz = c.getZ();
+            const float maxR = std::max({ca, cb, cc});
+            const int x0 = std::max(0, static_cast<int>(std::floor(cx - maxR)));
+            const int x1 = std::min(cols - 1, static_cast<int>(std::ceil(cx + maxR)));
+            const int y0 = std::max(0, static_cast<int>(std::floor(cy - maxR)));
+            const int y1 = std::min(rows - 1, static_cast<int>(std::ceil(cy + maxR)));
+            const int z0 = std::max(0, static_cast<int>(std::floor(cz - maxR)));
+            const int z1 = std::min(slices - 1, static_cast<int>(std::ceil(cz + maxR)));
+            std::array<double, 9> R_T;
+            c.generateInverseRotationMatrix(R_T);
+            const double invA2 = 1.0 / (static_cast<double>(ca) * ca);
+            const double invB2 = 1.0 / (static_cast<double>(cb) * cb);
+            const double invC2 = 1.0 / (static_cast<double>(cc) * cc);
+            for (int z = z0; z <= z1; ++z) {
+                const double dz = static_cast<double>(z) - cz;
+                for (int y = y0; y <= y1; ++y) {
+                    const double dy = static_cast<double>(y) - cy;
+                    const size_t rowBase = static_cast<size_t>(z) * sliceStride +
+                                           static_cast<size_t>(y) * static_cast<size_t>(cols);
+                    for (int x = x0; x <= x1; ++x) {
+                        const double dx = static_cast<double>(x) - cx;
+                        const double lx = R_T[0] * dx + R_T[1] * dy + R_T[2] * dz;
+                        const double ly = R_T[3] * dx + R_T[4] * dy + R_T[5] * dz;
+                        const double lz = R_T[6] * dx + R_T[7] * dy + R_T[8] * dz;
+                        if (lx * lx * invA2 + ly * ly * invB2 + lz * lz * invC2 <= 1.0)
+                            insideAnyCell[rowBase + static_cast<size_t>(x)] = 1;
+                    }
+                }
+            }
+        }
+        size_t fgVox = 0;
+        for (uint8_t v : insideAnyCell) fgVox += v;
+        ForegroundModel fm = estimateForegroundModel(
+            real, insideAnyCell, config.prob.foreground_model_min_sigma);
+        frame.setForegroundModel(fm, config.prob.generative_data_term_enabled);
+        std::cout << "[FG Model] frame " << displayFrame
+                  << " muFg=" << fm.muFg << " sigFg=" << fm.sigFg
+                  << " muBg=" << fm.muBg << " sigBg=" << fm.sigBg
+                  << " fgVox=" << fgVox << " (hard-membership)"
+                  << " (cost_term=" << (config.prob.generative_data_term_enabled ? 1 : 0)
+                  << " fg_anchored_fit=" << (fgAnchoredFit ? 1 : 0) << ")" << std::endl;
+    } else {
+        frame.setForegroundModel(ForegroundModel{}, false);
+    }
+
     auto logPerturbCandidate = [&](const std::string &source,
                                    const std::string &cellName,
                                    const Ellipsoid &cell,
@@ -5720,27 +5817,119 @@ void CellUniverse::optimize(int frameIndex)
     constexpr float kElongRefHigh = 2.0f;
     const float pMax = config.prob.P_split_max;
     std::map<std::string, float> splitProbabilities;
+    // Rung 2a: parent features for the accept step (Task 6). Populated only
+    // when multifactor_split_enabled; empty otherwise.
+    std::map<std::string, SplitFeatures> splitFeaturesByName;
 
-    std::cout << "[P(split)] frame " << displayFrame
-              << (allowSplits ? " (linear elong ramp)" : " (splits disabled)")
-              << std::endl;
-    for (const auto &cell : frame.cells) {
-        auto p = cell.getCellParams();
-        float snapElong = 1.0f;
-        auto snapIt = previousSnapshots.find(p.name);
-        if (snapIt != previousSnapshots.end() && snapIt->second.valid) {
-            snapElong = snapIt->second.shapeElongation;
+    // Rung 2a part 5: when enabled, P(split) is computed from a multi-factor
+    // logistic score (elongation + valley + center support + volume ripeness
+    // + central deficit − density, plus image-cost evidence at accept time)
+    // instead of the elongation-only linear ramp. Flag-OFF path below is
+    // byte-identical to the pre-Rung-2a behavior.
+    if (config.prob.multifactor_split_enabled) {
+        SplitScoreWeights W;
+        W.wElong = config.prob.split_w_elong;    W.wValley = config.prob.split_w_valley;
+        W.wPlanarity = config.prob.split_w_planarity;
+        W.wCenter = config.prob.split_w_center;  W.wVolume = config.prob.split_w_volume;
+        W.wCentral = config.prob.split_w_central; W.wDensity = config.prob.split_w_density;
+        W.wCost = config.prob.split_w_cost;      W.bias = config.prob.split_score_bias;
+        W.sAccept = config.prob.split_score_accept;
+
+        std::cout << "[P(split)] frame " << displayFrame
+                  << (allowSplits ? " (multifactor score)" : " (splits disabled)")
+                  << std::endl;
+        for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
+            const Ellipsoid &c = frame.cells[ci];
+            if (c.isTrash()) continue;
+            const std::string name = c.getName();
+            const float a = c.getARadius(), b = c.getBRadius(), cc = c.getCRadius();
+            const float maxR = std::max(a, std::max(b, cc));
+            const float minR = std::min(a, std::min(b, cc));
+
+            float ps = 0.0f;
+            SplitFeatures f;
+            if (allowSplits) {
+                SplitFeatureInputs in;
+                in.maxR = maxR; in.minR = minR;
+                in.midR = a + b + cc - maxR - minR; // median of the three semi-axes
+                in.volume = (4.0f / 3.0f) * 3.14159265f * a * b * cc;
+                // Birth volume from cellShapeBirth[name] (birth radii); fall back to current.
+                auto bIt = cellShapeBirth.find(name);
+                if (bIt != cellShapeBirth.end()) {
+                    const auto &br = bIt->second; // std::array<float,3> {aR,bR,cR}
+                    in.birthVolume = (4.0f / 3.0f) * 3.14159265f * br[0] * br[1] * br[2];
+                } else {
+                    in.birthVolume = in.volume;
+                }
+
+                const SplitEvidence ev = frame.measureSplitEvidence(ci);
+                in.valleyRatio = ev.valleyRatio;
+                in.midBandBrightness = ev.midBandBrightness;
+                in.coreBrightness = ev.coreBrightness;
+
+                // Second (unclaimed) CellLumen center inside the cell: nearest
+                // raw lookahead candidate whose distance to the cell center is
+                // in [0.3*maxR, 1.2*maxR] (excludes the cell's own center at
+                // ~0 distance); use its signal.
+                in.secondCenterSignal = 0.0f;
+                if (maxR > 1e-3f) {
+                    const cv::Point3f cellPos(c.getX(), c.getY(), c.getZ());
+                    const float lo = 0.3f * maxR, hi = 1.2f * maxR;
+                    const auto &lookaheadCenters = getCellLumenLookaheadCandidates(frameIndex);
+                    for (const auto &center : lookaheadCenters) {
+                        const float dist = static_cast<float>(cv::norm(cellPos - center.position));
+                        if (dist >= lo && dist <= hi) {
+                            in.secondCenterSignal = std::max(in.secondCenterSignal, center.signal);
+                        }
+                    }
+                }
+                in.secondCenterSignalRef = config.prob.split_second_center_signal_ref;
+
+                // Local density: neighbor cell centers within split_density_radius_scale * maxR.
+                int nb = 0;
+                for (size_t oj = 0; oj < frame.cells.size(); ++oj) {
+                    if (oj == ci) continue;
+                    const Ellipsoid &o = frame.cells[oj];
+                    const float dx = o.getX() - c.getX(), dy = o.getY() - c.getY(), dz = o.getZ() - c.getZ();
+                    if (std::sqrt(dx * dx + dy * dy + dz * dz) < config.prob.split_density_radius_scale * maxR) ++nb;
+                }
+                in.neighborsWithin = nb;
+                in.densityRef = config.prob.split_density_ref;
+
+                f = buildSplitFeatures(in);
+                ps = splitProbability(f, W);
+            }
+            splitFeaturesByName[name] = f;
+            splitProbabilities[name] = ps;
+            std::cout << "[Split Score] frame " << displayFrame << " " << name
+                      << " elong=" << f.elongation << " planarity=" << f.planarity
+                      << " valley=" << f.valley
+                      << " center=" << f.centerSupport << " volume=" << f.volumeRipe
+                      << " central=" << f.centralDef << " density=" << f.density
+                      << " P=" << ps << std::endl;
         }
-        float ps = 0.0f;
-        if (allowSplits && !cell.isTrash()) {
-            const float t = std::clamp(
-                (snapElong - kElongRefLow) / (kElongRefHigh - kElongRefLow),
-                0.0f, 1.0f);
-            ps = baseSplitProb + t * (pMax - baseSplitProb);
+    } else {
+        std::cout << "[P(split)] frame " << displayFrame
+                  << (allowSplits ? " (linear elong ramp)" : " (splits disabled)")
+                  << std::endl;
+        for (const auto &cell : frame.cells) {
+            auto p = cell.getCellParams();
+            float snapElong = 1.0f;
+            auto snapIt = previousSnapshots.find(p.name);
+            if (snapIt != previousSnapshots.end() && snapIt->second.valid) {
+                snapElong = snapIt->second.shapeElongation;
+            }
+            float ps = 0.0f;
+            if (allowSplits && !cell.isTrash()) {
+                const float t = std::clamp(
+                    (snapElong - kElongRefLow) / (kElongRefHigh - kElongRefLow),
+                    0.0f, 1.0f);
+                ps = baseSplitProb + t * (pMax - baseSplitProb);
+            }
+            splitProbabilities[p.name] = ps;
+            std::cout << "  " << p.name << " shapeElong=" << snapElong
+                      << " P(split)=" << ps << std::endl;
         }
-        splitProbabilities[p.name] = ps;
-        std::cout << "  " << p.name << " shapeElong=" << snapElong
-                  << " P(split)=" << ps << std::endl;
     }
 
     double residSum = 0;
@@ -7550,6 +7739,32 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
 
+            // Rung 2a part 6: build the multi-factor split-decision context
+            // when the flag is on. splitFeaturesByName was populated earlier
+            // in this function (per-cell parent features), only when
+            // multifactor_split_enabled; if this cell has no entry (e.g.
+            // splits were disabled for the frame), fall back to nullptr so
+            // trySplitCellPhased takes its legacy CellLumen cost-gate path.
+            SplitDecisionCtx mfCtxStorage;
+            const SplitDecisionCtx *mfCtxPtr = nullptr;
+            if (config.prob.multifactor_split_enabled) {
+                auto sfIt = splitFeaturesByName.find(cellName);
+                if (sfIt != splitFeaturesByName.end()) {
+                    mfCtxStorage.parentFeatures = sfIt->second;
+                    mfCtxStorage.weights.wElong = config.prob.split_w_elong;
+                    mfCtxStorage.weights.wPlanarity = config.prob.split_w_planarity;
+                    mfCtxStorage.weights.wValley = config.prob.split_w_valley;
+                    mfCtxStorage.weights.wCenter = config.prob.split_w_center;
+                    mfCtxStorage.weights.wVolume = config.prob.split_w_volume;
+                    mfCtxStorage.weights.wCentral = config.prob.split_w_central;
+                    mfCtxStorage.weights.wDensity = config.prob.split_w_density;
+                    mfCtxStorage.weights.wCost = config.prob.split_w_cost;
+                    mfCtxStorage.weights.bias = config.prob.split_score_bias;
+                    mfCtxStorage.weights.sAccept = config.prob.split_score_accept;
+                    mfCtxPtr = &mfCtxStorage;
+                }
+            }
+
             auto result = frame.trySplitCellPhased(
                 cellIdx, splitSnapshot, others, useSnapDir, config.prob,
                 exportPerturbDebug ? &splitPerturbDebugPlacements : nullptr,
@@ -7754,7 +7969,8 @@ void CellUniverse::optimize(int frameIndex)
                 config.cellLumen
                     .fusionSplitPriorNonParentDuplicateReanchorMinMove,
                 config.cellLumen
-                    .fusionSplitPriorNonParentDuplicateReanchorMinParentDistanceBalance);
+                    .fusionSplitPriorNonParentDuplicateReanchorMinParentDistanceBalance,
+                mfCtxPtr);
 
             double costDiff = result.first;
             auto callback = result.second;
@@ -7951,8 +8167,16 @@ void CellUniverse::optimize(int frameIndex)
                 auto pIt = splitProbabilities.find(cellName);
                 if (pIt != splitProbabilities.end()) pSplit = pIt->second;
             }
+            // Rung 2a part 5: under the multifactor score, don't even roll for
+            // cells whose P(split) is below the configured attempt floor —
+            // keeps the burn-in budget off cells the score already rejects.
+            // Flag-off path is untouched (min-prob gate is a no-op there).
+            const bool multifactorAttemptFloorOk =
+                !config.prob.multifactor_split_enabled
+                || pSplit >= config.prob.split_score_attempt_min_prob;
             const bool canSplit = pSplit > 0.0f
-                               && splitBlacklist.count(cellName) == 0;
+                               && splitBlacklist.count(cellName) == 0
+                               && multifactorAttemptFloorOk;
 
             if (canSplit && uniform01(gen) < pSplit) {
                 attemptSplitAtIndex(cellIdx, cellName, "random",
@@ -10615,11 +10839,16 @@ void CellUniverse::saveImages(int frameIndex, const std::string &stage)
 
     if (config.simulation.export_frame_tiff)
     {
-        std::filesystem::create_directories(exportRoot);
+        // Formatted layout: real/ and synth/ subdirs (2026-07-02) so the run's
+        // visual output is organized (real images / synth images) natively.
+        const std::string realDir = exportRoot + "/real";
+        const std::string synthDir = exportRoot + "/synth";
+        std::filesystem::create_directories(realDir);
+        std::filesystem::create_directories(synthDir);
 
-        writeNapariFriendlyTiffStack(exportRoot + "/" + std::to_string(displayFrame) + "_real.tif",
+        writeNapariFriendlyTiffStack(realDir + "/" + std::to_string(displayFrame) + "_real.tif",
                                      realImages);
-        writeNapariFriendlyTiffStack(exportRoot + "/" + std::to_string(displayFrame) + "_synth.tif",
+        writeNapariFriendlyTiffStack(synthDir + "/" + std::to_string(displayFrame) + "_synth.tif",
                                      synthImages);
     }
 
@@ -10671,6 +10900,47 @@ void CellUniverse::saveCells(int frameIndex)
 
     std::cout << "Saved " << frame.cells.size() << " cells for frame " << (firstFrame + frameIndex)
               << " to " << cellsPath << std::endl;
+
+    saveFormattedCells(frameIndex);
+}
+
+void CellUniverse::saveFormattedCells(int frameIndex)
+{
+    // Human-readable, output-only companion to cells.csv (2026-07-02):
+    //  - tracked_cells.csv : recognizable cell_N names + clearer column names
+    // The internal cells.csv is untouched so lineage / CsvHandler keep working.
+    const std::string trackedPath = outputPath + "/tracked_cells.csv";
+    const bool fresh = (frameIndex == 0) || !std::filesystem::exists(trackedPath);
+    std::ofstream out(trackedPath, (frameIndex == 0) ? std::ios::trunc : std::ios::app);
+    if (!out.is_open()) return;
+    if (fresh) {
+        out << "frame,cell,x,y,z,semi_axis_a,semi_axis_b,semi_axis_c,"
+               "rot_x,rot_y,rot_z,is_marker\n";
+    }
+    Frame &frame = frames[frameIndex];
+    const int frameNumber = firstFrame + frameIndex;
+    for (const auto &cell : frame.cells) {
+        EllipsoidParams params = cell.getCellParams();
+        // Root = 32-char UUID; split daughters append 0/1 (parent+"0"/"1"), so the
+        // recognizable name keeps the lineage suffix: cell_<N><binary-path>.
+        const std::string root = params.name.size() >= 32 ? params.name.substr(0, 32)
+                                                           : params.name;
+        const std::string suffix = params.name.size() > 32 ? params.name.substr(32) : "";
+        auto it = _formattedNameIndex.find(root);
+        int idx;
+        if (it == _formattedNameIndex.end()) {
+            idx = static_cast<int>(_formattedNameIndex.size()) + 1;
+            _formattedNameIndex[root] = idx;
+        } else {
+            idx = it->second;
+        }
+        out << frameNumber << ",cell_" << idx << suffix << ","
+            << params.x << "," << params.y << "," << params.z << ","
+            << params.aRadius << "," << params.bRadius << "," << params.cRadius << ","
+            << params.theta_x << "," << params.theta_y << "," << params.theta_z << ","
+            << (params.isTrash ? 1 : 0) << '\n';
+    }
+    out.close();
 }
 
 // ---------------------------------------------------------------------------

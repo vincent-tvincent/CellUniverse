@@ -34,6 +34,9 @@ public:
     void optimize(int frameIndex);
     void saveImages(int frameIndex, const std::string &stage = "");
     void saveCells(int frameIndex);
+    // Human-readable, output-only companion to cells.csv (tracked_cells.csv):
+    // recognizable cell_N names + clearer column names.
+    void saveFormattedCells(int frameIndex);
     void copyCellsForward(size_t to);
     // Memory optimization (M1): after this frame has been optimized, saved,
     // and its snapshot captured, release its image stacks. Cells and
@@ -73,6 +76,9 @@ private:
    std::vector<Frame> frames;
    std::string outputPath;
    int firstFrame;
+   // Root-name -> stable cell_N index for the human-readable tracked_cells.csv
+   // (saveFormattedCells). Assigned on first appearance.
+   std::map<std::string, int> _formattedNameIndex;
    std::map<std::string, PreviousFrameSnapshot> previousSnapshots;
    // Frozen per-cell shape reference (a, b, c radii). Captured at cell
    // birth (frame 1 for initial cells; post-refit at split-accept for

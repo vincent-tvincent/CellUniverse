@@ -87,6 +87,22 @@ struct BrightPixel
     float weight;      // pixel intensity above background
 };
 
+// gatherForegroundComponent is DEFINED OUT-OF-LINE in src/ForegroundComponent.cpp
+// (its own translation unit) with EXTERNAL linkage — declared here at global scope
+// (NOT inside the file's anonymous namespace) so the call in calibrateCellShapeViaPca
+// binds to that external definition. Compiling its half-max body inside Frame.cpp
+// shifts the LTO FP scheduling of the shared PCA math and breaks the bit-exact
+// legacy flag-OFF fit; keeping it in a separate TU leaves this TU's codegen intact.
+// (Its BrightPixel is the global ::BrightPixel above, shared via includes/BrightPixel.hpp.)
+std::vector<BrightPixel> gatherForegroundComponent(
+    const std::vector<cv::Mat> &realFrame,
+    const ForegroundModel &fgModel,
+    float backgroundValue,
+    const cv::Point3f &center,
+    float safetyRadius,
+    const std::vector<cv::Point3f> &selfClaimPoints,
+    const Frame::ClaimSet &otherClaimSets);
+
 static void accumulateDebugCellPlacement(std::vector<cv::Mat> &stack,
                                          const Ellipsoid &cell,
                                          const SimulationConfig &simulationConfig,
@@ -959,6 +975,17 @@ double Frame::calculateBboxCost(
     const bool useMask = !mask.empty();
     double totalCost = 0.0;
 
+    // Rung 1 (generative data term). Per voxel, the SOFT coverage c = clamp(synth)
+    // (how strongly this cell renders here) should match the foreground evidence
+    // pFg(real). Cost = c*(1-pFg) + (1-c)*pFg — a bounded [0,1] soft-classification
+    // error that is CONTINUOUS in synth (so sub-voxel moves get a smooth gradient,
+    // unlike a hard synth>eps claim which made the cost a step function and froze
+    // greedy descent). Self-calibrating (fg/bg params estimated per frame) and
+    // noise-tolerant (background noise expected under sigBg, not penalised).
+    // useGen is loop-invariant; when false, every path below is byte-identical
+    // to the legacy asymmetric-L2 behaviour.
+    const bool useGen = _generativeDataTerm && _fgModel.valid;
+
     // Two loop variants: with-mask (rare, includes the per-voxel mask check
     // that kills auto-vectorization) and no-mask (default in current code,
     // straight-line inner body that the compiler can SIMD-vectorize). The
@@ -977,7 +1004,14 @@ double Frame::calculateBboxCost(
                 const float *rr = realSlice.ptr<float>(y);
                 const float *ss = synthSlice.ptr<float>(y);
                 if (useVoronoi) vorRow = vorSlice->ptr<int>(y);
-                if (useAsym) {
+                if (useGen) {
+                    for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
+                        if (useVoronoi && vorRow[x] != voronoiCellIdx) continue;
+                        const float pfg = _fgModel.pFg(rr[x]);
+                        const float c = std::min(1.0f, std::max(0.0f, ss[x])); // soft coverage
+                        sliceCost += c * (1.0f - pfg) + (1.0f - c) * pfg;
+                    }
+                } else if (useAsym) {
                     for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
                         if (useVoronoi && vorRow[x] != voronoiCellIdx) continue;
                         const float d = ss[x] - rr[x];
@@ -1009,6 +1043,12 @@ double Frame::calculateBboxCost(
                 const int yOff = zOff + (y - bbox.yMin) * nx;
                 for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
                     if (!mask[yOff + (x - bbox.xMin)]) continue;
+                    if (useGen) {
+                        const float pfg = _fgModel.pFg(rr[x]);
+                        const float c = std::min(1.0f, std::max(0.0f, ss[x])); // soft coverage
+                        sliceCost += c * (1.0f - pfg) + (1.0f - c) * pfg;
+                        continue;
+                    }
                     const float d = ss[x] - rr[x];
                     float d2 = d * d;
                     if (useAsym && d > asymThreshold) d2 *= asymK;
@@ -2562,6 +2602,16 @@ bool Frame::calibrateCellShapeViaPca(
 
     bool anyUpdate = false;
 
+    // Foreground-anchored fit (2026-07-31, Option 1). Active only when the
+    // flag is set AND a valid per-frame ForegroundModel is installed. When on,
+    // the gather flood-fills the cell's self-calibrated foreground component
+    // (scale-invariant), the ellipsoid mask pre-filter is bypassed (the
+    // component already defines membership), and the position update uses the
+    // uncapped weighted centroid (the component is the cell's own blob). When
+    // off, every branch below is byte-identical to the legacy box fit.
+    const bool fgAnchored =
+        Ellipsoid::cellConfig.pcaShapeFgAnchored && _fgModel.valid;
+
     // P4 — bright-pixel gather cache.
     //
     // gatherBrightPixelsVoronoi scans a 3D box of `sphereR` around `center`,
@@ -2617,9 +2667,26 @@ bool Frame::calibrateCellShapeViaPca(
         if (!cacheHit) {
             std::vector<cv::Point3f> selfClaim{center};
             GatherStats gstats;
-            cachedRaw = gatherBrightPixelsVoronoi(
-                _realFrame, _backgroundValue, center, sphereR,
-                selfClaim, otherCellsClaimSets, &gstats);
+            if (fgAnchored) {
+                // Flood-fill the cell's foreground component at a PER-CELL
+                // half-max level (bg + 0.5*(peak - bg)). peak = 99th-pct real
+                // intensity in a CORE sphere of 0.5 × maskMaxR; bg = _fgModel.muBg
+                // (stable). Both keyed off the FIXED frame-entry radius (maskMaxR),
+                // NOT the live fitted maxR, and both fit-independent → the level
+                // and the region are stable frame to frame (no bloat feedback).
+                // Safety box = 4 × maskMaxR bounds the BFS. The half-max level,
+                // core box, peak/level computation and [HalfMax] log ALL live
+                // inside gatherForegroundComponent, which is defined in a SEPARATE
+                // TU (src/ForegroundComponent.cpp) — see Change 42 for why. No
+                // global model, no maskScale, no percentile-radius constant here.
+                cachedRaw = gatherForegroundComponent(
+                    _realFrame, _fgModel, _backgroundValue, center,
+                    4.0f * maskMaxR, selfClaim, otherCellsClaimSets);
+            } else {
+                cachedRaw = gatherBrightPixelsVoronoi(
+                    _realFrame, _backgroundValue, center, sphereR,
+                    selfClaim, otherCellsClaimSets, &gstats);
+            }
             cachedCenter = center;
             ++cachedMisses;
 
@@ -2681,16 +2748,23 @@ bool Frame::calibrateCellShapeViaPca(
         const double invC2 = invC2Fixed;
 
         std::vector<BrightPixel> pixels;
-        pixels.reserve(raw.size());
-        for (const auto &bp : raw) {
-            const double dx = bp.pos.x - center.x;
-            const double dy = bp.pos.y - center.y;
-            const double dz = bp.pos.z - center.z;
-            const double lx = R_T[0] * dx + R_T[1] * dy + R_T[2] * dz;
-            const double ly = R_T[3] * dx + R_T[4] * dy + R_T[5] * dz;
-            const double lz = R_T[6] * dx + R_T[7] * dy + R_T[8] * dz;
-            const double val = lx * lx * invA2 + ly * ly * invB2 + lz * lz * invC2;
-            if (val <= 1.0) pixels.push_back(bp);
+        if (fgAnchored) {
+            // Bypass the size-bounded ellipsoid mask: the flood-filled
+            // component already defines membership. Re-clipping to the frozen
+            // mask would reintroduce the very size cap this path removes.
+            pixels = raw;
+        } else {
+            pixels.reserve(raw.size());
+            for (const auto &bp : raw) {
+                const double dx = bp.pos.x - center.x;
+                const double dy = bp.pos.y - center.y;
+                const double dz = bp.pos.z - center.z;
+                const double lx = R_T[0] * dx + R_T[1] * dy + R_T[2] * dz;
+                const double ly = R_T[3] * dx + R_T[4] * dy + R_T[5] * dz;
+                const double lz = R_T[6] * dx + R_T[7] * dy + R_T[8] * dz;
+                const double val = lx * lx * invA2 + ly * ly * invB2 + lz * lz * invC2;
+                if (val <= 1.0) pixels.push_back(bp);
+            }
         }
 
         if (static_cast<int>(pixels.size()) < minPixels) {
@@ -2856,20 +2930,32 @@ bool Frame::calibrateCellShapeViaPca(
         // Position update: centroid, capped.
         cv::Point3f newCenter = center;
         if (updatePosition) {
-            const float dx = static_cast<float>(mx) - center.x;
-            const float dy = static_cast<float>(my) - center.y;
-            const float dz = static_cast<float>(mz) - center.z;
-            const float shift = std::sqrt(dx * dx + dy * dy + dz * dz);
-            const float cap = maxPosShiftFraction * maxR;
-            if (shift > cap && shift > 1e-6f) {
-                const float s = cap / shift;
-                newCenter = cv::Point3f(center.x + s * dx,
-                                        center.y + s * dy,
-                                        center.z + s * dz);
-            } else {
+            if (fgAnchored) {
+                // No cap: the weighted centroid of the cell's OWN foreground
+                // component IS the cell's position. The per-iter shift cap
+                // (maxPosShiftFraction × maxR) only exists to fence the legacy
+                // box fit against grabbing a neighbor's blob; the Voronoi-split
+                // component already excludes neighbors, so the raw centroid is
+                // the correct, drift-free anchor.
                 newCenter = cv::Point3f(static_cast<float>(mx),
                                         static_cast<float>(my),
                                         static_cast<float>(mz));
+            } else {
+                const float dx = static_cast<float>(mx) - center.x;
+                const float dy = static_cast<float>(my) - center.y;
+                const float dz = static_cast<float>(mz) - center.z;
+                const float shift = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const float cap = maxPosShiftFraction * maxR;
+                if (shift > cap && shift > 1e-6f) {
+                    const float s = cap / shift;
+                    newCenter = cv::Point3f(center.x + s * dx,
+                                            center.y + s * dy,
+                                            center.z + s * dz);
+                } else {
+                    newCenter = cv::Point3f(static_cast<float>(mx),
+                                            static_cast<float>(my),
+                                            static_cast<float>(mz));
+                }
             }
         }
 
@@ -3141,6 +3227,134 @@ bool Frame::discoverPcaBridgeProposal(size_t cellIndex,
     return true;
 }
 
+// Rung 2a part 4: read-only split evidence for one cell's CURRENT fit.
+// Standalone sibling of discoverPcaBridgeProposal above — reuses the exact
+// same long-axis derivation (longest semi-axis, world-space direction via
+// generateInverseRotationMatrix) and in-ellipsoid bright-voxel gather (same
+// brightness cutoff as gatherBrightPixelsVoronoi: max(0.05, background+0.02)),
+// but does NOT propose a daughter split; it simply bins bright voxels along
+// the long axis and reports the mid-band-vs-edge-lobe brightness contrast.
+// const, no cell/member mutation, no logging side effects.
+SplitEvidence Frame::measureSplitEvidence(size_t cellIndex) const
+{
+    SplitEvidence evidence; // defaults: all 1.0 ("no valley")
+    if (cellIndex >= cells.size() || _realFrame.empty()) {
+        return evidence;
+    }
+
+    const Ellipsoid &cell = cells[cellIndex];
+
+    // Longest fitted semi-axis + its world-space direction — same pattern
+    // as discoverPcaBridgeProposal's longIdx/longAxis derivation above.
+    const float radii[3] = {
+        cell.getARadius(), cell.getBRadius(), cell.getCRadius()
+    };
+    int longIdx = 0;
+    for (int i = 1; i < 3; ++i) {
+        if (radii[i] > radii[longIdx]) longIdx = i;
+    }
+    const float longR = radii[longIdx];
+    if (longR <= 1e-3f) {
+        return evidence;
+    }
+
+    std::array<double, 9> R_T;
+    cell.generateInverseRotationMatrix(R_T);
+    const int base = 3 * longIdx;
+    const cv::Point3f longAxis(
+        static_cast<float>(R_T[base]),
+        static_cast<float>(R_T[base + 1]),
+        static_cast<float>(R_T[base + 2]));
+
+    // Axis-aligned bbox sized to longR: the max world-axis extent of a
+    // rotated ellipsoid is bounded by its longest semi-axis — same bbox
+    // pattern discoverPcaBridgeProposal uses.
+    const int xMin = std::max(0, static_cast<int>(std::floor(cell.getX() - longR)));
+    const int xMax = std::min(_realFrame[0].cols - 1, static_cast<int>(std::ceil(cell.getX() + longR)));
+    const int yMin = std::max(0, static_cast<int>(std::floor(cell.getY() - longR)));
+    const int yMax = std::min(_realFrame[0].rows - 1, static_cast<int>(std::ceil(cell.getY() + longR)));
+    const int zMin = std::max(0, static_cast<int>(std::floor(cell.getZ() - longR)));
+    const int zMax = std::min(static_cast<int>(_realFrame.size()) - 1,
+                              static_cast<int>(std::ceil(cell.getZ() + longR)));
+
+    // Same brightness cutoff as gatherBrightPixelsVoronoi (above, this file).
+    const float brightnessCutoff = std::max(0.05f, _backgroundValue + 0.02f);
+
+    static constexpr int kEvidenceBins = 11;
+    std::array<double, kEvidenceBins> binSum{};
+    std::array<int, kEvidenceBins> binCount{};
+    const float binWidth = (2.0f * longR) / static_cast<float>(kEvidenceBins);
+
+    int totalBright = 0;
+    for (int z = zMin; z <= zMax; ++z) {
+        const cv::Mat &slice = _realFrame[z];
+        if (slice.type() != CV_32F || slice.empty()) continue;
+        for (int y = yMin; y <= yMax; ++y) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = xMin; x <= xMax; ++x) {
+                const float v = row[x];
+                if (v <= brightnessCutoff) continue;
+
+                const cv::Point3f worldPoint(
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(z));
+                if (!cell.isPointInsideEllipsoid(worldPoint)) continue;
+
+                ++totalBright;
+
+                const float dx = worldPoint.x - cell.getX();
+                const float dy = worldPoint.y - cell.getY();
+                const float dz = worldPoint.z - cell.getZ();
+                const float proj = dx * longAxis.x + dy * longAxis.y + dz * longAxis.z;
+                const float t = std::clamp(proj, -longR, longR);
+                int bin = static_cast<int>((t + longR) / binWidth);
+                bin = std::clamp(bin, 0, kEvidenceBins - 1);
+                binSum[bin] += v;
+                binCount[bin] += 1;
+            }
+        }
+    }
+
+    // Too few voxels to bin reliably — return the neutral default.
+    if (totalBright < 20) {
+        return evidence;
+    }
+
+    std::array<float, kEvidenceBins> binMean{};
+    for (int i = 0; i < kEvidenceBins; ++i) {
+        binMean[i] = (binCount[i] > 0)
+            ? static_cast<float>(binSum[i] / binCount[i])
+            : 0.0f;
+    }
+
+    float coreBrightness = binMean[0];
+    for (int i = 1; i < kEvidenceBins; ++i) {
+        coreBrightness = std::max(coreBrightness, binMean[i]);
+    }
+
+    // Middle bin (index 5 of 11) — the cell's own longitudinal center.
+    constexpr int kMidBin = kEvidenceBins / 2;
+    const float midBandBrightness = binMean[kMidBin];
+
+    // Two highest side bins, one from each half (excluding the center
+    // band) — the two candidate-lobe peaks.
+    float leftPeak = 0.0f;
+    for (int i = 0; i < kMidBin; ++i) {
+        leftPeak = std::max(leftPeak, binMean[i]);
+    }
+    float rightPeak = 0.0f;
+    for (int i = kMidBin + 1; i < kEvidenceBins; ++i) {
+        rightPeak = std::max(rightPeak, binMean[i]);
+    }
+    const float edgeBrightness = 0.5f * (leftPeak + rightPeak);
+
+    evidence.valleyRatio = midBandBrightness / std::max(1e-3f, edgeBrightness);
+    evidence.midBandBrightness = midBandBrightness;
+    evidence.coreBrightness = coreBrightness;
+    return evidence;
+}
+
 // Triaxial split attempt with candidate refinement + bio/cost gates.
 // Implements the Phase A/B split-attempt flow from the plan. Caller supplies
 // the Voronoi claim-sets for all OTHER cells (not this one) and whether to
@@ -3276,7 +3490,8 @@ CostCallbackPair Frame::trySplitCellPhased(
     float lumenNonParentDuplicateReanchorMaxBridgeValleyRatio,
     float lumenNonParentDuplicateReanchorMinBridgeGapWidth,
     float lumenNonParentDuplicateReanchorMinMove,
-    float lumenNonParentDuplicateReanchorMinParentDistanceBalance)
+    float lumenNonParentDuplicateReanchorMinParentDistanceBalance,
+    const SplitDecisionCtx *mfCtx)
 {
     const auto noop = [](bool) {};
     if (cellIndex >= cells.size()) return {0.0, noop};
@@ -4283,7 +4498,29 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << std::endl;
         }
 
-        if (candPassesPreFilter && candTotal < bestTotal) {
+        // Under the multifactor decision path (mfCtx != nullptr), the
+        // valley/edge QUALITY prefilter must NOT drop candidates. This
+        // fluorescence data has no dark bridge between forming nuclei
+        // (valley≈1.0), so the binary-era prefilter rejects every short-axis
+        // candidate before bestIdx is ever set → structural bailout → no
+        // split ever reaches the multifactor score. The valley is ALREADY a
+        // soft feature in that score (via measureSplitEvidence), so the hard
+        // prefilter is redundant here. Retain the candidate so it stays
+        // eligible for bestIdx and proceeds to the final refine + score.
+        // Flag-off (mfCtx == nullptr) is byte-identical: candEligibleForBest
+        // collapses to candPassesPreFilter and the gate below is unchanged.
+        bool candEligibleForBest = candPassesPreFilter;
+        if (!candPassesPreFilter && mfCtx != nullptr) {
+            candEligibleForBest = true;
+            std::cout << "  [MF Prefilter Keep] cell=" << parentName
+                      << " label=" << cand.label
+                      << " valley=" << candValleyFromBright
+                      << " d1Bright=" << d1LocalBright
+                      << " d2Bright=" << d2LocalBright
+                      << std::endl;
+        }
+
+        if (candEligibleForBest && candTotal < bestTotal) {
             bestTotal = candTotal;
             bestIdx = static_cast<int>(ci);
             // Move instead of copy — cells, _synthFrame, _currentCostPerSlice
@@ -4790,8 +5027,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] cellLumenSnapshotRefitDrift cell=" << parentName << std::endl;
     } else if (snapshotLargeShiftLooksSplitLike &&
                snapshotDriftMax > lumenSnapshotSeedMaxRefitDrift) {
         std::cout << "[Split CellLumen snapshot refit drift waived] " << parentName
@@ -4872,8 +5112,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " bestIdx=" << bestIdx
                           << " bestLabel=" << bestLabel
                           << std::endl;
-                restoreLiveParent();
-                return {0.0, noop};
+                if (mfCtx == nullptr) {
+                    restoreLiveParent();
+                    return {0.0, noop};
+                }
+                std::cout << "[MF Gate Bypass] cellLumenPostRefitZStackDuplicate cell=" << parentName << std::endl;
             }
         }
     }
@@ -4907,8 +5150,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " bestIdx=" << bestIdx
                       << " bestLabel=" << bestLabel
                       << std::endl;
-            restoreLiveParent();
-            return {0.0, noop};
+            if (mfCtx == nullptr) {
+                restoreLiveParent();
+                return {0.0, noop};
+            }
+            std::cout << "[MF Gate Bypass] daughterGeometryDrift cell=" << parentName << std::endl;
         }
     }
 
@@ -4995,8 +5241,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " bestIdx=" << bestIdx
                       << " bestLabel=" << bestLabel
                       << std::endl;
-            restoreLiveParent();
-            return {0.0, noop};
+            if (mfCtx == nullptr) {
+                restoreLiveParent();
+                return {0.0, noop};
+            }
+            std::cout << "[MF Gate Bypass] daughterShortAxisMisaligned cell=" << parentName << std::endl;
             }
         }
     }
@@ -5049,8 +5298,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " bestIdx=" << bestIdx
                       << " bestLabel=" << bestLabel
                       << std::endl;
-            restoreLiveParent();
-            return {0.0, noop};
+            if (mfCtx == nullptr) {
+                restoreLiveParent();
+                return {0.0, noop};
+            }
+            std::cout << "[MF Gate Bypass] daughterDaughterOverlap cell=" << parentName << std::endl;
             }
         }
     }
@@ -5387,8 +5639,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                                   << " r1Along=" << r1Along
                                   << " r2Along=" << r2Along
                                   << std::endl;
-                        restoreLiveParent();
-                        return {0.0, noop};
+                        if (mfCtx == nullptr) {
+                            restoreLiveParent();
+                            return {0.0, noop};
+                        }
+                        std::cout << "[MF Gate Bypass] lumenOverlapNoValley cell=" << parentName << std::endl;
                     }
                 }
                 if (useCellLumenSoftGate) {
@@ -5408,8 +5663,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " r1Along=" << r1Along
                           << " r2Along=" << r2Along
                           << std::endl;
-                restoreLiveParent();
-                return {0.0, noop};
+                if (mfCtx == nullptr) {
+                    restoreLiveParent();
+                    return {0.0, noop};
+                }
+                std::cout << "[MF Gate Bypass] lumenBridgeGapTooSmall cell=" << parentName << std::endl;
                 }
             }
 
@@ -5433,8 +5691,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " minEdgeBright=" << std::min(edge1Bright, edge2Bright)
                           << " threshold=" << kMinEdgeBrightAbsolute
                           << std::endl;
-                restoreLiveParent();
-                return {0.0, noop};
+                if (mfCtx == nullptr) {
+                    restoreLiveParent();
+                    return {0.0, noop};
+                }
+                std::cout << "[MF Gate Bypass] edgeTooDim cell=" << parentName << std::endl;
             }
 
             // Single-metric valley gate (2026-04-15 redesign):
@@ -5482,8 +5743,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " effGapHalf=" << effectiveGapHalf
                           << " valleyLimit=" << valleyLimit
                           << std::endl;
-                restoreLiveParent();
-                return {0.0, noop};
+                if (mfCtx == nullptr) {
+                    restoreLiveParent();
+                    return {0.0, noop};
+                }
+                std::cout << "[MF Gate Bypass] bridgeFlat cell=" << parentName << std::endl;
                 }
             }
 
@@ -5527,8 +5791,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " r2=(" << bestD2.getARadius() << "," << bestD2.getBRadius() << "," << bestD2.getCRadius() << ")"
                   << " refParentVolume=" << refParentVolume
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] bioCheckDaughters cell=" << parentName << " reason=" << bioReason << std::endl;
     }
 
     // --- 6. Cost check ---
@@ -5599,8 +5866,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenNonParentLookaheadPair cell=" << parentName << std::endl;
     }
     const float parentAnchorRefitDriftLimit = std::max(
         lumenSnapshotSeedMaxRefitDrift >= 0.0f
@@ -5651,8 +5921,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenParentAnchorDrift cell=" << parentName << std::endl;
     }
     const bool parentAnchorWeakOverlapDuplicate =
         useCellLumenGateParams &&
@@ -5696,8 +5969,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorWeakOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorWeakDriftBridgeDuplicate =
         useCellLumenGateParams &&
@@ -5733,8 +6009,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorWeakDriftBridgeDuplicate cell=" << parentName << std::endl;
     }
     const double duplicateImageGain = parentAnchorImageGain;
     const float duplicateGateParentShape =
@@ -5962,6 +6241,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << "," << parentAnchorOneRealReanchorPos.y << ","
                   << parentAnchorOneRealReanchorPos.z << ")"
                   << std::endl;
+        if (mfCtx == nullptr) {
         if (parentAnchorOneRealCanReanchor) {
             restoreLiveParentAt(parentAnchorOneRealReanchorPos,
                                 "one_real_refit_drift_guard");
@@ -5969,6 +6249,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             restoreLiveParent();
         }
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealRefitDriftGuard cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealOverlapNoGapDuplicate =
         parentAnchorOneRealPostRefitGuardActive &&
@@ -6017,6 +6299,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << "," << parentAnchorOneRealReanchorPos.y << ","
                   << parentAnchorOneRealReanchorPos.z << ")"
                   << std::endl;
+        if (mfCtx == nullptr) {
         if (parentAnchorOneRealCanReanchor) {
             restoreLiveParentAt(parentAnchorOneRealReanchorPos,
                                 "one_real_overlap_no_gap_duplicate");
@@ -6024,6 +6307,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             restoreLiveParent();
         }
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealOverlapNoGapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealMinImageGainGuardWindow =
         parentAnchorOneRealCleanWindowForWeakGain ||
@@ -6078,6 +6363,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << lumenProposal->candidateIdA << ","
                   << lumenProposal->candidateIdB << ")"
                   << std::endl;
+        if (mfCtx == nullptr) {
         if (parentAnchorOneRealCanReanchor) {
             restoreLiveParentAt(parentAnchorOneRealReanchorPos,
                                 "one_real_min_image_gain_guard");
@@ -6085,6 +6371,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             restoreLiveParent();
         }
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealMinImageGainGuard cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealCleanHighOverlapDuplicate =
         parentAnchorOneRealPostRefitGuardActive &&
@@ -6123,6 +6411,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << "," << parentAnchorOneRealReanchorPos.y << ","
                   << parentAnchorOneRealReanchorPos.z << ")"
                   << std::endl;
+        if (mfCtx == nullptr) {
         if (parentAnchorOneRealCanReanchor) {
             restoreLiveParentAt(parentAnchorOneRealReanchorPos,
                                 "one_real_clean_high_overlap_guard");
@@ -6130,6 +6419,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             restoreLiveParent();
         }
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealCleanHighOverlapGuard cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealWeakGainOverlapDuplicate =
         useCellLumenGateParams &&
@@ -6170,8 +6461,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealWeakGainOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealSevereOverlapDuplicate =
         useCellLumenGateParams &&
@@ -6211,8 +6505,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealSevereOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealLowShapeOverlapDuplicate =
         useCellLumenGateParams &&
@@ -6281,6 +6578,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
+        if (mfCtx == nullptr) {
         if (shouldReanchorLowShapeOneReal) {
             restoreLiveParentAt(oneRealReanchorPos,
                                 "one_real_low_shape_overlap_duplicate");
@@ -6288,6 +6586,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         }
         restoreLiveParent();
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealLowShapeOverlapDuplicate cell=" << parentName << std::endl;
     }
     const double parentAnchorWeakPositiveImageGainLimit =
         std::max(2500.0, baselineImageCost * 0.018);
@@ -6329,8 +6629,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealWeakPositiveOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorOneRealContractedSmallGapDuplicate =
         useCellLumenGateParams &&
@@ -6374,8 +6677,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealContractedSmallGapDuplicate cell=" << parentName << std::endl;
     }
     auto meanRadiusForDuplicateGate = [](const Ellipsoid &cell) -> float {
         return (cell.getARadius() + cell.getBRadius() + cell.getCRadius()) / 3.0f;
@@ -6738,7 +7044,8 @@ CostCallbackPair Frame::trySplitCellPhased(
 	                  << " bestIdx=" << bestIdx
 	                  << " bestLabel=" << bestLabel
 	                  << std::endl;
-	        if (shouldReanchorTemporalDuplicateDaughter) {
+	        if (mfCtx == nullptr) {
+        if (shouldReanchorTemporalDuplicateDaughter) {
 	            restoreLiveParentAt(nonDuplicateDaughterPos,
 	                                "daughter_existing_temporal_duplicate");
 	            return {0.0, noop};
@@ -6754,6 +7061,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         }
         restoreLiveParent();
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] daughterExistingOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool duplicateOverlapDominatesImageGain =
         overlapCostDiff > std::max(
@@ -6811,8 +7120,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] contractedSiblingNoValleyDuplicate cell=" << parentName << std::endl;
     }
     const bool weakImageOverlapDominates =
         overlapCostDiff > std::max(
@@ -6865,8 +7177,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] weakImageOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool windowBackedZStackOverlapDuplicate =
         useCellLumenGateParams &&
@@ -6913,8 +7228,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] windowBackedZStackOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool windowBackedContractedOverlapDuplicate =
         useCellLumenGateParams &&
@@ -6964,8 +7282,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] windowBackedContractedOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorContractedOverlapDuplicate =
         useCellLumenGateParams &&
@@ -7008,8 +7329,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorContractedOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorSingleCandidateOverlapDuplicate =
         useCellLumenGateParams &&
@@ -7067,8 +7391,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorSingleCandidateOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool unsupportedFallbackOverlapDuplicate =
         useCellLumenGateParams &&
@@ -7110,8 +7437,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] unsupportedFallbackOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool unsupportedPrepassRawOverlapDuplicate =
         useCellLumenGateParams &&
@@ -7157,8 +7487,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] unsupportedPrepassRawOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool parentAnchorLikelyUnclaimedBlob =
         useCellLumenGateParams &&
@@ -7202,8 +7535,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorLikelyUnclaimedBlob cell=" << parentName << std::endl;
     } else if (parentAnchorUnclaimedBlobWindowRescue) {
         std::cout << "[Split CellLumen Parent Anchor Unclaimed Blob Rescue] "
                   << parentName
@@ -7230,6 +7566,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             0.0f, probConfig.split_bridge_cost_rescue_max_positive_fraction)) *
         baselineImageCost;
     const bool bridgeCostRescued =
+        mfCtx == nullptr &&
         probConfig.split_bridge_cost_rescue_enabled &&
         bridgeCostRescueEligible &&
         costDiff >= -adaptiveThreshold &&
@@ -7409,8 +7746,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
+        if (mfCtx == nullptr) {
         restoreLiveParent();
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] cellLumenOverlap cell=" << parentName << std::endl;
         }
     }
     const double rawLumenGateDiff =
@@ -7749,8 +8089,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealZStackWeakDuplicate cell=" << parentName << std::endl;
     }
     const bool lumenZStackWeakImageDuplicate =
         useCellLumenCostGate &&
@@ -7792,8 +8135,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenZStackWeakImageDuplicate cell=" << parentName << std::endl;
     }
     const double parentAnchorOneRealSmallGapWeakGainLimit =
         std::max(800.0, baselineImageCost * 0.008);
@@ -7839,8 +8185,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealSmallGapWeakDuplicate cell=" << parentName << std::endl;
     }
     const double parentAnchorOneRealPositiveGapWeakGainLimit =
         std::max(600.0, baselineImageCost * 0.007);
@@ -7892,9 +8241,12 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
+        if (mfCtx == nullptr) {
         restoreLiveParentAt(oneRealReanchorPos,
                             "one_real_positive_gap_weak_duplicate");
         return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] parentAnchorOneRealPositiveGapWeakDuplicate cell=" << parentName << std::endl;
     }
     const double parentAnchorOneRealOverlapDominatedGainLimit =
         std::max(1600.0, baselineImageCost * 0.008);
@@ -7975,6 +8327,7 @@ CostCallbackPair Frame::trySplitCellPhased(
 	                  << " bestIdx=" << bestIdx
 	                  << " bestLabel=" << bestLabel
 	                  << std::endl;
+	        if (mfCtx == nullptr) {
 	        if (shouldReanchorOverlapDominatedOneReal) {
 	            restoreLiveParentAt(oneRealReanchorPos,
 	                                "one_real_overlap_dominated_weak_duplicate");
@@ -7982,6 +8335,8 @@ CostCallbackPair Frame::trySplitCellPhased(
 	        }
 	        restoreLiveParent();
 	        return {0.0, noop};
+	        }
+	        std::cout << "[MF Gate Bypass] parentAnchorOneRealOverlapDominatedWeakDuplicate cell=" << parentName << std::endl;
 	    }
     const double weakImageNoGapMaxGain =
         std::max(2500.0, baselineImageCost * 0.012);
@@ -8022,8 +8377,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenWeakImageOverlapNoGapDuplicate cell=" << parentName << std::endl;
     }
     const bool lumenPrepassFallbackLowShapeOverlapDuplicate =
         useCellLumenCostGate &&
@@ -8060,8 +8418,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenPrepassFallbackLowShapeOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool lumenNonWindowLowShapeOverlapDuplicate =
         useCellLumenCostGate &&
@@ -8109,8 +8470,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenNonWindowLowShapeOverlapDuplicate cell=" << parentName << std::endl;
     }
     const bool lumenRiskyNeighborOverlapDuplicate =
         useCellLumenCostGate &&
@@ -8151,8 +8515,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenRiskyNeighborOverlapDuplicate cell=" << parentName << std::endl;
     }
     const double overlapDominatedNoValleyMinOverlap =
         lumenParentAnchorOneRealCandidate ? 7500.0 : 40000.0;
@@ -8203,8 +8570,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenOverlapDominatedNoValleyDuplicate cell=" << parentName << std::endl;
     }
     const bool lumenLikelyContinuationHijack =
         lumenWeakImageSplit &&
@@ -8266,8 +8636,11 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " bestIdx=" << bestIdx
                   << " bestLabel=" << bestLabel
                   << std::endl;
-        restoreLiveParent();
-        return {0.0, noop};
+        if (mfCtx == nullptr) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        std::cout << "[MF Gate Bypass] lumenLikelyContinuationHijack cell=" << parentName << std::endl;
     }
     // A negative gate diff is an actual reconstruction improvement. The
     // Lumen path only needs to reject candidates that get worse by more than
@@ -8275,6 +8648,7 @@ CostCallbackPair Frame::trySplitCellPhased(
     // enough raw image improvement to justify any soft geometry penalty; this
     // avoids accepting duplicate splits that improve the image term only
     // weakly while exploding overlap.
+    if (mfCtx == nullptr) {
     const bool lumenCostAccepted =
         useCellLumenCostGate &&
         ((lumenGateDiff <= lumenMaxPositiveCost &&
@@ -8379,6 +8753,73 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << std::endl;
         restoreLiveParent();
         return {0.0, noop};
+    }
+    } else {
+        // Rung 2a part 6: multi-factor score decides ACCEPT instead of the
+        // CellLumen cost-gate/sentinel path above. coverageGain is filled in
+        // here from the same baseline/candidate image costs the legacy cost
+        // gate above uses (baselineImageCost, bestImageCost); geometric
+        // sanity reuses the same daughter positions/radii and reference
+        // parent volume/radii the bio gate above already validated
+        // (bestD1/bestD2, refParentVolume, srcMajor/srcB/srcMinor) — nothing
+        // here is recomputed from the image.
+        const float parentCost = static_cast<float>(baselineImageCost);
+        const float daughtersCost = static_cast<float>(bestImageCost);
+        SplitFeatures pf = mfCtx->parentFeatures;
+        pf.coverageGain = std::max(-1.0f, std::min(1.0f,
+            (parentCost - daughtersCost) / std::max(1e-6f, parentCost)));
+
+        const cv::Point3f mfD1Pos(bestD1.getX(), bestD1.getY(), bestD1.getZ());
+        const cv::Point3f mfD2Pos(bestD2.getX(), bestD2.getY(), bestD2.getZ());
+        const float daughterSeparation =
+            static_cast<float>(cv::norm(mfD2Pos - mfD1Pos));
+        const float parentMinR = std::min({srcMajor, srcB, srcMinor});
+        const double d1Vol = static_cast<double>(bestD1.getARadius()) *
+                              static_cast<double>(bestD1.getBRadius()) *
+                              static_cast<double>(bestD1.getCRadius());
+        const double d2Vol = static_cast<double>(bestD2.getARadius()) *
+                              static_cast<double>(bestD2.getBRadius()) *
+                              static_cast<double>(bestD2.getCRadius());
+        const double combinedDaughterVolume = d1Vol + d2Vol;
+
+        const bool geomSane =
+            (daughterSeparation >= 0.5f * parentMinR) &&
+            (combinedDaughterVolume >= 0.6 * refParentVolume) &&
+            (combinedDaughterVolume <= 1.6 * refParentVolume);
+
+        const bool scoreAccept = splitScoreAccept(pf, mfCtx->weights);
+        const bool mfAccept = scoreAccept && geomSane;
+        acceptedCostDiff = mfAccept ? -std::max(1.0, adaptiveThreshold) : 1.0;
+
+        std::cout << "[Split Accept MF] " << parentName
+                  << " accept=" << (mfAccept ? 1 : 0)
+                  << " scoreAccept=" << (scoreAccept ? 1 : 0)
+                  << " geomSane=" << (geomSane ? 1 : 0)
+                  << " logit=" << splitLogit(pf, mfCtx->weights)
+                  << " coverageGain=" << pf.coverageGain
+                  << " elongation=" << pf.elongation
+                  << " planarity=" << pf.planarity
+                  << " valley=" << pf.valley
+                  << " center=" << pf.centerSupport
+                  << " volume=" << pf.volumeRipe
+                  << " central=" << pf.centralDef
+                  << " density=" << pf.density
+                  << " parentCost=" << parentCost
+                  << " daughtersCost=" << daughtersCost
+                  << " daughterSeparation=" << daughterSeparation
+                  << " parentMinR=" << parentMinR
+                  << " combinedDaughterVolume=" << combinedDaughterVolume
+                  << " refParentVolume=" << refParentVolume
+                  << " bestIdx=" << bestIdx
+                  << " bestLabel=" << bestLabel
+                  << std::endl;
+
+        if (!mfAccept) {
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+        // Fall through to the shared accept-install block below with
+        // acceptedCostDiff already set negative.
     }
 
     // Accept: install the best candidate state. The callback applies on

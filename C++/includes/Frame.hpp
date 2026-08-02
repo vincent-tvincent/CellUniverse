@@ -12,6 +12,8 @@
 #include <random>
 #include <functional>
 #include "Ellipsoid.hpp"
+#include "ForegroundModel.hpp"
+#include "SplitScore.hpp"
 #include <opencv2/core/mat.hpp>
 
 void interpolateSlices(const cv::Mat& slice1, const cv::Mat& slice2, std::vector<cv::Mat>& processedSlices, int numInterpolations);
@@ -69,6 +71,20 @@ struct BridgeSplitProposal
     int gapEndBin = -1;
     int leftPixelCount = 0;
     int rightPixelCount = 0;
+};
+
+// Read-only split evidence for a cell's CURRENT fit. Produced by
+// Frame::measureSplitEvidence (Rung 2a part 4) by binning in-ellipsoid
+// bright voxels along the cell's own longest fitted axis — reuses the same
+// long-axis + in-ellipsoid-gather machinery as discoverPcaBridgeProposal,
+// but standalone (no daughter pair, no cell mutation). Consumed by the
+// Rung-2a split score (SplitFeatureExtractor), not by trySplitCellPhased.
+// Defaults (all 1.0) mean "no valley detected" / neutral evidence.
+struct SplitEvidence
+{
+    float valleyRatio = 1.0f;       // midBandBrightness / max(1e-3, edgeBrightness)
+    float midBandBrightness = 1.0f; // mean brightness of the center bin
+    float coreBrightness = 1.0f;    // brightest bin mean across the axis
 };
 
 class Frame
@@ -346,7 +362,15 @@ public:
         float lumenNonParentDuplicateReanchorMaxBridgeValleyRatio = 0.50f,
         float lumenNonParentDuplicateReanchorMinBridgeGapWidth = 8.0f,
         float lumenNonParentDuplicateReanchorMinMove = 12.0f,
-        float lumenNonParentDuplicateReanchorMinParentDistanceBalance = 0.60f);
+        float lumenNonParentDuplicateReanchorMinParentDistanceBalance = 0.60f,
+        // Rung 2a part 6: optional multi-factor split-decision context. When
+        // non-null, the final ACCEPT is decided by splitScoreAccept(...) +
+        // a geometric sanity check instead of the CellLumen cost-gate /
+        // sentinel (lumenCostAccepted / bridgeCostRescued) path below. The
+        // daughter build / burn-in / refine machinery above is unaffected.
+        // Flag-OFF callers (nullptr, the default) are byte-identical to the
+        // pre-Rung-2a-part-6 behavior.
+        const SplitDecisionCtx *mfCtx = nullptr);
 
     // PCA-bridge daughter discovery. Runs the long-axis dark-bridge bin
     // analysis on the current cell and, if a valid bridge is found, returns
@@ -359,6 +383,15 @@ public:
                                    const ProbabilityConfig &probConfig,
                                    BridgeSplitProposal &outProposal,
                                    std::ostream *logSink = nullptr) const;
+
+    // Rung 2a part 4: lightweight, read-only split evidence for a cell's
+    // CURRENT fit (no daughter proposal, no mutation). Projects in-ellipsoid
+    // bright voxels onto the cell's longest fitted semi-axis (same long-axis
+    // derivation as discoverPcaBridgeProposal), bins them into 11 equal bins
+    // across [-longR, +longR], and reports the mid-band vs edge-lobe
+    // brightness contrast. Returns default SplitEvidence{} (no valley) when
+    // the cell index is invalid or too few bright voxels are found (<20).
+    SplitEvidence measureSplitEvidence(size_t cellIndex) const;
 
     // Frame-start pre-pass helper. For a pre-classified cell, gathers
     // bright pixels in a snapshot-centered bounding box, Voronoi-filters
@@ -435,6 +468,7 @@ public:
         std::ostream *logSink = nullptr);
 
     const std::vector<cv::Mat>& getRealFrame() const { return _realFrame; }
+    const std::vector<cv::Mat>& getSynthFrame() const { return _synthFrame; }
 
     // Memory optimization (M1): release the real + synth image stacks after
     // the frame has been optimized, its snapshot captured, and its outputs
@@ -465,6 +499,14 @@ public:
     void setSignalMap(std::vector<cv::Mat> signalMap) { _signalMap = std::move(signalMap); }
     const std::vector<cv::Mat>& getSignalMap() const { return _signalMap; }
     void setMeanCellBrightness(float mean) { _meanCellBrightness = mean; }
+
+    // Rung 1 (generative data term). Install the per-frame fg/bg intensity
+    // model. When `enabled` (and the model is valid), calculateBboxCost scores
+    // each voxel by fg/bg negative-log-likelihood instead of asymmetric L2.
+    void setForegroundModel(const ForegroundModel &fm, bool enabled) {
+        _fgModel = fm;
+        _generativeDataTerm = enabled && fm.valid;
+    }
     // Bbox-cost mode: perturb/split use a per-cell bbox with Voronoi
     // neighbor exclusion instead of full-image L2. Set at frame start
     // from ProbabilityConfig.use_bbox_cost; forwarded to per-cell paths.
@@ -536,6 +578,8 @@ private:
     std::string imageName;
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
+    ForegroundModel _fgModel;          // Rung 1: per-frame fg/bg intensity model
+    bool _generativeDataTerm = false;  // when true, calculateBboxCost uses fg/bg NLL
     // Signal centers (yp ffc1917) — bright clusters in the real image that
     // signal-guided perturbation snaps cells onto.
     std::vector<SignalCenter> _signalCenters;

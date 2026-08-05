@@ -109,9 +109,16 @@ void applyRuntimeOverrides(BaseConfig &config)
               << " parallel_min_slices=" << config.simulation.parallel_min_slices
               << " opencv_threads=" << cv::getNumThreads()
               << std::endl;
-    if (seedEnv != nullptr && std::string(seedEnv).size() > 0)
-    {
-        std::cout << "[Runtime Random] CELLUNIVERSE_SEED=" << seedEnv << std::endl;
+    if (cellUniverseRandomSeedConfigured()) {
+        std::cout << "[Runtime Random] seed="
+                  << cellUniverseRandomSeedValue()
+                  << " source=" << cellUniverseRandomSeedSource()
+                  << std::endl;
+    } else if (seedEnv != nullptr && std::string(seedEnv).size() > 0) {
+        // Defensive fallback: configureRuntimeRandomSeed normally validates
+        // and installs the environment value before this function runs.
+        std::cout << "[Runtime Random] CELLUNIVERSE_SEED="
+                  << seedEnv << " source=not_yet_configured" << std::endl;
     }
     std::cout << "[Efficiency Metric] primary=seconds_per_frame"
               << " normalized=seconds_per_cell_iteration"
@@ -132,12 +139,45 @@ bool pathsReferToSameOutput(const fs::path &left, const fs::path &right)
     return leftAbsolute.lexically_normal() == rightAbsolute.lexically_normal();
 }
 
+void configureRuntimeRandomSeed(const BaseConfig &config)
+{
+    const char *seedEnv = std::getenv("CELLUNIVERSE_SEED");
+    if (seedEnv != nullptr && std::string(seedEnv).size() > 0) {
+        try {
+            const std::string seedText(seedEnv);
+            if (seedText.front() == '-') {
+                throw std::invalid_argument("negative seed");
+            }
+            std::size_t parsedCharacters = 0;
+            const std::uint64_t parsed =
+                std::stoull(seedText, &parsedCharacters);
+            if (parsedCharacters != seedText.size()) {
+                throw std::invalid_argument("trailing seed characters");
+            }
+            configureCellUniverseRandomSeed(
+                static_cast<std::uint32_t>(parsed ^ (parsed >> 32U)),
+                "CELLUNIVERSE_SEED");
+            return;
+        } catch (const std::exception &) {
+            throw std::invalid_argument(
+                "CELLUNIVERSE_SEED must be an unsigned integer");
+        }
+    }
+    if (config.simulation.celluniverse4_enabled) {
+        const std::uint64_t seed = config.candidateBatch.deterministicSeed;
+        configureCellUniverseRandomSeed(
+            static_cast<std::uint32_t>(seed ^ (seed >> 32U)),
+            "candidate_batch.deterministic_seed");
+    }
+}
+
 int computeFutureContextLookahead(const BaseConfig &config)
 {
     int lookahead = 0;
     const bool needsPreparedWindow =
         config.simulation.prepare_analyze_one_frame ||
         config.simulation.celluniverse3_enabled ||
+        config.simulation.celluniverse4_enabled ||
         (config.cellLumen.enabled && config.cellLumen.fusionEnabled);
 
     if (!needsPreparedWindow || config.simulation.quit_after_preprocessing) {
@@ -304,6 +344,7 @@ int main(int argc, char *argv[])
         CellLumenArgs args = initCellLumenArgs(argv);
         BaseConfig config;
         loadConfig(args.config, config);
+        configureRuntimeRandomSeed(config);
         applyRuntimeOverrides(config);
         config.printConfig();
 
@@ -333,6 +374,7 @@ int main(int argc, char *argv[])
     // load config
     BaseConfig config;
     loadConfig(args.config, config);
+    configureRuntimeRandomSeed(config);
 
     // CLI resume args (from run_celluniverse.sh INI preset) override whatever
     // was parsed from the YAML. Use argv-based detection so "absent CLI arg"
@@ -353,21 +395,18 @@ int main(int argc, char *argv[])
     const InitialCsvMetadata initialCsvMetadata =
         CsvHandler::loadInitialCsvMetadata(args.initial);
     if (initialCsvMetadata.present) {
-        const float roundedRatio =
-            std::round(initialCsvMetadata.zInterpolationRatio);
-        if (std::abs(initialCsvMetadata.zInterpolationRatio - roundedRatio) >
-                1.0e-5f ||
-            roundedRatio < 1.0f) {
+        if (!std::isfinite(initialCsvMetadata.zInterpolationRatio) ||
+            initialCsvMetadata.zInterpolationRatio < 1.0f) {
             throw std::runtime_error(
-                "initializer schema-v2 zInterpolationRatio must be a positive "
-                "integer for the current CellUniverse interpolation engine; "
-                "refusing to truncate " +
+                "initializer schema-v2 zInterpolationRatio must be finite "
+                "and at least 1; received " +
                 std::to_string(initialCsvMetadata.zInterpolationRatio));
         }
         const float configuredRatio = config.simulation.z_scaling;
         const std::string configuredSpace =
             config.simulation.initial_z_space;
-        config.simulation.z_scaling = roundedRatio;
+        config.simulation.z_scaling =
+            initialCsvMetadata.zInterpolationRatio;
         config.simulation.z_scaling_source = "initial_csv";
         config.simulation.initial_z_space =
             initialCsvMetadata.zCoordinateSpace;
@@ -388,6 +427,12 @@ int main(int argc, char *argv[])
                   << " initial_z_space="
                   << config.simulation.initial_z_space
                   << '\n';
+    }
+    if (!std::isfinite(config.simulation.z_scaling) ||
+        config.simulation.z_scaling < 1.0f) {
+        throw std::runtime_error(
+            "simulation.z_scaling must be finite and at least 1; received " +
+            std::to_string(config.simulation.z_scaling));
     }
     config.printConfig();
 
@@ -535,6 +580,7 @@ int main(int argc, char *argv[])
     const bool prepareAnalyzeOneFrame =
         (config.simulation.prepare_analyze_one_frame ||
          config.simulation.celluniverse3_enabled ||
+         config.simulation.celluniverse4_enabled ||
          (config.cellLumen.enabled && config.cellLumen.fusionEnabled)) &&
         !config.simulation.quit_after_preprocessing;
     if (prepareAnalyzeOneFrame) {
@@ -548,6 +594,11 @@ int main(int argc, char *argv[])
         if (config.simulation.celluniverse3_enabled &&
             !config.simulation.prepare_analyze_one_frame) {
             std::cout << "[INFO] celluniverse3_enabled=true; forcing per-frame prepare so windowed max/sum guidance can use a rolling local frame window."
+                      << std::endl;
+        }
+        if (config.simulation.celluniverse4_enabled &&
+            !config.simulation.prepare_analyze_one_frame) {
+            std::cout << "[INFO] celluniverse4_enabled=true; forcing per-frame prepare so immutable chunk evidence is available to candidate batches."
                       << std::endl;
         }
     } else {

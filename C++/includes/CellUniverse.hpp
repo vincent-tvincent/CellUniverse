@@ -141,6 +141,12 @@ private:
    // supplies a rotated, soft two-region background to every Frame. Its
    // geometry changes only after conservative image-evidence checks.
    BackgroundRegionTracker initialCsvBackgroundTracker;
+   // The initializer-confirmed envelope remains the foreground-fitting
+   // geometry and intensity reference for split/bridge decisions. PCA shape
+   // fitting can opt into a separate prepared-domain local-support threshold;
+   // see CellConfig::pcaShapeLocalSupportEnabled.
+   std::optional<BackgroundRegionTracker::SeedRecord>
+       initialCsvForegroundReferenceSeed;
    std::set<int> initialCsvBackgroundStateWrittenFrames;
    bool resumePreviousFrameSummaryValid = false;
    float resumePreviousAdaptiveBackground = 0.0f;

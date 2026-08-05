@@ -52,14 +52,22 @@ public:
         float maximumRadiusChangeFraction = 0.03f;
         float maximumRawUpdateMultiplier = 3.0f;
         float minimumRadius = 1.0f;
-        float cellExclusionScale = 1.25f;
+        float cellExclusionScale = 1.50f;
 
         // Robust hot/cold estimation outside cell supports.
         int intensityStride = 3;
         std::size_t minimumIntensitySamples = 256;
         std::size_t maximumIntensitySamplesPerRegion = 200000;
-        float intensityTrimFraction = 0.10f;
-        float intensityEmaAlpha = 0.25f;
+        float intensityTrimFraction = 0.20f;
+        // Current-frame response blend. The robust estimates are large-sample
+        // trimmed means, so use them directly by default and rely on the
+        // bounded final step below for protection against abrupt outliers.
+        float intensityEmaAlpha = 1.0f;
+        // Disable this only for prepared sequences whose physical background
+        // is expected to change abruptly between adjacent frames. Keeping the
+        // switch separate from the numeric step avoids treating zero as both
+        // "freeze" and "unlimited".
+        bool intensityStepLimitEnabled = true;
         float maximumIntensityStep = 0.05f;
         float hotMembershipMinimum = 0.95f;
         float coldMembershipMaximum = 0.05f;
@@ -68,7 +76,11 @@ public:
 
         // The manually confirmed seed is authoritative for its source frame.
         bool holdSeedGeometryOnFirstUpdate = true;
-        bool holdSeedIntensitiesOnFirstUpdate = true;
+        // CSV brightness values may use the initializer's preview-normalized
+        // intensity scale. Re-estimate them from the prepared runtime frame so
+        // geometry remains authoritative without importing a mismatched scale.
+        bool holdSeedIntensitiesOnFirstUpdate = false;
+        bool snapIntensityEstimatesOnFirstUpdate = true;
     };
 
     struct State
@@ -88,6 +100,11 @@ public:
         std::size_t evidenceSamples = 0;
         std::size_t hotSamples = 0;
         std::size_t coldSamples = 0;
+        unsigned int coveredFaces = 0;
+        float coldCandidate = 0.0f;
+        float hotCandidate = 0.0f;
+        bool intensityAccepted = false;
+        bool intensitySnapped = false;
     };
 
     struct RenderedStacks

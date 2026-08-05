@@ -1,7 +1,12 @@
 #include "../includes/CellUniverse.hpp"
 #include "../includes/CompactExporter.hpp"
 #include "../includes/ImageHandler.hpp"
+#include "../includes/ZInterpolation.hpp"
 #include "../includes/CellLumen.hpp"
+#include "../includes/SplitSiblingVolumeGuard.hpp"
+#include "../includes/CandidateBatch.hpp"
+#include "../includes/ChunkEvidence.hpp"
+#include "../includes/CellRefitGuards.hpp"
 #include <set>
 #include <cmath>
 #include <algorithm>
@@ -73,6 +78,429 @@ static float computeStackMean(const std::vector<cv::Mat> &stack)
     }
 
     return (count > 0.0) ? static_cast<float>(sum / count) : 0.0f;
+}
+
+struct CellRasterSupportStats
+{
+    bool valid = false;
+    std::size_t support = 0;
+    double meanBackground = 0.0;
+};
+
+// Measure the exact integer-voxel support used by the hard ellipsoid model and
+// the physical (possibly two-region, soft-margin) background underneath it.
+// The inverse rotation is computed once because Ellipsoid's convenience point
+// predicate rebuilds trigonometry on every call.
+static CellRasterSupportStats measureCellRasterSupport(
+    const Frame &frame,
+    const Ellipsoid &cell)
+{
+    CellRasterSupportStats result;
+    const auto &stack = frame.getRealFrame();
+    if (stack.empty()) return result;
+
+    const double a = static_cast<double>(cell.getARadius());
+    const double b = static_cast<double>(cell.getBRadius());
+    const double c = static_cast<double>(cell.getCRadius());
+    const double maxRadius = std::max({a, b, c});
+    if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) ||
+        a <= 0.0 || b <= 0.0 || c <= 0.0 ||
+        !std::isfinite(maxRadius)) {
+        return result;
+    }
+
+    std::array<double, 9> inverseRotation{};
+    cell.generateInverseRotationMatrix(inverseRotation);
+    const double invA2 = 1.0 / (a * a);
+    const double invB2 = 1.0 / (b * b);
+    const double invC2 = 1.0 / (c * c);
+    const int minZ = std::max(
+        0, static_cast<int>(std::floor(cell.getZ() - maxRadius)));
+    const int maxZ = std::min(
+        static_cast<int>(stack.size()) - 1,
+        static_cast<int>(std::ceil(cell.getZ() + maxRadius)));
+    if (minZ > maxZ) return result;
+
+    double backgroundSum = 0.0;
+    for (int z = minZ; z <= maxZ; ++z) {
+        const cv::Mat &slice = stack[static_cast<std::size_t>(z)];
+        if (slice.empty()) continue;
+        const int minY = std::max(
+            0, static_cast<int>(std::floor(cell.getY() - maxRadius)));
+        const int maxY = std::min(
+            slice.rows - 1,
+            static_cast<int>(std::ceil(cell.getY() + maxRadius)));
+        const int minX = std::max(
+            0, static_cast<int>(std::floor(cell.getX() - maxRadius)));
+        const int maxX = std::min(
+            slice.cols - 1,
+            static_cast<int>(std::ceil(cell.getX() + maxRadius)));
+        if (minX > maxX || minY > maxY) continue;
+
+        const double dz = static_cast<double>(z) - cell.getZ();
+        for (int y = minY; y <= maxY; ++y) {
+            const double dy = static_cast<double>(y) - cell.getY();
+            for (int x = minX; x <= maxX; ++x) {
+                const double dx = static_cast<double>(x) - cell.getX();
+                const double localX =
+                    inverseRotation[0] * dx + inverseRotation[1] * dy +
+                    inverseRotation[2] * dz;
+                const double localY =
+                    inverseRotation[3] * dx + inverseRotation[4] * dy +
+                    inverseRotation[5] * dz;
+                const double localZ =
+                    inverseRotation[6] * dx + inverseRotation[7] * dy +
+                    inverseRotation[8] * dz;
+                const double q = localX * localX * invA2 +
+                                 localY * localY * invB2 +
+                                 localZ * localZ * invC2;
+                if (q > 1.0) continue;
+                const double background = static_cast<double>(
+                    frame.backgroundAt(z, y, x));
+                if (!std::isfinite(background)) return result;
+                backgroundSum += background;
+                ++result.support;
+            }
+        }
+    }
+    if (result.support == 0) return result;
+    result.meanBackground =
+        backgroundSum / static_cast<double>(result.support);
+    result.valid = std::isfinite(result.meanBackground);
+    return result;
+}
+
+struct CellBrightnessVolumeAnchor
+{
+    bool valid = false;
+    std::size_t support = 0;
+    double meanBackground = 0.0;
+    double contrast = 0.0;
+};
+
+static CellBrightnessVolumeAnchor captureCellBrightnessVolumeAnchor(
+    const Frame &frame,
+    const Ellipsoid &cell)
+{
+    CellBrightnessVolumeAnchor anchor;
+    const CellRasterSupportStats stats =
+        measureCellRasterSupport(frame, cell);
+    const double brightness = static_cast<double>(cell.getBrightness());
+    if (!stats.valid || !std::isfinite(brightness)) return anchor;
+    anchor.support = stats.support;
+    anchor.meanBackground = stats.meanBackground;
+    anchor.contrast = std::max(0.0, brightness - stats.meanBackground);
+    anchor.valid = std::isfinite(anchor.contrast);
+    return anchor;
+}
+
+struct EllipsoidVoxelGeometry
+{
+    cv::Point3f center{0.0f, 0.0f, 0.0f};
+    std::array<double, 9> inverseRotation{};
+    double invA2 = 0.0;
+    double invB2 = 0.0;
+    double invC2 = 0.0;
+    bool valid = false;
+
+    explicit EllipsoidVoxelGeometry(const Ellipsoid &cell)
+        : center(cell.getX(), cell.getY(), cell.getZ())
+    {
+        const double a = static_cast<double>(cell.getARadius());
+        const double b = static_cast<double>(cell.getBRadius());
+        const double c = static_cast<double>(cell.getCRadius());
+        valid = std::isfinite(a) && std::isfinite(b) && std::isfinite(c) &&
+                a > 0.0 && b > 0.0 && c > 0.0;
+        if (!valid) return;
+        cell.generateInverseRotationMatrix(inverseRotation);
+        invA2 = 1.0 / (a * a);
+        invB2 = 1.0 / (b * b);
+        invC2 = 1.0 / (c * c);
+    }
+
+    double normalizedRadiusSquared(int x, int y, int z) const
+    {
+        if (!valid) return std::numeric_limits<double>::infinity();
+        const double dx = static_cast<double>(x) - center.x;
+        const double dy = static_cast<double>(y) - center.y;
+        const double dz = static_cast<double>(z) - center.z;
+        const double localX = inverseRotation[0] * dx +
+                              inverseRotation[1] * dy +
+                              inverseRotation[2] * dz;
+        const double localY = inverseRotation[3] * dx +
+                              inverseRotation[4] * dy +
+                              inverseRotation[5] * dz;
+        const double localZ = inverseRotation[6] * dx +
+                              inverseRotation[7] * dy +
+                              inverseRotation[8] * dz;
+        return localX * localX * invA2 +
+               localY * localY * invB2 +
+               localZ * localZ * invC2;
+    }
+
+    cv::Point3f localCoordinates(int x, int y, int z) const
+    {
+        const double dx = static_cast<double>(x) - center.x;
+        const double dy = static_cast<double>(y) - center.y;
+        const double dz = static_cast<double>(z) - center.z;
+        return cv::Point3f(
+            static_cast<float>(inverseRotation[0] * dx +
+                               inverseRotation[1] * dy +
+                               inverseRotation[2] * dz),
+            static_cast<float>(inverseRotation[3] * dx +
+                               inverseRotation[4] * dy +
+                               inverseRotation[5] * dz),
+            static_cast<float>(inverseRotation[6] * dx +
+                               inverseRotation[7] * dy +
+                               inverseRotation[8] * dz));
+    }
+};
+
+struct AnchoredBrightComponent
+{
+    bool valid = false;
+    float meanThreshold = 0.0f;
+    bool terminatedAtNeighborSurface = false;
+    std::string touchedNeighborName;
+    std::vector<cv::Point3i> voxels;
+};
+
+// Build one component from a seed inside the fitted cell core. The threshold
+// follows the cell's fitted foreground contrast over the spatial background,
+// while the search remains bounded by the largest reviewed ellipsoid. This
+// makes component support a guide for modest growth, not permission to absorb
+// a disconnected neighboring cell.
+static AnchoredBrightComponent gatherAnchoredBrightComponent(
+    const Frame &frame,
+    const Ellipsoid &cell,
+    float maximumRadiusScale,
+    float contrastFraction,
+    bool useCellBrightnessThreshold,
+    float brightnessRelativeTolerance,
+    float anchorRadiusFraction,
+    int connectivityRadius,
+    int minimumVoxels,
+    bool stopAtNeighborSurface)
+{
+    AnchoredBrightComponent result;
+    const auto &stack = frame.getRealFrame();
+    const EllipsoidVoxelGeometry geometry(cell);
+    if (stack.empty() || !geometry.valid) return result;
+
+    const float maxRadius = std::max({
+        cell.getARadius(), cell.getBRadius(), cell.getCRadius()});
+    const float searchRadius =
+        std::max(1.0f, maxRadius * maximumRadiusScale);
+    const int minZ = std::max(
+        0, static_cast<int>(std::floor(cell.getZ() - searchRadius)));
+    const int maxZ = std::min(
+        static_cast<int>(stack.size()) - 1,
+        static_cast<int>(std::ceil(cell.getZ() + searchRadius)));
+    const int minY = std::max(
+        0, static_cast<int>(std::floor(cell.getY() - searchRadius)));
+    const int maxY = std::min(
+        stack.front().rows - 1,
+        static_cast<int>(std::ceil(cell.getY() + searchRadius)));
+    const int minX = std::max(
+        0, static_cast<int>(std::floor(cell.getX() - searchRadius)));
+    const int maxX = std::min(
+        stack.front().cols - 1,
+        static_cast<int>(std::ceil(cell.getX() + searchRadius)));
+    if (minX > maxX || minY > maxY || minZ > maxZ) return result;
+
+    const int sizeX = maxX - minX + 1;
+    const int sizeY = maxY - minY + 1;
+    const int sizeZ = maxZ - minZ + 1;
+    const std::size_t plane = static_cast<std::size_t>(sizeX) * sizeY;
+    const std::size_t volume = plane * sizeZ;
+    std::vector<std::uint8_t> eligible(volume, 0);
+    auto flatIndex = [&](int x, int y, int z) {
+        return static_cast<std::size_t>(z - minZ) * plane +
+               static_cast<std::size_t>(y - minY) * sizeX +
+               static_cast<std::size_t>(x - minX);
+    };
+
+    const double maximumQ =
+        static_cast<double>(maximumRadiusScale) * maximumRadiusScale;
+    const double anchorQ =
+        static_cast<double>(anchorRadiusFraction) * anchorRadiusFraction;
+    std::vector<std::pair<std::string, EllipsoidVoxelGeometry>>
+        neighborGeometries;
+    if (stopAtNeighborSurface) {
+        neighborGeometries.reserve(frame.cells.size());
+        for (const auto &other : frame.cells) {
+            if (other.isTrash() || other.getName() == cell.getName()) {
+                continue;
+            }
+            const float otherMaxRadius = std::max({
+                other.getARadius(), other.getBRadius(),
+                other.getCRadius()});
+            const float reach = searchRadius + otherMaxRadius +
+                static_cast<float>(std::max(1, connectivityRadius));
+            const float dx = other.getX() - cell.getX();
+            const float dy = other.getY() - cell.getY();
+            const float dz = other.getZ() - cell.getZ();
+            if (dx * dx + dy * dy + dz * dz > reach * reach) {
+                continue;
+            }
+            EllipsoidVoxelGeometry otherGeometry(other);
+            if (otherGeometry.valid) {
+                neighborGeometries.emplace_back(
+                    other.getName(), std::move(otherGeometry));
+            }
+        }
+    }
+    std::size_t seedIndex = volume;
+    float seedScore = -std::numeric_limits<float>::infinity();
+    double thresholdSum = 0.0;
+    std::size_t thresholdCount = 0;
+    for (int z = minZ; z <= maxZ; ++z) {
+        const cv::Mat &slice = stack[static_cast<std::size_t>(z)];
+        for (int y = minY; y <= maxY; ++y) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = minX; x <= maxX; ++x) {
+                const double q = geometry.normalizedRadiusSquared(x, y, z);
+                if (q > maximumQ) continue;
+                const float background = frame.backgroundAt(z, y, x);
+                const float contrast = std::max(
+                    0.0f, cell.getBrightness() - background);
+                const float thresholdFraction = useCellBrightnessThreshold
+                    ? 1.0f - std::clamp(
+                          brightnessRelativeTolerance, 0.0f, 0.999f)
+                    : std::clamp(contrastFraction, 0.0f, 1.0f);
+                const float threshold = background +
+                    thresholdFraction * contrast;
+                thresholdSum += threshold;
+                ++thresholdCount;
+                const float signal = row[x] - threshold;
+                if (!std::isfinite(signal) || signal < 0.0f) continue;
+                const std::size_t index = flatIndex(x, y, z);
+                eligible[index] = 1;
+                if (q <= anchorQ && signal > seedScore) {
+                    seedScore = signal;
+                    seedIndex = index;
+                }
+            }
+        }
+    }
+    result.meanThreshold = thresholdCount > 0
+        ? static_cast<float>(thresholdSum / thresholdCount)
+        : 0.0f;
+    if (seedIndex == volume) return result;
+
+    std::vector<std::uint8_t> visited(volume, 0);
+    std::queue<std::size_t> pending;
+    pending.push(seedIndex);
+    visited[seedIndex] = 1;
+    const int radius = std::clamp(connectivityRadius, 1, 3);
+    while (!pending.empty() && !result.terminatedAtNeighborSurface) {
+        const std::size_t index = pending.front();
+        pending.pop();
+        const int localZ = static_cast<int>(index / plane);
+        const std::size_t planeOffset = index % plane;
+        const int localY = static_cast<int>(planeOffset / sizeX);
+        const int localX = static_cast<int>(planeOffset % sizeX);
+        result.voxels.emplace_back(
+            minX + localX, minY + localY, minZ + localZ);
+
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    const int nx = localX + dx;
+                    const int ny = localY + dy;
+                    const int nz = localZ + dz;
+                    if (nx < 0 || nx >= sizeX ||
+                        ny < 0 || ny >= sizeY ||
+                        nz < 0 || nz >= sizeZ) {
+                        continue;
+                    }
+                    const std::size_t neighbor =
+                        static_cast<std::size_t>(nz) * plane +
+                        static_cast<std::size_t>(ny) * sizeX + nx;
+                    if (!eligible[neighbor] || visited[neighbor]) continue;
+                    if (stopAtNeighborSurface) {
+                        const int worldX = minX + nx;
+                        const int worldY = minY + ny;
+                        const int worldZ = minZ + nz;
+                        for (const auto &other : neighborGeometries) {
+                            if (other.second.normalizedRadiusSquared(
+                                    worldX, worldY, worldZ) <= 1.0) {
+                                result.terminatedAtNeighborSurface = true;
+                                result.touchedNeighborName = other.first;
+                                break;
+                            }
+                        }
+                        if (result.terminatedAtNeighborSurface) break;
+                    }
+                    visited[neighbor] = 1;
+                    pending.push(neighbor);
+                }
+                if (result.terminatedAtNeighborSurface) break;
+            }
+            if (result.terminatedAtNeighborSurface) break;
+        }
+    }
+    // A neighbor-surface contact is itself the requested terminal condition:
+    // proceed to bounded size analysis with the support collected so far,
+    // even if the early stop occurred before the ordinary voxel minimum.
+    result.valid = !result.voxels.empty() &&
+        (result.terminatedAtNeighborSurface ||
+         result.voxels.size() >=
+             static_cast<std::size_t>(std::max(1, minimumVoxels)));
+    return result;
+}
+
+static std::array<float, 3> componentLocalAxisExtents(
+    const AnchoredBrightComponent &component,
+    const Ellipsoid &cell,
+    float percentile)
+{
+    std::array<float, 3> extents{
+        cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+    if (!component.valid || component.voxels.empty()) return extents;
+    const EllipsoidVoxelGeometry geometry(cell);
+    if (!geometry.valid) return extents;
+
+    std::array<std::vector<float>, 3> samples;
+    for (auto &axis : samples) axis.reserve(component.voxels.size());
+    for (const cv::Point3i &point : component.voxels) {
+        const cv::Point3f local = geometry.localCoordinates(
+            point.x, point.y, point.z);
+        samples[0].push_back(std::abs(local.x));
+        samples[1].push_back(std::abs(local.y));
+        samples[2].push_back(std::abs(local.z));
+    }
+    const float boundedPercentile = std::clamp(percentile, 0.0f, 1.0f);
+    const float surfaceCorrection =
+        cell_refit_guards::ellipsoidAxisPercentileSurfaceCorrection(
+            boundedPercentile);
+    for (size_t axis = 0; axis < 3; ++axis) {
+        auto &values = samples[axis];
+        const size_t rank = static_cast<size_t>(std::floor(
+            boundedPercentile * static_cast<float>(values.size() - 1)));
+        std::nth_element(
+            values.begin(), values.begin() + rank, values.end());
+        extents[axis] = values[rank] * surfaceCorrection;
+    }
+    return extents;
+}
+
+static std::size_t countComponentCapturedByCell(
+    const AnchoredBrightComponent &component,
+    const Ellipsoid &cell)
+{
+    if (!component.valid) return 0;
+    const EllipsoidVoxelGeometry geometry(cell);
+    if (!geometry.valid) return 0;
+    std::size_t captured = 0;
+    for (const cv::Point3i &point : component.voxels) {
+        if (geometry.normalizedRadiusSquared(
+                point.x, point.y, point.z) <= 1.0) {
+            ++captured;
+        }
+    }
+    return captured;
 }
 
 static float squaredDistance(const cv::Point3f &a, const cv::Point3f &b)
@@ -373,11 +801,17 @@ static bool forceSplitSevereRodByName(Frame &frame,
     const std::vector<uint8_t> noMask;
     frame.cells = savedCells;
     frame.regenerateSynthFrame();
-    const double baselineImageCost =
-        frame.calculateBboxCost(bbox, frame.getSynthFrame(), noMask);
+    const PsfBrightnessCostContext baselineBrightnessContext =
+        frame.makePsfBrightnessCostContext({&parent}, cellName);
+    BboxCostBreakdown baselineBreakdown;
+    const double baselineCompositeCost = frame.calculateBboxCost(
+        bbox, frame.getSynthFrame(), noMask, -1,
+        simulationConfig.psf_brightness_cost_enabled
+            ? &baselineBrightnessContext : nullptr,
+        &baselineBreakdown);
     const double baselineOverlapCost =
         frame.computeOverlapPenalty(prob.overlap_penalty_weight);
-    const double baselineScore = baselineImageCost + baselineOverlapCost;
+    const double baselineScore = baselineCompositeCost + baselineOverlapCost;
     double bestScore = std::numeric_limits<double>::infinity();
     std::vector<Ellipsoid> bestCells;
     std::string bestLabel;
@@ -487,16 +921,27 @@ static bool forceSplitSevereRodByName(Frame &frame,
             frame.refineCellShapeViaEdgeSticks(daughter1Idx, &pcaLog);
         }
         frame.regenerateSynthFrame();
-        const double imageCost =
-            frame.calculateBboxCost(bbox, frame.getSynthFrame(), noMask);
+        const PsfBrightnessCostContext candidateBrightnessContext =
+            frame.makePsfBrightnessCostContext(
+                {&frame.cells[daughter0Idx], &frame.cells[daughter1Idx]},
+                cellName);
+        BboxCostBreakdown candidateBreakdown;
+        const double compositeCost = frame.calculateBboxCost(
+            bbox, frame.getSynthFrame(), noMask, -1,
+            simulationConfig.psf_brightness_cost_enabled
+                ? &candidateBrightnessContext : nullptr,
+            &candidateBreakdown);
         const double overlapCost =
             frame.computeOverlapPenalty(prob.overlap_penalty_weight);
-        const double score = imageCost + overlapCost;
+        const double score = compositeCost + overlapCost;
         std::cout << "[Post PCA Force Rod Split Candidate] frame "
                   << displayFrame
                   << " cell=" << cellName
                   << " label=" << cand.label
-                  << " imageCost=" << imageCost
+                  << " imageCost=" << candidateBreakdown.imageCost
+                  << " brightnessCost="
+                  << candidateBreakdown.brightnessPriorCost
+                  << " compositeCost=" << compositeCost
                   << " overlapCost=" << overlapCost
                   << " score=" << score
                   << " refit=1"
@@ -563,7 +1008,10 @@ static bool forceSplitSevereRodByName(Frame &frame,
                   << " reason="
                   << (lacksAnyImprovement ? "cost_not_improved"
                                            : "cost_improvement_too_small")
-                  << " baselineImageCost=" << baselineImageCost
+                  << " baselineImageCost=" << baselineBreakdown.imageCost
+                  << " baselineBrightnessCost="
+                  << baselineBreakdown.brightnessPriorCost
+                  << " baselineCompositeCost=" << baselineCompositeCost
                   << " baselineOverlapCost=" << baselineOverlapCost
                   << " baselineScore=" << baselineScore
                   << " bestScore=" << bestScore
@@ -2292,6 +2740,9 @@ static Frame::SignalCenter makeSignalCenterFromBoxes(const std::vector<BrightBox
     double xSum = 0.0;
     double ySum = 0.0;
     double zSum = 0.0;
+    double geometricXSum = 0.0;
+    double geometricYSum = 0.0;
+    double geometricZSum = 0.0;
     double brightnessSum = 0.0;
     float minX = std::numeric_limits<float>::max();
     float minY = std::numeric_limits<float>::max();
@@ -2299,6 +2750,16 @@ static Frame::SignalCenter makeSignalCenterFromBoxes(const std::vector<BrightBox
     float maxX = std::numeric_limits<float>::lowest();
     float maxY = std::numeric_limits<float>::lowest();
     float maxZ = std::numeric_limits<float>::lowest();
+    float peakBrightness = std::numeric_limits<float>::lowest();
+    cv::Point3f peakPosition(0.0f, 0.0f, 0.0f);
+    std::vector<float> memberX;
+    std::vector<float> memberY;
+    std::vector<float> memberZ;
+    std::vector<std::array<int, 3>> memberGridCoordinates;
+    memberX.reserve(members.size());
+    memberY.reserve(members.size());
+    memberZ.reserve(members.size());
+    memberGridCoordinates.reserve(members.size());
     int totalVoxels = 0;
     for (size_t boxIdx : members) {
         const BrightBox &box = boxes[boxIdx];
@@ -2307,6 +2768,9 @@ static Frame::SignalCenter makeSignalCenterFromBoxes(const std::vector<BrightBox
         xSum += weight * static_cast<double>(box.center.x);
         ySum += weight * static_cast<double>(box.center.y);
         zSum += weight * static_cast<double>(box.center.z);
+        geometricXSum += box.center.x;
+        geometricYSum += box.center.y;
+        geometricZSum += box.center.z;
         brightnessSum += static_cast<double>(box.brightness);
         minX = std::min(minX, box.center.x);
         minY = std::min(minY, box.center.y);
@@ -2314,6 +2778,14 @@ static Frame::SignalCenter makeSignalCenterFromBoxes(const std::vector<BrightBox
         maxX = std::max(maxX, box.center.x);
         maxY = std::max(maxY, box.center.y);
         maxZ = std::max(maxZ, box.center.z);
+        memberX.push_back(box.center.x);
+        memberY.push_back(box.center.y);
+        memberZ.push_back(box.center.z);
+        memberGridCoordinates.push_back({box.ix, box.iy, box.iz});
+        if (box.brightness > peakBrightness) {
+            peakBrightness = box.brightness;
+            peakPosition = box.center;
+        }
         totalVoxels += std::max(0, box.voxels);
     }
 
@@ -2323,6 +2795,42 @@ static Frame::SignalCenter makeSignalCenterFromBoxes(const std::vector<BrightBox
             static_cast<float>(xSum / weightSum),
             static_cast<float>(ySum / weightSum),
             static_cast<float>(zSum / weightSum));
+        center.geometricPosition = cv::Point3f(
+            static_cast<float>(geometricXSum / members.size()),
+            static_cast<float>(geometricYSum / members.size()),
+            static_cast<float>(geometricZSum / members.size()));
+        const auto median = [](std::vector<float> values) {
+            const size_t middle = values.size() / 2;
+            std::nth_element(values.begin(), values.begin() + middle,
+                             values.end());
+            float result = values[middle];
+            if (values.size() % 2 == 0) {
+                const float lower = *std::max_element(
+                    values.begin(), values.begin() + middle);
+                result = 0.5f * (lower + result);
+            }
+            return result;
+        };
+        center.robustPosition = cv::Point3f(
+            median(memberX), median(memberY), median(memberZ));
+        center.peakPosition = peakPosition;
+        center.bboxMin = cv::Point3f(minX, minY, minZ);
+        center.bboxMax = cv::Point3f(maxX, maxY, maxZ);
+        std::sort(memberGridCoordinates.begin(), memberGridCoordinates.end());
+        std::uint64_t stableId = 1469598103934665603ULL;
+        constexpr std::uint64_t kStableIdPrime = 1099511628211ULL;
+        for (const auto &coordinate : memberGridCoordinates) {
+            for (const int value : coordinate) {
+                const std::uint32_t encoded =
+                    static_cast<std::uint32_t>(value);
+                for (int byte = 0; byte < 4; ++byte) {
+                    stableId ^= static_cast<std::uint64_t>(
+                        (encoded >> static_cast<unsigned>(byte * 8)) & 0xffU);
+                    stableId *= kStableIdPrime;
+                }
+            }
+        }
+        center.stableId = stableId;
         center.brightness = static_cast<float>(brightnessSum / static_cast<double>(members.size()));
         center.boxes = static_cast<int>(members.size());
         center.sizeVoxels = static_cast<float>(std::max(totalVoxels, center.boxes));
@@ -2430,7 +2938,8 @@ static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
                         const float *row = realFrame[z].ptr<float>(y);
                         for (int x = x0; x < x1; ++x) {
                             sum += row[x];
-                            backgroundSum += frame.backgroundAt(z, y, x);
+                            backgroundSum +=
+                                frame.foregroundReferenceAt(z, y, x);
                             ++voxels;
                         }
                     }
@@ -2511,6 +3020,27 @@ static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
         center.sigmaScale = std::max(
             config.simulation.signal_guided_min_sigma_scale,
             1.0f - normalized * (1.0f - config.simulation.signal_guided_min_sigma_scale));
+        const float sizeSaturation = std::max(
+            1.0e-6f,
+            config.candidateBatch.chunkConfidenceSizeSaturationBoxes);
+        const float sizeScore = std::clamp(
+            std::log1p(static_cast<float>(std::max(0, center.boxes))) /
+                std::log1p(sizeSaturation),
+            0.0f, 1.0f);
+        const float compactness = std::pow(
+            1.0f / std::max(1.0f, center.shapeElongation),
+            config.candidateBatch.chunkConfidenceCompactnessExponent);
+        const float confidenceWeightSum = std::max(
+            1.0e-6f,
+            config.candidateBatch.chunkConfidenceBrightnessWeight +
+                config.candidateBatch.chunkConfidenceSizeWeight +
+                config.candidateBatch.chunkConfidenceCompactnessWeight);
+        center.confidence = std::clamp(
+            (config.candidateBatch.chunkConfidenceBrightnessWeight * normalized +
+             config.candidateBatch.chunkConfidenceSizeWeight * sizeScore +
+             config.candidateBatch.chunkConfidenceCompactnessWeight * compactness) /
+                confidenceWeightSum,
+            0.0f, 1.0f);
     }
 
     std::sort(centers.begin(), centers.end(),
@@ -2534,8 +3064,10 @@ static std::vector<Frame::SignalCenter> localizeSignalCentersForFrame(
         for (size_t i = 0; i < centers.size(); ++i) {
             const auto &c = centers[i];
             std::cout << "  [Signal Center] idx=" << i
+                      << " stableId=" << c.stableId
                       << " pos=(" << c.position.x << "," << c.position.y << "," << c.position.z << ")"
                       << " brightness=" << c.brightness
+                      << " confidence=" << c.confidence
                       << " sigmaScale=" << c.sigmaScale
                       << " boxes=" << c.boxes << '\n';
         }
@@ -2558,6 +3090,8 @@ struct SignalCenterRescueCandidate {
     float probeMean = 0.0f;
     float probeStddev = 0.0f;
     float probeMove = 0.0f;
+    float probeBackground = 0.0f;
+    float minimumProbeMean = 0.0f;
 };
 
 static float safeRatio(float a, float b)
@@ -2703,12 +3237,25 @@ static SignalCenterRescueCandidate findSignalCenterRescueCandidate(
 
 static bool isSplitDaughterLineageName(const std::string &name)
 {
-    constexpr size_t kCellPrefixLength = 5; // "cell_"
-    if (name.rfind("cell_", 0) != 0 || name.size() <= kCellPrefixLength + 1) {
+    if (name.size() <= 1) {
         return false;
     }
     const char last = name.back();
-    return last == '0' || last == '1';
+    if (last != '0' && last != '1') {
+        return false;
+    }
+
+    constexpr size_t kCellPrefixLength = 5; // "cell_"
+    if (name.rfind("cell_", 0) == 0) {
+        return name.size() > kCellPrefixLength + 1;
+    }
+
+    // PAVAK initializer IDs are numeric (for example 2 -> 20/21).  Keep
+    // the same lineage semantics as prefixed IDs.  Mature initial numeric
+    // cells are distinguished by cellFirstSeenFrame at each call site.
+    return std::all_of(name.begin(), name.end(), [](char ch) {
+        return ch >= '0' && ch <= '9';
+    });
 }
 
 static std::string splitDaughterSiblingName(const std::string &name)
@@ -2738,18 +3285,39 @@ static int applySignalCenterRescueBeforePca(
     int displayFrame,
     std::unordered_map<std::string, cv::Point3f> *rescuedAnchors = nullptr,
     std::unordered_map<std::string, StaleSignalCenterRescueFailure>
-        *staleDaughterFailures = nullptr)
+        *staleDaughterFailures = nullptr,
+    std::unordered_map<std::uint64_t, std::string>
+        *rescuedCenterOwners = nullptr,
+    std::unordered_set<std::string> *backgroundDropHoldOnly = nullptr)
 {
     const auto &simulation = config.simulation;
-    if (!simulation.signal_center_rescue_enabled || frame.getRealFrame().empty()) {
+    const bool legacySignalCenterRescue =
+        simulation.signal_center_rescue_enabled;
+    const bool cellUniverse4BackgroundDropRescue =
+        simulation.celluniverse4_enabled &&
+        config.candidateBatch.backgroundDropReattachEnabled;
+    const bool cellUniverse4BackgroundDropHold =
+        cellUniverse4BackgroundDropRescue &&
+        config.candidateBatch.backgroundDropHoldIfNoSafeCenter &&
+        rescuedAnchors != nullptr &&
+        backgroundDropHoldOnly != nullptr;
+    if ((!legacySignalCenterRescue &&
+         !cellUniverse4BackgroundDropRescue) ||
+        frame.getRealFrame().empty()) {
         return 0;
     }
 
     const std::vector<Frame::SignalCenter> &centers = frame.getSignalCenters();
     if (centers.empty()) {
         std::cout << "[Signal Center Rescue] frame " << displayFrame
-                  << " enabled=1 centers=0 action=skip\n";
-        return 0;
+                  << " enabled=1 centers=0 action="
+                  << (cellUniverse4BackgroundDropHold
+                          ? "inspect_for_background_hold"
+                          : "skip")
+                  << '\n';
+        if (!cellUniverse4BackgroundDropHold) {
+            return 0;
+        }
     }
 
     const float bgDelta =
@@ -2768,27 +3336,83 @@ static int applySignalCenterRescueBeforePca(
         int rejectedBySiblingHalfspace = 0;
         bool recentSplitDaughterProbe = false;
         int splitDaughterAge = -1;
+        bool cellUniverse4BackgroundDrop = false;
+        cell_refit_guards::BackgroundDropDecision backgroundDrop;
         SignalCenterRescueCandidate match;
     };
 
     std::vector<RescueProbe> probes;
     const bool globalAssignment =
         simulation.signal_center_rescue_global_assignment_enabled;
+    auto recordBackgroundDropHold =
+        [&](const std::string &name,
+            const cv::Point3f &position,
+            const char *reason) {
+            if (!cellUniverse4BackgroundDropHold) return;
+            (*rescuedAnchors)[name] = position;
+            backgroundDropHoldOnly->insert(name);
+            std::cout << "[CellUniverse4 Background Drop Hold] frame="
+                      << displayFrame
+                      << " cell=" << name
+                      << " pos=(" << position.x << "," << position.y << ","
+                      << position.z << ")"
+                      << " reason=" << reason
+                      << " action=preserve_last_trusted_model_for_frame"
+                      << std::endl;
+        };
 
     for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
         Ellipsoid &cell = frame.cells[ci];
         const std::string &name = cell.getName();
+        // The CU4 pre-perturb pass has already made the recovery decision for
+        // these cells.  Do not reconsider them in the later pre-PCA call: a
+        // one-frame hold must not be cleared merely because another cell moved
+        // during CandidateBatch, and a successful rescue must not be moved a
+        // second time in the same frame.
+        if (cellUniverse4BackgroundDropRescue && rescuedAnchors != nullptr &&
+            rescuedAnchors->count(name) > 0) {
+            std::cout << "[CellUniverse4 Background Drop Protected Skip] frame="
+                      << displayFrame
+                      << " cell=" << name
+                      << " action=preserve_pre_perturb_decision_for_frame"
+                      << std::endl;
+            continue;
+        }
         auto snapIt = previousSnapshots.find(name);
         if (snapIt == previousSnapshots.end() || !snapIt->second.valid) {
             continue;
         }
 
         const cv::Point3f oldPos(cell.getX(), cell.getY(), cell.getZ());
-        const float background = frame.backgroundAt(oldPos);
+        const float background = frame.foregroundReferenceAt(oldPos);
         const auto stats = cell.measureBrightnessStats(frame.getRealFrame());
         const bool bodyLooksBackground =
+            legacySignalCenterRescue &&
             stats.first <= background + bgDelta &&
             stats.second <= maxStddev;
+        bool cellUniverse4BackgroundDrop = false;
+        cell_refit_guards::BackgroundDropDecision backgroundDrop;
+        if (cellUniverse4BackgroundDropRescue && !cell.isTrash()) {
+            const CellRasterSupportStats rasterSupport =
+                measureCellRasterSupport(frame, cell);
+            const float observedTopMean = cell.measureMeanBrightness(
+                frame.getRealFrame(),
+                std::clamp(
+                    config.candidateBatch.backgroundDropObservedTopFraction,
+                    1.0e-3f,
+                    1.0f));
+            if (rasterSupport.valid) {
+                backgroundDrop = cell_refit_guards::detectBackgroundDrop(
+                    observedTopMean,
+                    rasterSupport.meanBackground,
+                    cell.getBrightness(),
+                    config.candidateBatch.backgroundDropMinModelContrast,
+                    config.candidateBatch
+                        .backgroundDropMaxObservedModelContrastRatio);
+                cellUniverse4BackgroundDrop =
+                    backgroundDrop.valid && backgroundDrop.dropped;
+            }
+        }
 
         std::string siblingName;
         cv::Point3f siblingHalfspaceMidpoint;
@@ -2796,12 +3420,28 @@ static int applySignalCenterRescueBeforePca(
         const cv::Point3f *halfspaceMidpointPtr = nullptr;
         const cv::Point3f *halfspaceDirectionPtr = nullptr;
         int rejectedBySiblingHalfspace = 0;
-        if (config.simulation.celluniverse2_enabled && !cell.isTrash()) {
+        const bool allowCellUniverse4SiblingHalfspace =
+            cellUniverse4BackgroundDropRescue &&
+            config.candidateBatch.backgroundDropSiblingHalfspaceEnabled &&
+            !cell.isTrash();
+        if ((config.simulation.celluniverse2_enabled ||
+             allowCellUniverse4SiblingHalfspace) &&
+            !cell.isTrash()) {
             siblingName = splitDaughterSiblingName(name);
             auto siblingSnapIt = previousSnapshots.find(siblingName);
+            const auto thisSeenIt = cellFirstSeenFrame.find(name);
+            const auto siblingSeenIt = cellFirstSeenFrame.find(siblingName);
+            const bool explicitCellUniverse4SiblingPair =
+                allowCellUniverse4SiblingHalfspace &&
+                thisSeenIt != cellFirstSeenFrame.end() &&
+                siblingSeenIt != cellFirstSeenFrame.end() &&
+                thisSeenIt->second == siblingSeenIt->second &&
+                displayFrame > thisSeenIt->second;
             if (!siblingName.empty() &&
                 siblingSnapIt != previousSnapshots.end() &&
-                siblingSnapIt->second.valid) {
+                siblingSnapIt->second.valid &&
+                (config.simulation.celluniverse2_enabled ||
+                 explicitCellUniverse4SiblingPair)) {
                 const cv::Point3f thisPreviousPos = snapIt->second.position;
                 const cv::Point3f siblingPreviousPos =
                     siblingSnapIt->second.position;
@@ -2837,29 +3477,39 @@ static int applySignalCenterRescueBeforePca(
             }
         }
 
-        if (!bodyLooksBackground && !recentSplitDaughterProbe) {
+        if (!bodyLooksBackground && !recentSplitDaughterProbe &&
+            !cellUniverse4BackgroundDrop) {
             continue;
         }
 
         const bool daughterHalfspaceProbe =
             (recentSplitDaughterProbe ||
-             (bodyLooksBackground &&
-              config.simulation.celluniverse2_enabled &&
+             ((bodyLooksBackground || cellUniverse4BackgroundDrop) &&
+              (config.simulation.celluniverse2_enabled ||
+               allowCellUniverse4SiblingHalfspace) &&
               !cell.isTrash() &&
               halfspaceMidpointPtr != nullptr &&
               halfspaceDirectionPtr != nullptr));
         const float minDistanceOverride =
-            daughterHalfspaceProbe ? 0.0f : -1.0f;
+            (daughterHalfspaceProbe || cellUniverse4BackgroundDrop)
+                ? 0.0f
+                : -1.0f;
         const float maxDistanceOverride =
-            daughterHalfspaceProbe
+            (daughterHalfspaceProbe && !cellUniverse4BackgroundDrop)
                 ? std::max(
                       0.0f,
                       config.simulation
                           .signal_center_rescue_split_daughter_max_distance_body_units)
-                : -1.0f;
+                : (cellUniverse4BackgroundDrop
+                       ? std::max(
+                             0.0f,
+                             simulation
+                                 .signal_center_rescue_max_distance_body_units)
+                       : -1.0f);
 
         const bool relaxRescueSizeShape =
-            daughterHalfspaceProbe && recentSplitDaughterProbe;
+            (daughterHalfspaceProbe && recentSplitDaughterProbe) ||
+            cellUniverse4BackgroundDrop;
         std::vector<SignalCenterRescueCandidate> candidates =
             findSignalCenterRescueCandidates(cell,
                                              centers,
@@ -2872,6 +3522,10 @@ static int applySignalCenterRescueBeforePca(
                                              maxDistanceOverride,
                                              relaxRescueSizeShape);
         if (candidates.empty()) {
+            if (cellUniverse4BackgroundDrop) {
+                recordBackgroundDropHold(
+                    name, oldPos, "no_compatible_center");
+            }
             if (staleDaughterFailures != nullptr &&
                 bodyLooksBackground &&
                 config.simulation.celluniverse2_enabled &&
@@ -2887,8 +3541,11 @@ static int applySignalCenterRescueBeforePca(
             std::cout << "[Signal Center Rescue] frame " << displayFrame
                       << " cell=" << name
                       << " trigger="
-                      << (recentSplitDaughterProbe ? "recent_split_daughter"
-                                                   : "background_body")
+                      << (cellUniverse4BackgroundDrop
+                              ? "celluniverse4_background_drop"
+                              : (recentSplitDaughterProbe
+                                     ? "recent_split_daughter"
+                                     : "background_body"))
                       << " splitDaughterAge=" << splitDaughterAge
                       << " bodyMean=" << stats.first
                       << " bodyStd=" << stats.second
@@ -3062,12 +3719,27 @@ static int applySignalCenterRescueBeforePca(
                     config.prob.celluniverse2_rescue_probe_score_halfspace_move_units_weight * probeMoveUnits +
                     probeDistanceWeight * candidate.distanceUnits;
             }
+            // Keep the initializer-confirmed reference fixed for model/support
+            // comparisons, but rescue a CU4 background drop against the
+            // background currently rendered at the candidate position.
+            candidate.probeBackground = cellUniverse4BackgroundDrop
+                ? frame.backgroundAt(probePos)
+                : frame.foregroundReferenceAt(probePos);
+            candidate.minimumProbeMean = std::max(
+                candidate.probeBackground +
+                    config.prob.celluniverse2_rescue_background_mean_margin,
+                candidate.probeBackground +
+                    config.prob.celluniverse2_rescue_background_delta_scale *
+                        bgDelta);
             std::cout << "[Signal Center Rescue Candidate] frame "
                       << displayFrame
                       << " cell=" << name
                       << " trigger="
-                      << (recentSplitDaughterProbe ? "recent_split_daughter"
-                                                   : "background_body")
+                      << (cellUniverse4BackgroundDrop
+                              ? "celluniverse4_background_drop"
+                              : (recentSplitDaughterProbe
+                                     ? "recent_split_daughter"
+                                     : "background_body"))
                       << " splitDaughterAge=" << splitDaughterAge
                       << " rank=" << probeIdx
                       << " centerIdx=" << candidate.centerIndex
@@ -3079,14 +3751,50 @@ static int applySignalCenterRescueBeforePca(
                       << " probeStd=" << candidate.probeStddev
                       << " probeMove=" << candidate.probeMove
                       << " probeScore=" << candidate.probeScore
+                      << " probeBackground=" << candidate.probeBackground
+                      << " minProbeMean=" << candidate.minimumProbeMean
                       << std::endl;
-            if (!match.valid || candidate.probeScore < match.probeScore) {
+            if (cellUniverse4BackgroundDrop &&
+                !cell_refit_guards::acceptBackgroundDropProbe(
+                    true,
+                    candidate.probeMean,
+                    candidate.minimumProbeMean,
+                    candidate.probeScore,
+                    config.prob
+                        .celluniverse2_rescue_background_max_probe_score)) {
+                std::cout
+                    << "[Signal Center Rescue Candidate Reject] frame "
+                    << displayFrame
+                    << " cell=" << name
+                    << " rank=" << probeIdx
+                    << " centerIdx=" << candidate.centerIndex
+                    << " reason=probe_below_local_background_signal_gate"
+                    << " probeMean=" << candidate.probeMean
+                    << " probeBackground=" << candidate.probeBackground
+                    << " minProbeMean=" << candidate.minimumProbeMean
+                    << std::endl;
+                continue;
+            }
+            // CU4 background-drop recovery follows the requested geometric
+            // policy: after rejecting occupied, invalid, or locally dim
+            // probes, attach to the nearest viable bright center.  Legacy
+            // rescue paths retain their probe-score ranking.
+            const bool preferCandidate = cellUniverse4BackgroundDrop
+                ? (!match.valid || candidate.distance < match.distance ||
+                   (candidate.distance == match.distance &&
+                    candidate.centerIndex < match.centerIndex))
+                : (!match.valid || candidate.probeScore < match.probeScore);
+            if (preferCandidate) {
                 match = candidate;
             }
         }
         cell = originalCell;
 
         if (!match.valid) {
+            if (cellUniverse4BackgroundDrop) {
+                recordBackgroundDropHold(
+                    name, oldPos, "no_viable_bright_probe_winner");
+            }
             if (staleDaughterFailures != nullptr &&
                 bodyLooksBackground &&
                 config.simulation.celluniverse2_enabled &&
@@ -3146,24 +3854,51 @@ static int applySignalCenterRescueBeforePca(
                 continue;
             }
         }
-        if (bodyLooksBackground && !recentSplitDaughterProbe) {
+        if ((bodyLooksBackground || cellUniverse4BackgroundDrop) &&
+            !recentSplitDaughterProbe) {
             const float minBackgroundRescueMean =
-                std::max(background + config.prob.celluniverse2_rescue_background_mean_margin,
-                         background + config.prob.celluniverse2_rescue_background_delta_scale * bgDelta);
+                cellUniverse4BackgroundDrop
+                    ? match.minimumProbeMean
+                    : std::max(
+                          background +
+                              config.prob
+                                  .celluniverse2_rescue_background_mean_margin,
+                          background +
+                              config.prob
+                                  .celluniverse2_rescue_background_delta_scale *
+                                  bgDelta);
             const float maxBackgroundProbeScore =
                 config.prob.celluniverse2_rescue_background_max_probe_score;
-            if (match.probeMean < minBackgroundRescueMean ||
-                match.probeScore > maxBackgroundProbeScore) {
+            // CU4 has already confirmed that the rendered body sits on
+            // background and deliberately chooses the nearest compatible,
+            // unoccupied center. Its measured brightness is the safety gate;
+            // the legacy distance-weighted composite score must not veto that
+            // nearest-center policy.
+            const bool probeAccepted =
+                cell_refit_guards::acceptBackgroundDropProbe(
+                    cellUniverse4BackgroundDrop,
+                    match.probeMean,
+                    minBackgroundRescueMean,
+                    match.probeScore,
+                    maxBackgroundProbeScore);
+            if (!probeAccepted) {
+                if (cellUniverse4BackgroundDrop) {
+                    recordBackgroundDropHold(
+                        name, oldPos, "nearest_center_failed_signal_gate");
+                }
                 std::cout << "[Signal Center Rescue] frame " << displayFrame
                           << " cell=" << name
                           << " centerIdx=" << match.centerIndex
                           << " bodyMean=" << stats.first
                           << " bodyStd=" << stats.second
                           << " background=" << background
+                          << " probeBackground=" << match.probeBackground
                           << " probeMean=" << match.probeMean
                           << " probeScore=" << match.probeScore
                           << " minProbeMean=" << minBackgroundRescueMean
                           << " maxProbeScore=" << maxBackgroundProbeScore
+                          << " probeScoreGate="
+                          << (cellUniverse4BackgroundDrop ? 0 : 1)
                           << " sizeRatio=" << match.sizeRatio
                           << " shapeRatio=" << match.shapeRatio
                           << " action=background_rescue_signal_gate\n";
@@ -3183,6 +3918,8 @@ static int applySignalCenterRescueBeforePca(
         probe.rejectedBySiblingHalfspace = rejectedBySiblingHalfspace;
         probe.recentSplitDaughterProbe = recentSplitDaughterProbe;
         probe.splitDaughterAge = splitDaughterAge;
+        probe.cellUniverse4BackgroundDrop = cellUniverse4BackgroundDrop;
+        probe.backgroundDrop = backgroundDrop;
         probe.match = match;
         probes.push_back(probe);
     }
@@ -3190,14 +3927,40 @@ static int applySignalCenterRescueBeforePca(
     if (globalAssignment) {
         std::sort(probes.begin(), probes.end(),
                   [](const RescueProbe &a, const RescueProbe &b) {
-                      if (a.match.centerIndex == b.match.centerIndex &&
-                          a.isTrash != b.isTrash) {
+                      if (a.match.centerIndex != b.match.centerIndex) {
+                          return a.match.centerIndex < b.match.centerIndex;
+                      }
+                      if (a.isTrash != b.isTrash) {
                           return a.isTrash;
                       }
-                      if (a.match.probeScore != b.match.probeScore) {
-                          return a.match.probeScore < b.match.probeScore;
+                      if (a.cellUniverse4BackgroundDrop &&
+                          b.cellUniverse4BackgroundDrop) {
+                          return cell_refit_guards::preferNearestCenterClaim(
+                              a.match.distance,
+                              a.cellIndex,
+                              b.match.distance,
+                              b.cellIndex);
                       }
-                      return a.match.score < b.match.score;
+                      const double aProbeScore =
+                          cell_refit_guards::finiteRankingValue(
+                              a.match.probeScore);
+                      const double bProbeScore =
+                          cell_refit_guards::finiteRankingValue(
+                              b.match.probeScore);
+                      if (aProbeScore != bProbeScore) {
+                          return aProbeScore < bProbeScore;
+                      }
+                      const double aHeuristicScore =
+                          cell_refit_guards::finiteRankingValue(a.match.score);
+                      const double bHeuristicScore =
+                          cell_refit_guards::finiteRankingValue(b.match.score);
+                      if (aHeuristicScore != bHeuristicScore) {
+                          return aHeuristicScore < bHeuristicScore;
+                      }
+                      if (a.name != b.name) {
+                          return a.name < b.name;
+                      }
+                      return a.cellIndex < b.cellIndex;
                   });
     }
 
@@ -3223,6 +3986,10 @@ static int applySignalCenterRescueBeforePca(
         if (!probe.isTrash &&
             probe.match.centerIndex < trashPreferredCenters.size() &&
             trashPreferredCenters[probe.match.centerIndex]) {
+            if (probe.cellUniverse4BackgroundDrop) {
+                recordBackgroundDropHold(
+                    probe.name, probe.oldPos, "center_reserved_for_trash_probe");
+            }
             std::cout << "[Signal Center Rescue] frame " << displayFrame
                       << " cell=" << probe.name
                       << " centerIdx=" << probe.match.centerIndex
@@ -3232,6 +3999,10 @@ static int applySignalCenterRescueBeforePca(
         }
         if (probe.match.centerIndex < claimedCenters.size() &&
             claimedCenters[probe.match.centerIndex]) {
+            if (probe.cellUniverse4BackgroundDrop) {
+                recordBackgroundDropHold(
+                    probe.name, probe.oldPos, "center_claimed_by_better_probe");
+            }
             std::cout << "[Signal Center Rescue] frame " << displayFrame
                       << " cell=" << probe.name
                       << " centerIdx=" << probe.match.centerIndex
@@ -3248,21 +4019,37 @@ static int applySignalCenterRescueBeforePca(
         cell.setPosition(probe.match.position.x,
                          probe.match.position.y,
                          probe.match.position.z);
+        if (backgroundDropHoldOnly != nullptr) {
+            backgroundDropHoldOnly->erase(probe.name);
+        }
         if (rescuedAnchors != nullptr && !probe.isTrash) {
             (*rescuedAnchors)[probe.name] = probe.match.position;
+        }
+        if (rescuedCenterOwners != nullptr && !probe.isTrash &&
+            probe.match.centerIndex < centers.size()) {
+            (*rescuedCenterOwners)[
+                centers[probe.match.centerIndex].stableId] = probe.name;
         }
         ++rescued;
         std::cout << "[Signal Center Rescue] frame " << displayFrame
                   << " cell=" << probe.name
                   << " kind=" << (probe.isTrash ? "trash" : "cell")
                   << " trigger="
-                  << (probe.recentSplitDaughterProbe
-                          ? "recent_split_daughter"
-                          : "background_body")
+                  << (probe.cellUniverse4BackgroundDrop
+                          ? "celluniverse4_background_drop"
+                          : (probe.recentSplitDaughterProbe
+                                 ? "recent_split_daughter"
+                                 : "background_body"))
                   << " splitDaughterAge=" << probe.splitDaughterAge
                   << " bodyMean=" << probe.stats.first
                   << " bodyStd=" << probe.stats.second
                   << " background=" << probe.background
+                  << " observedContrast="
+                  << probe.backgroundDrop.observedContrast
+                  << " modelContrast="
+                  << probe.backgroundDrop.modelContrast
+                  << " observedModelContrastRatio="
+                  << probe.backgroundDrop.observedModelContrastRatio
                   << " from=(" << probe.oldPos.x << "," << probe.oldPos.y << "," << probe.oldPos.z << ")"
                   << " to=(" << probe.match.position.x << "," << probe.match.position.y << "," << probe.match.position.z << ")"
                   << " centerIdx=" << probe.match.centerIndex
@@ -3378,13 +4165,28 @@ static RodTipSphereSplitProposalResult makeRodTipSphereSplitProposal(
     result.longRadius = longR;
     result.midRadius = midR;
     result.shortRadius = shortR;
-    if (elong < config.prob.pca_bridge_elongation_ratio) {
+    const bool cellUniverse4RodRecovery =
+        config.simulation.celluniverse4_enabled &&
+        config.prob.celluniverse4_rod_tip_split_recovery_enabled;
+    const float minimumElongation = cellUniverse4RodRecovery
+        ? std::max(1.0f,
+                   config.prob.celluniverse4_rod_tip_min_long_short_ratio)
+        : config.prob.pca_bridge_elongation_ratio;
+    if (elong < minimumElongation) {
         result.rejectReason = "not_rod_like";
         return result;
     }
 
-    const float minLongMidRatio = std::max(0.0f, config.prob.pca_bridge_min_long_mid_ratio);
-    const float maxMidShortRatio = std::max(0.0f, config.prob.pca_bridge_max_mid_short_ratio);
+    const float minLongMidRatio = std::max(
+        0.0f,
+        cellUniverse4RodRecovery
+            ? config.prob.celluniverse4_rod_tip_min_long_mid_ratio
+            : config.prob.pca_bridge_min_long_mid_ratio);
+    const float maxMidShortRatio = std::max(
+        0.0f,
+        cellUniverse4RodRecovery
+            ? config.prob.celluniverse4_rod_tip_max_mid_short_ratio
+            : config.prob.pca_bridge_max_mid_short_ratio);
     result.longMidRatio = longR / midR;
     result.midShortRatio = midR / shortR;
     const bool lowLongMidFlatRodRescue =
@@ -3436,15 +4238,35 @@ static RodTipSphereSplitProposalResult makeRodTipSphereSplitProposal(
         return result;
     }
 
-    // Place one daughter at the rod center and one same-radius sphere just
-    // outside one rod tip. Try both tip sides because no two-peak signal was
-    // available to identify which side contains the off-rod daughter.
-    const float tipDistance = longR + sphereRadius;
-    result.proposal.d1Pos = center;
-    result.proposal.d2Pos = center + tipDistance * longAxis;
-    result.proposal.hasAlternateSeedPair = true;
-    result.proposal.altD1Pos = center;
-    result.proposal.altD2Pos = center - tipDistance * longAxis;
+    float tipDistance = longR + sphereRadius;
+    if (cellUniverse4RodRecovery) {
+        // A rod failure means one model is spanning two bodies. Seed a
+        // balanced daughter pair inside the two ends of that model. The
+        // alternate pair is closer to the midpoint; the normal CU4 candidate
+        // family expands/refines both pairs independently before validation.
+        const float inset = std::max(
+            0.0f,
+            config.prob
+                .celluniverse4_rod_tip_seed_inset_sphere_radius_fraction) *
+            sphereRadius;
+        tipDistance = std::max(0.25f * longR, longR - inset);
+        const float alternateDistance = tipDistance * std::clamp(
+            config.prob.celluniverse4_rod_tip_alt_seed_distance_fraction,
+            0.25f,
+            1.0f);
+        result.proposal.d1Pos = center - tipDistance * longAxis;
+        result.proposal.d2Pos = center + tipDistance * longAxis;
+        result.proposal.hasAlternateSeedPair = true;
+        result.proposal.altD1Pos = center - alternateDistance * longAxis;
+        result.proposal.altD2Pos = center + alternateDistance * longAxis;
+    } else {
+        // Legacy CU2 fallback: the body at the center plus an off-tip sphere.
+        result.proposal.d1Pos = center;
+        result.proposal.d2Pos = center + tipDistance * longAxis;
+        result.proposal.hasAlternateSeedPair = true;
+        result.proposal.altD1Pos = center;
+        result.proposal.altD2Pos = center - tipDistance * longAxis;
+    }
     result.proposal.elongation = elong;
     result.proposal.parentShapeElongation = elong;
     result.proposal.elongatedParentRescued = true;
@@ -3460,14 +4282,649 @@ static RodTipSphereSplitProposalResult makeRodTipSphereSplitProposal(
     return result;
 }
 
+// Find an image-grounded split pair without relying on the global center map.
+// This is intentionally a split-proposal detector only: it must never change
+// continuation/local-search centers.  For an eligible CU4 parent the result is
+// authoritative when it could inspect the current frame; one surviving
+// component is explicit evidence not to split on that frame.
+static SignalCenterSplitProposalResult findLocalComponentSplitProposal(
+    const Frame &frame,
+    size_t cellIndex,
+    const PreviousFrameSnapshot &snapshot,
+    const BaseConfig &config,
+    int displayFrame,
+    bool *outEvaluated)
+{
+    if (outEvaluated != nullptr) *outEvaluated = false;
+    SignalCenterSplitProposalResult result;
+    if (!config.simulation.celluniverse4_enabled ||
+        !config.candidateBatch.localComponentSplitCentersEnabled ||
+        cellIndex >= frame.cells.size() || !snapshot.valid) {
+        result.rejectReason = "disabled";
+        return result;
+    }
+
+    const Ellipsoid &parent = frame.cells[cellIndex];
+    if (parent.isTrash() || frame.getRealFrame().empty()) {
+        result.rejectReason = "missing_parent_or_frame";
+        return result;
+    }
+    const float parentShape = std::max(
+        parent.shapeElongation(), snapshot.shapeElongation);
+    result.parentShape = parentShape;
+    if (parentShape < config.prob.signal_center_split_min_parent_elongation) {
+        result.rejectReason = "not_flat_enough";
+        return result;
+    }
+
+    const float parentMaxR = std::max({
+        snapshot.aRadius, snapshot.bRadius, snapshot.cRadius,
+        parent.getARadius(), parent.getBRadius(), parent.getCRadius()});
+    const float sphereRadius =
+        config.candidateBatch.localComponentSplitSphereRadiusScale * parentMaxR;
+    const auto &volume = frame.getRealFrame();
+    if (!(std::isfinite(sphereRadius) && sphereRadius > 1.0e-3f) ||
+        volume.empty() || volume.front().empty()) {
+        result.rejectReason = "bad_parent_radius_or_volume";
+        return result;
+    }
+    const cv::Point3f anchor(parent.getX(), parent.getY(), parent.getZ());
+    const int zMin = std::max(0, static_cast<int>(std::floor(anchor.z - sphereRadius)));
+    const int zMax = std::min(static_cast<int>(volume.size()) - 1,
+                              static_cast<int>(std::ceil(anchor.z + sphereRadius)));
+    const int yMin = std::max(0, static_cast<int>(std::floor(anchor.y - sphereRadius)));
+    const int yMax = std::min(volume.front().rows - 1,
+                              static_cast<int>(std::ceil(anchor.y + sphereRadius)));
+    const int xMin = std::max(0, static_cast<int>(std::floor(anchor.x - sphereRadius)));
+    const int xMax = std::min(volume.front().cols - 1,
+                              static_cast<int>(std::ceil(anchor.x + sphereRadius)));
+    if (zMin > zMax || yMin > yMax || xMin > xMax) {
+        result.rejectReason = "empty_local_sphere";
+        return result;
+    }
+
+    const int nz = zMax - zMin + 1;
+    const int ny = yMax - yMin + 1;
+    const int nx = xMax - xMin + 1;
+    const size_t planeSize = static_cast<size_t>(ny) * static_cast<size_t>(nx);
+    const size_t voxelCount = static_cast<size_t>(nz) * planeSize;
+    std::vector<int> labels(voxelCount, -2); // -2 out/below, -1 eligible
+    const auto flatIndex = [ny, nx](int z, int y, int x) -> size_t {
+        return (static_cast<size_t>(z) * static_cast<size_t>(ny) +
+                static_cast<size_t>(y)) * static_cast<size_t>(nx) +
+               static_cast<size_t>(x);
+    };
+    const auto readValue = [](const cv::Mat &slice, int y, int x) -> float {
+        switch (slice.depth()) {
+        case CV_32F: return slice.at<float>(y, x);
+        case CV_64F: return static_cast<float>(slice.at<double>(y, x));
+        case CV_16U: return static_cast<float>(slice.at<unsigned short>(y, x));
+        case CV_8U: return static_cast<float>(slice.at<unsigned char>(y, x));
+        default: return std::numeric_limits<float>::quiet_NaN();
+        }
+    };
+    const float threshold = snapshot.brightness;
+    const float radiusSq = sphereRadius * sphereRadius;
+    for (int z = 0; z < nz; ++z) {
+        const cv::Mat &slice = volume[static_cast<size_t>(z + zMin)];
+        for (int y = 0; y < ny; ++y) {
+            for (int x = 0; x < nx; ++x) {
+                const cv::Point3f point(static_cast<float>(x + xMin),
+                                        static_cast<float>(y + yMin),
+                                        static_cast<float>(z + zMin));
+                const cv::Point3f delta = point - anchor;
+                if (delta.dot(delta) > radiusSq) continue;
+                const float value = readValue(slice, y + yMin, x + xMin);
+                if (std::isfinite(value) && value >= threshold) {
+                    labels[flatIndex(z, y, x)] = -1;
+                }
+            }
+        }
+    }
+
+    struct Component {
+        int voxels = 0;
+        double weight = 0.0;
+        cv::Point3d weightedSum{0.0, 0.0, 0.0};
+        cv::Point3f center{0.0f, 0.0f, 0.0f};
+        bool neighborOwned = false;
+    };
+    std::vector<Component> components;
+    std::vector<size_t> worklist;
+    const int connectivity = config.candidateBatch.localComponentSplitConnectivityRadius;
+    for (int seedZ = 0; seedZ < nz; ++seedZ) {
+        for (int seedY = 0; seedY < ny; ++seedY) {
+            for (int seedX = 0; seedX < nx; ++seedX) {
+                const size_t seed = flatIndex(seedZ, seedY, seedX);
+                if (labels[seed] != -1) continue;
+                const int label = static_cast<int>(components.size());
+                components.push_back(Component{});
+                labels[seed] = label;
+                worklist.clear();
+                worklist.push_back(seed);
+                for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
+                    const size_t flat = worklist[cursor];
+                    const int z = static_cast<int>(flat / planeSize);
+                    const size_t inPlane = flat % planeSize;
+                    const int y = static_cast<int>(inPlane / static_cast<size_t>(nx));
+                    const int x = static_cast<int>(inPlane % static_cast<size_t>(nx));
+                    Component &component = components[static_cast<size_t>(label)];
+                    const float value = readValue(volume[static_cast<size_t>(z + zMin)],
+                                                  y + yMin, x + xMin);
+                    const double weight = std::max(1.0e-6, static_cast<double>(value));
+                    ++component.voxels;
+                    component.weight += weight;
+                    component.weightedSum += cv::Point3d(
+                        weight * static_cast<double>(x + xMin),
+                        weight * static_cast<double>(y + yMin),
+                        weight * static_cast<double>(z + zMin));
+                    for (int dz = -connectivity; dz <= connectivity; ++dz) {
+                        const int nextZ = z + dz;
+                        if (nextZ < 0 || nextZ >= nz) continue;
+                        for (int dy = -connectivity; dy <= connectivity; ++dy) {
+                            const int nextY = y + dy;
+                            if (nextY < 0 || nextY >= ny) continue;
+                            for (int dx = -connectivity; dx <= connectivity; ++dx) {
+                                if (dx == 0 && dy == 0 && dz == 0) continue;
+                                const int nextX = x + dx;
+                                if (nextX < 0 || nextX >= nx) continue;
+                                const size_t next = flatIndex(nextZ, nextY, nextX);
+                                if (labels[next] != -1) continue;
+                                labels[next] = label;
+                                worklist.push_back(next);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (components.empty()) {
+        result.rejectReason = "local_component_no_threshold_evidence";
+        return result;
+    }
+    if (outEvaluated != nullptr) *outEvaluated = true;
+
+    const int minVoxels = std::max(
+        1, config.candidateBatch.localComponentSplitMinComponentVoxels);
+    std::vector<size_t> usable;
+    for (size_t index = 0; index < components.size(); ++index) {
+        Component &component = components[index];
+        if (component.voxels < minVoxels || component.weight <= 0.0) continue;
+        component.center = cv::Point3f(
+            static_cast<float>(component.weightedSum.x / component.weight),
+            static_cast<float>(component.weightedSum.y / component.weight),
+            static_cast<float>(component.weightedSum.z / component.weight));
+        if (config.candidateBatch.localComponentSplitNeighborOwnershipFilterEnabled) {
+            for (size_t oi = 0; oi < frame.cells.size(); ++oi) {
+                if (oi == cellIndex || frame.cells[oi].isTrash()) continue;
+                if (frame.cells[oi].isPointInsideEllipsoid(
+                        component.center,
+                        config.candidateBatch.localComponentSplitNeighborOwnershipScale)) {
+                    component.neighborOwned = true;
+                    break;
+                }
+            }
+        }
+        if (!component.neighborOwned) usable.push_back(index);
+    }
+    std::cout << "[CU4 Local Component Split Components] frame="
+              << displayFrame << " cell=" << parent.getName()
+              << " threshold=" << threshold
+              << " sphereRadius=" << sphereRadius
+              << " total=" << components.size()
+              << " usable=" << usable.size();
+    for (size_t index = 0; index < components.size(); ++index) {
+        const Component &component = components[index];
+        std::cout << " component" << index << "={voxels="
+                  << component.voxels << ",center=(" << component.center.x
+                  << "," << component.center.y << "," << component.center.z
+                  << "),neighborOwned=" << (component.neighborOwned ? 1 : 0)
+                  << "}";
+    }
+    std::cout << std::endl;
+
+    int totalSupportVoxels = 0;
+    for (const Component &component : components) totalSupportVoxels += component.voxels;
+    const bool saturatedSparsePattern =
+        cell_refit_guards::isSaturatedSparseLocalEvidence(
+            threshold, config.candidateBatch.localComponentSplitSaturatedSparseMinThreshold,
+            totalSupportVoxels, static_cast<int>(usable.size()),
+            static_cast<int>(components.size()),
+            config.candidateBatch.localComponentSplitSaturatedSparseMaxTotalVoxels);
+    const bool saturatedSparseFallbackEnabled =
+        config.candidateBatch.localComponentSplitSaturatedSparseFallbackEnabled;
+    const bool saturatedSparseHybridEnabled =
+        config.candidateBatch.localComponentSplitSaturatedSparseHybridEnabled;
+    if (saturatedSparsePattern && saturatedSparseHybridEnabled) {
+        // A threshold at (or extremely close to) normalized saturation can
+        // leave one meaningful local residue and a few isolated voxels.  That
+        // is insufficient to veto the ordinary signal-center detector, but it
+        // can provide one fixed daughter seed when paired with one compact,
+        // current-frame signal center.  This is a narrow CU4-only path: its
+        // independent compact-pair gates do not alter any global-center gate.
+        const Component &localComponent = components[usable.front()];
+        const BoundingBox3D parentScope = frame.computeBboxAtPoint(
+            anchor, parentMaxR, config.prob.bbox_margin_scale);
+        const float minHybridSep =
+            config.candidateBatch
+                .localComponentSplitSaturatedSparseHybridMinSeparationRadiusScale *
+            parentMaxR;
+        const float maxHybridSep =
+            config.candidateBatch
+                .localComponentSplitSaturatedSparseHybridMaxSeparationRadiusScale *
+            parentMaxR;
+        const float maxHybridMidpoint =
+            config.candidateBatch
+                .localComponentSplitSaturatedSparseHybridMaxMidpointRadiusScale *
+            parentMaxR;
+        const float localSphereSq = sphereRadius * sphereRadius;
+        const auto signalCenterNeighborOwned = [&](const cv::Point3f &point) {
+            if (!config.candidateBatch
+                     .localComponentSplitSaturatedSparseHybridNeighborOwnershipFilterEnabled) {
+                return false;
+            }
+            for (size_t oi = 0; oi < frame.cells.size(); ++oi) {
+                if (oi == cellIndex || frame.cells[oi].isTrash()) continue;
+                if (frame.cells[oi].isPointInsideEllipsoid(
+                        point,
+                        config.candidateBatch
+                            .localComponentSplitSaturatedSparseHybridNeighborOwnershipScale)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const bool localNeighborOwned =
+            signalCenterNeighborOwned(localComponent.center);
+        if (localNeighborOwned) {
+            if (outEvaluated != nullptr) {
+                *outEvaluated = !saturatedSparseFallbackEnabled;
+            }
+            result.rejectReason =
+                "local_component_saturated_sparse_hybrid_local_neighbor_owned_gate";
+            std::cout << "[CU4 Saturated Sparse Hybrid] frame=" << displayFrame
+                      << " cell=" << parent.getName()
+                      << " action="
+                      << (saturatedSparseFallbackEnabled ? "fallback" : "veto")
+                      << " reason=" << result.rejectReason
+                      << " local=(" << localComponent.center.x << ","
+                      << localComponent.center.y << ","
+                      << localComponent.center.z << ")"
+                      << " localVoxels=" << localComponent.voxels
+                      << " ownershipScale="
+                      << config.candidateBatch
+                             .localComponentSplitSaturatedSparseHybridNeighborOwnershipScale
+                      << std::endl;
+            return result;
+        }
+
+        float bestHybridScore = -std::numeric_limits<float>::infinity();
+        std::uint64_t bestHybridStableId =
+            std::numeric_limits<std::uint64_t>::max();
+        cv::Point3f bestObservedSignalCenter{0.0f, 0.0f, 0.0f};
+        float bestObservedSeparation = 0.0f;
+        float bestObservedMidpointDistance = 0.0f;
+        const auto &signalCenters = frame.getSignalCenters();
+        for (size_t signalIndex = 0; signalIndex < signalCenters.size(); ++signalIndex) {
+            const Frame::SignalCenter &signal = signalCenters[signalIndex];
+            const cv::Point3f signalDelta = signal.position - anchor;
+            const bool insideParentScope =
+                parentScope.isValid() &&
+                pointInsideBbox(signal.position, parentScope) &&
+                signalDelta.dot(signalDelta) <= localSphereSq;
+            const bool neighborOwned =
+                insideParentScope && signalCenterNeighborOwned(signal.position);
+            const cv::Point3f pairDelta = signal.position - localComponent.center;
+            const float separation = static_cast<float>(cv::norm(pairDelta));
+            const cv::Point3f midpoint =
+                0.5f * (localComponent.center + signal.position);
+            const float midpointDistance =
+                static_cast<float>(cv::norm(midpoint - anchor));
+            const auto gate = cell_refit_guards::evaluateSaturatedSparseHybridPair(
+                saturatedSparseHybridEnabled, saturatedSparsePattern, insideParentScope,
+                neighborOwned, signal.boxes,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridMinSignalBoxes,
+                signal.brightness,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridMinSignalBrightness,
+                signal.confidence,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridMinSignalConfidence,
+                separation, minHybridSep, maxHybridSep, midpointDistance,
+                maxHybridMidpoint);
+            if (insideParentScope) ++result.candidatePairs;
+            std::cout << "[CU4 Saturated Sparse Hybrid] frame=" << displayFrame
+                      << " cell=" << parent.getName()
+                      << " action="
+                      << (gate == cell_refit_guards::SaturatedSparseHybridDecision::Accept
+                              ? "candidate" : "reject")
+                      << " reason="
+                      << cell_refit_guards::saturatedSparseHybridDecisionName(gate)
+                      << " local=(" << localComponent.center.x << ","
+                      << localComponent.center.y << ","
+                      << localComponent.center.z << ")"
+                      << " localVoxels=" << localComponent.voxels
+                      << " signalIdx=" << signalIndex
+                      << " signal=(" << signal.position.x << ","
+                      << signal.position.y << "," << signal.position.z << ")"
+                      << " insideScope=" << (insideParentScope ? 1 : 0)
+                      << " neighborOwned=" << (neighborOwned ? 1 : 0)
+                      << " boxes=" << signal.boxes
+                      << " brightness=" << signal.brightness
+                      << " confidence=" << signal.confidence
+                      << " observedSep=" << separation
+                      << " observedSepRange=[" << minHybridSep << "," << maxHybridSep << "]"
+                      << " observedMidpoint=" << midpointDistance
+                      << " midpointMax=" << maxHybridMidpoint
+                      << std::endl;
+            if (gate != cell_refit_guards::SaturatedSparseHybridDecision::Accept) {
+                continue;
+            }
+
+            const auto reflectedSeed =
+                cell_refit_guards::makeSaturatedSparseHybridReflectedSeed(
+                    {localComponent.center.x,
+                     localComponent.center.y,
+                     localComponent.center.z},
+                    {signal.position.x, signal.position.y, signal.position.z},
+                    config.candidateBatch
+                        .localComponentSplitSaturatedSparseHybridReflectionScale);
+            const cv::Point3f reflectedPosition(
+                reflectedSeed.position[0], reflectedSeed.position[1],
+                reflectedSeed.position[2]);
+            const cv::Point3f reflectedDelta = reflectedPosition - anchor;
+            const bool reflectedInsideParentScope =
+                reflectedSeed.valid && parentScope.isValid() &&
+                pointInsideBbox(reflectedPosition, parentScope) &&
+                reflectedDelta.dot(reflectedDelta) <= localSphereSq;
+            const bool reflectedNeighborOwned =
+                reflectedInsideParentScope &&
+                signalCenterNeighborOwned(reflectedPosition);
+            const auto reflectedGate =
+                cell_refit_guards::evaluateSaturatedSparseHybridGeneratedSeed(
+                    reflectedSeed.valid, reflectedInsideParentScope,
+                    reflectedNeighborOwned);
+            const float generatedSeparation = static_cast<float>(
+                cv::norm(reflectedPosition - localComponent.center));
+            const cv::Point3f generatedMidpoint =
+                0.5f * (localComponent.center + reflectedPosition);
+            const float generatedMidpointDistance = static_cast<float>(
+                cv::norm(generatedMidpoint - anchor));
+            std::cout << "[CU4 Saturated Sparse Hybrid Generated Seed] frame="
+                      << displayFrame << " cell=" << parent.getName()
+                      << " action="
+                      << (reflectedGate ==
+                                  cell_refit_guards::SaturatedSparseHybridGeneratedSeedDecision::Accept
+                              ? "candidate" : "reject")
+                      << " reason="
+                      << cell_refit_guards::saturatedSparseHybridGeneratedSeedDecisionName(
+                             reflectedGate)
+                      << " L=(" << localComponent.center.x << ","
+                      << localComponent.center.y << ","
+                      << localComponent.center.z << ")"
+                      << " G=(" << signal.position.x << ","
+                      << signal.position.y << "," << signal.position.z << ")"
+                      << " R=(" << reflectedPosition.x << ","
+                      << reflectedPosition.y << "," << reflectedPosition.z << ")"
+                      << " reflectionScale="
+                      << config.candidateBatch
+                             .localComponentSplitSaturatedSparseHybridReflectionScale
+                      << " observedSep=" << separation
+                      << " generatedSep=" << generatedSeparation
+                      << " generatedMidpoint=" << generatedMidpointDistance
+                      << " insideScope=" << (reflectedInsideParentScope ? 1 : 0)
+                      << " neighborOwned=" << (reflectedNeighborOwned ? 1 : 0)
+                      << std::endl;
+            if (reflectedGate !=
+                cell_refit_guards::SaturatedSparseHybridGeneratedSeedDecision::Accept) {
+                continue;
+            }
+
+            const float separationRatio = separation / std::max(1.0e-6f, parentMaxR);
+            const float score =
+                signal.brightness + signal.confidence +
+                0.05f * static_cast<float>(signal.boxes) -
+                midpointDistance / std::max(1.0e-6f, parentMaxR) -
+                std::abs(separationRatio - 0.75f);
+            const bool better = score > bestHybridScore + 1.0e-6f ||
+                (std::abs(score - bestHybridScore) <= 1.0e-6f &&
+                 signal.stableId < bestHybridStableId);
+            if (!better) continue;
+            bestHybridScore = score;
+            bestHybridStableId = signal.stableId;
+            bestObservedSignalCenter = signal.position;
+            bestObservedSeparation = separation;
+            bestObservedMidpointDistance = midpointDistance;
+            result.valid = true;
+            result.rejectReason = "ok";
+            result.centersInside = 2; // one local component plus one signal center
+            result.centerIndexA = signalIndex;
+            result.centerIndexB = signalIndex;
+            result.separation = generatedSeparation;
+            result.separationRatio =
+                generatedSeparation / std::max(1.0e-6f, parentMaxR);
+            result.midpointDistance = generatedMidpointDistance;
+            result.axisAlignment = 0.0f; // intentionally no local axis/straddle gate
+            result.score = score;
+            result.proposal.d1Pos = localComponent.center;
+            result.proposal.d2Pos = reflectedPosition;
+            result.proposal.elongation = score;
+            result.proposal.parentShapeElongation = parentShape;
+            result.proposal.elongatedParentRescued = true;
+            result.proposal.signalCenterScore = score;
+            result.proposal.signalCenterSeparationRatio = result.separationRatio;
+            result.proposal.signalCenterMidpointDistance = generatedMidpointDistance;
+            result.proposal.signalCenterAxisAlignment = 0.0f;
+            result.proposal.currentFrameLocalOnly = true;
+            result.proposal.trustedLocalComponentPair = true;
+            result.proposal.saturatedSparseHybridPair = true;
+            if (config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridCostOverrideEnabled) {
+                result.proposal.costImprovementThresholdOverride =
+                    config.candidateBatch
+                        .localComponentSplitSaturatedSparseHybridMinCostImprovement;
+            }
+            result.proposal.candidateIdA = -1;
+            result.proposal.candidateIdB = static_cast<int>(signalIndex);
+            result.proposal.gapStartBin = -7;
+            result.proposal.gapEndBin = -7;
+            result.proposal.leftPixelCount = localComponent.voxels;
+            result.proposal.rightPixelCount = std::max(1, signal.boxes);
+        }
+        if (result.valid) {
+            if (outEvaluated != nullptr) *outEvaluated = true;
+            std::cout << "[CU4 Saturated Sparse Hybrid] frame=" << displayFrame
+                      << " cell=" << parent.getName()
+                      << " action=propose reason=ok score=" << result.score
+                      << " local=(" << result.proposal.d1Pos.x << ","
+                      << result.proposal.d1Pos.y << ","
+                      << result.proposal.d1Pos.z << ")"
+                      << " observedSignal=(" << bestObservedSignalCenter.x << ","
+                      << bestObservedSignalCenter.y << ","
+                      << bestObservedSignalCenter.z << ")"
+                      << " reflected=(" << result.proposal.d2Pos.x << ","
+                      << result.proposal.d2Pos.y << ","
+                      << result.proposal.d2Pos.z << ")"
+                      << " observedSep=" << bestObservedSeparation
+                      << " observedMidpoint=" << bestObservedMidpointDistance
+                      << " generatedSep=" << result.separation
+                      << " generatedMidpoint=" << result.midpointDistance
+                      << std::endl;
+            return result;
+        }
+        if (outEvaluated != nullptr) {
+            *outEvaluated = !saturatedSparseFallbackEnabled;
+        }
+        result.rejectReason = saturatedSparseFallbackEnabled
+            ? "local_component_saturated_sparse_no_hybrid_pair"
+            : "local_component_saturated_sparse_hybrid_no_pair_veto";
+        std::cout << "[CU4 Saturated Sparse Hybrid] frame=" << displayFrame
+                  << " cell=" << parent.getName()
+                  << " action="
+                  << (saturatedSparseFallbackEnabled ? "fallback" : "veto")
+                  << " reason=" << result.rejectReason
+                  << " totalSupport=" << totalSupportVoxels
+                  << " rawComponents=" << components.size()
+                  << " usableComponents=" << usable.size()
+                  << std::endl;
+        return result;
+    }
+    if (saturatedSparsePattern && saturatedSparseFallbackEnabled) {
+        if (outEvaluated != nullptr) *outEvaluated = false;
+        result.rejectReason = "local_component_saturated_sparse_evidence";
+        std::cout << "[CU4 Saturated Sparse Hybrid] frame=" << displayFrame
+                  << " cell=" << parent.getName()
+                  << " action=fallback reason=" << result.rejectReason
+                  << " hybridEnabled=0"
+                  << " totalSupport=" << totalSupportVoxels
+                  << " rawComponents=" << components.size()
+                  << " usableComponents=" << usable.size()
+                  << std::endl;
+        return result;
+    }
+
+    // Threshold activity which does not survive the size/ownership filters is
+    // not sufficient current-frame evidence to veto the legacy detector.
+    if (usable.empty()) {
+        if (outEvaluated != nullptr) *outEvaluated = false;
+        result.rejectReason = "local_component_no_usable_evidence";
+        return result;
+    }
+
+    result.centersInside = static_cast<int>(usable.size());
+    if (usable.size() < 2) {
+        result.rejectReason = components.size() < 2
+            ? "local_component_too_few_components"
+            : "local_component_too_few_usable_components";
+        return result;
+    }
+
+    cv::Point3f splitAxis = snapshot.splitAxisDir;
+    float splitAxisNorm = static_cast<float>(cv::norm(splitAxis));
+    if (splitAxisNorm <= 1.0e-6f) {
+        float unusedLength = 0.0f;
+        parent.worldSplitAxis(splitAxis, unusedLength);
+        splitAxisNorm = static_cast<float>(cv::norm(splitAxis));
+    }
+    if (splitAxisNorm <= 1.0e-6f) {
+        result.rejectReason = "local_component_bad_split_axis";
+        return result;
+    }
+    splitAxis *= (1.0f / splitAxisNorm);
+    const float minSep = config.prob.signal_center_split_min_separation_radius_scale * parentMaxR;
+    const float maxSep = std::max(config.prob.signal_center_split_min_separation_radius_scale,
+                                  config.prob.signal_center_split_max_separation_radius_scale) * parentMaxR;
+    const float maxMidpoint =
+        config.candidateBatch.localComponentSplitMaxMidpointRadiusScale * parentMaxR;
+    const float minAlignment = std::max(
+        std::clamp(config.prob.signal_center_split_min_axis_alignment, 0.0f, 1.0f),
+        std::clamp(config.candidateBatch.localComponentSplitMinAxisAlignment, 0.0f, 1.0f));
+    float bestScore = -std::numeric_limits<float>::infinity();
+    bool sawSeparation = false;
+    bool sawAxis = false;
+    bool sawMidpoint = false;
+    bool sawStraddle = false;
+    for (size_t a = 0; a < usable.size(); ++a) {
+        for (size_t b = a + 1; b < usable.size(); ++b) {
+            ++result.candidatePairs;
+            const Component &first = components[usable[a]];
+            const Component &second = components[usable[b]];
+            const cv::Point3f delta = second.center - first.center;
+            const float separation = static_cast<float>(cv::norm(delta));
+            const cv::Point3f axis = separation > 1.0e-6f
+                ? delta * (1.0f / separation)
+                : cv::Point3f(0.0f, 0.0f, 0.0f);
+            const float alignment = std::abs(axis.dot(splitAxis));
+            const cv::Point3f midpoint = 0.5f * (first.center + second.center);
+            const float midpointDistance = static_cast<float>(cv::norm(midpoint - anchor));
+            const float sideA = (first.center - anchor).dot(axis);
+            const float sideB = (second.center - anchor).dot(axis);
+            const auto gate = cell_refit_guards::evaluateLocalComponentSplitPair(
+                static_cast<int>(components.size()), static_cast<int>(usable.size()),
+                separation, minSep, maxSep, alignment, minAlignment,
+                midpointDistance, maxMidpoint, sideA, sideB);
+            if (gate != cell_refit_guards::LocalComponentSplitDecision::Accept) {
+                if (gate == cell_refit_guards::LocalComponentSplitDecision::VetoSeparation) {
+                    ++result.rejectedBySeparation;
+                } else if (gate == cell_refit_guards::LocalComponentSplitDecision::VetoAxisAlignment) {
+                    sawSeparation = true;
+                    ++result.rejectedByAxis;
+                    result.bestRejectedAxisAlignment = std::max(
+                        result.bestRejectedAxisAlignment, alignment);
+                } else if (gate == cell_refit_guards::LocalComponentSplitDecision::VetoMidpoint) {
+                    sawSeparation = true;
+                    sawAxis = true;
+                    ++result.rejectedByMidpoint;
+                } else {
+                    sawSeparation = true;
+                    sawAxis = true;
+                    sawMidpoint = true;
+                    ++result.rejectedByLowShape;
+                }
+                continue;
+            }
+            sawSeparation = true;
+            sawAxis = true;
+            sawMidpoint = true;
+            sawStraddle = true;
+            const float balance = static_cast<float>(std::min(first.voxels, second.voxels)) /
+                                  static_cast<float>(std::max(first.voxels, second.voxels));
+            const float score = alignment + balance - midpointDistance / parentMaxR;
+            if (score > bestScore) {
+                bestScore = score;
+                result.valid = true;
+                result.rejectReason = "ok";
+                result.separation = separation;
+                result.separationRatio = separation / parentMaxR;
+                result.midpointDistance = midpointDistance;
+                result.axisAlignment = alignment;
+                result.score = score;
+                result.proposal.d1Pos = first.center;
+                result.proposal.d2Pos = second.center;
+                if ((result.proposal.d2Pos - result.proposal.d1Pos).dot(splitAxis) < 0.0f) {
+                    std::swap(result.proposal.d1Pos, result.proposal.d2Pos);
+                }
+                result.proposal.elongation = score;
+                result.proposal.parentShapeElongation = parentShape;
+                result.proposal.elongatedParentRescued = true;
+                result.proposal.signalCenterScore = score;
+                result.proposal.signalCenterSeparationRatio = result.separationRatio;
+                result.proposal.signalCenterMidpointDistance = midpointDistance;
+                result.proposal.signalCenterAxisAlignment = alignment;
+                result.proposal.currentFrameLocalOnly = true;
+                result.proposal.trustedLocalComponentPair = true;
+                result.proposal.candidateIdA = -1;
+                result.proposal.candidateIdB = -1;
+                result.proposal.gapStartBin = -6;
+                result.proposal.gapEndBin = -6;
+                result.proposal.leftPixelCount = first.voxels;
+                result.proposal.rightPixelCount = second.voxels;
+            }
+        }
+    }
+    if (!result.valid) {
+        result.rejectReason = !sawSeparation ? "local_component_separation_gate" :
+                              !sawAxis ? "local_component_axis_alignment_gate" :
+                              !sawMidpoint ? "local_component_midpoint_gate" :
+                              !sawStraddle ? "local_component_parent_straddle_gate" :
+                              "local_component_no_pair";
+    }
+    return result;
+}
+
 static SignalCenterSplitProposalResult findSignalCenterSplitProposal(
     const Frame &frame,
     size_t cellIndex,
     const PreviousFrameSnapshot &snapshot,
-    const BaseConfig &config)
+    const BaseConfig &config,
+    bool rescuedCurrentLocalPool = false)
 {
     SignalCenterSplitProposalResult best;
-    if (!config.simulation.celluniverse2_enabled ||
+    if (!(config.simulation.celluniverse2_enabled ||
+          config.simulation.celluniverse4_enabled) ||
         !config.prob.signal_center_split_enabled ||
         cellIndex >= frame.cells.size()) {
         return best;
@@ -3514,8 +4971,11 @@ static SignalCenterSplitProposalResult findSignalCenterSplitProposal(
         return best;
     }
 
+    const cv::Point3f parentPos(parent.getX(), parent.getY(), parent.getZ());
+    const cv::Point3f referencePos =
+        rescuedCurrentLocalPool ? parentPos : snapshot.position;
     const BoundingBox3D bbox = frame.computeBboxAtPoint(
-        snapshot.position,
+        referencePos,
         parentMaxR,
         config.prob.bbox_margin_scale);
     if (!bbox.isValid()) {
@@ -3546,9 +5006,16 @@ static SignalCenterSplitProposalResult findSignalCenterSplitProposal(
         parentMaxR;
     const float minAxisAlignment =
         std::clamp(config.prob.signal_center_split_min_axis_alignment, 0.0f, 1.0f);
-    const cv::Point3f parentPos(parent.getX(), parent.getY(), parent.getZ());
-    const cv::Point3f referencePos = snapshot.valid ? snapshot.position : parentPos;
     auto centerOwnedByNeighbor = [&](const cv::Point3f &centerPos) {
+        // A parent that was just recovered from background gets a fresh local
+        // pool. Neighbor ownership was computed against the stale placement,
+        // so inheriting it here can reject every center on the recovered body.
+        // This bypass is intentionally limited to the recovery recomputation;
+        // all geometric and downstream biological gates still apply.
+        if (rescuedCurrentLocalPool ||
+            !config.prob.signal_center_neighbor_claim_gate_enabled) {
+            return false;
+        }
         const float parentDist = std::min(
             static_cast<float>(cv::norm(centerPos - referencePos)),
             static_cast<float>(cv::norm(centerPos - parentPos)));
@@ -4286,10 +5753,19 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
   selectedFrameCount(selectedFrameCount > 0
                          ? std::min(static_cast<size_t>(selectedFrameCount), imagePaths.size())
                          : imagePaths.size()),
-  initialCells(initialCells), continueFrom(continueFrom)
+  initialCells(initialCells), continueFrom(continueFrom),
+  initialCsvForegroundReferenceSeed(initialCsvBackgroundSeed)
 {
     if (initialCsvBackgroundSeed.has_value()) {
-        initialCsvBackgroundTracker.configure(*initialCsvBackgroundSeed);
+        BackgroundRegionTracker::Options backgroundOptions;
+        backgroundOptions.intensityStepLimitEnabled =
+            config.simulation
+                .initial_csv_background_intensity_step_limit_enabled;
+        backgroundOptions.maximumIntensityStep =
+            config.simulation
+                .initial_csv_background_maximum_intensity_step;
+        initialCsvBackgroundTracker.configure(
+            *initialCsvBackgroundSeed, backgroundOptions);
         const auto &options = initialCsvBackgroundTracker.options();
         std::cout << "[Initial CSV Background Tracker] enabled=1"
                   << " rotation=fixed"
@@ -4300,6 +5776,21 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
                   << " max_radius_step_fraction="
                   << options.maximumRadiusChangeFraction
                   << " min_confidence=" << options.minimumConfidence
+                  << " first_intensity="
+                  << (options.holdSeedIntensitiesOnFirstUpdate
+                          ? "hold_seed"
+                          : (options.snapIntensityEstimatesOnFirstUpdate
+                                 ? "snap_runtime_estimate"
+                                 : "ema_runtime_estimate"))
+                  << " intensity_ema=" << options.intensityEmaAlpha
+                  << " intensity_step_limit="
+                  << (options.intensityStepLimitEnabled ? 1 : 0)
+                  << " max_intensity_step="
+                  << options.maximumIntensityStep
+                  << " intensity_trim="
+                  << options.intensityTrimFraction
+                  << " cell_exclusion_scale="
+                  << options.cellExclusionScale
                   << " fallback=freeze_previous_then_seed"
                   << '\n';
     } else {
@@ -4350,16 +5841,21 @@ CellUniverse::CellUniverse(std::map<std::string, std::vector<Ellipsoid>> initial
     if (!config.simulation.quit_after_preprocessing &&
         config.simulation.z_slices > 0) {
         const int rawSlices = config.simulation.z_slices;
-        const int zScale = std::max(1, static_cast<int>(config.simulation.z_scaling));
-        const int runtimeSlices = (rawSlices > 1)
-            ? zScale * (rawSlices - 1) + 1
-            : rawSlices;
-        config.simulation.z_slices = runtimeSlices;
+        const std::size_t runtimeSlices =
+            celluniverse::zinterpolation::outputSliceCount(
+                static_cast<std::size_t>(rawSlices),
+                config.simulation.z_scaling);
+        if (runtimeSlices >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::overflow_error(
+                "post-interpolation Z slice count exceeds int range");
+        }
+        config.simulation.z_slices = static_cast<int>(runtimeSlices);
         Ellipsoid::cellConfig.maxZ =
             static_cast<float>(config.simulation.z_slices) - 1.0f;
         std::cout << "[M2 Probe] computed_from_raw_z_slices="
                   << rawSlices
-                  << " z_scaling=" << zScale
+                  << " z_scaling=" << config.simulation.z_scaling
                   << " runtime_z_slices=" << config.simulation.z_slices
                   << " maxZ=" << Ellipsoid::cellConfig.maxZ << '\n';
     } else if (!config.simulation.quit_after_preprocessing) {
@@ -7886,7 +9382,8 @@ void CellUniverse::writeInitialCsvBackgroundState(int frameIndex)
                "theta_x,theta_y,theta_z,coldBackgroundBrightness,"
                "hotBackgroundBrightness,backgroundSoftMargin,"
                "confidence,frozen,shellSamples,evidenceSamples,"
-               "coldSamples,hotSamples\n";
+               "coldSamples,hotSamples,coveredFaces,coldCandidate,"
+               "hotCandidate,intensityAccepted,intensitySnapped\n";
     }
     const auto &state = initialCsvBackgroundTracker.currentState();
     out << (firstFrame + frameIndex) << ','
@@ -7907,7 +9404,12 @@ void CellUniverse::writeInitialCsvBackgroundState(int frameIndex)
         << state.shellSamples << ','
         << state.evidenceSamples << ','
         << state.coldSamples << ','
-        << state.hotSamples << '\n';
+        << state.hotSamples << ','
+        << state.coveredFaces << ','
+        << state.coldCandidate << ','
+        << state.hotCandidate << ','
+        << (state.intensityAccepted ? 1 : 0) << ','
+        << (state.intensitySnapped ? 1 : 0) << '\n';
 }
 
 void CellUniverse::installInitialCsvBackground(
@@ -7935,7 +9437,28 @@ void CellUniverse::installInitialCsvBackground(
             realFrame.front().rows,
             realFrame.front().cols);
     const auto &state = initialCsvBackgroundTracker.currentState();
+    std::vector<cv::Mat> foregroundReference;
+    float foregroundReferenceCold = state.coldBackground;
+    float foregroundReferenceHot = state.hotBackground;
+    if (initialCsvForegroundReferenceSeed.has_value()) {
+        foregroundReferenceCold =
+            initialCsvForegroundReferenceSeed->coldBackground;
+        foregroundReferenceHot =
+            initialCsvForegroundReferenceSeed->hotBackground;
+        foregroundReference.reserve(rendered.membership.size());
+        const double scale = static_cast<double>(
+            foregroundReferenceHot - foregroundReferenceCold);
+        const double offset =
+            static_cast<double>(foregroundReferenceCold);
+        for (const cv::Mat &membership : rendered.membership) {
+            cv::Mat reference;
+            membership.convertTo(reference, CV_32F, scale, offset);
+            foregroundReference.push_back(std::move(reference));
+        }
+    }
     frame.setBackgroundColor(state.coldBackground);
+    frame.setForegroundReferenceColor(foregroundReferenceCold);
+    frame.setForegroundReferenceFrame(std::move(foregroundReference));
 
     // Preserve the continuous membership stack for CellUniverse3 window
     // subtraction/debug before moving the background field into Frame.
@@ -7974,8 +9497,19 @@ void CellUniverse::installInitialCsvBackground(
               << state.radii[1] << "," << state.radii[2] << ")"
               << " cold=" << state.coldBackground
               << " hot=" << state.hotBackground
+              << " cold_candidate=" << state.coldCandidate
+              << " hot_candidate=" << state.hotCandidate
+              << " foreground_reference_cold="
+              << foregroundReferenceCold
+              << " foreground_reference_hot="
+              << foregroundReferenceHot
+              << " intensity_accepted="
+              << (state.intensityAccepted ? 1 : 0)
+              << " intensity_snapped="
+              << (state.intensitySnapped ? 1 : 0)
               << " confidence=" << state.confidence
               << " frozen=" << (state.frozen ? 1 : 0)
+              << " covered_faces=" << state.coveredFaces
               << '\n';
 }
 
@@ -8001,6 +9535,7 @@ void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
     if (config.simulation.signal_guided_position_enabled ||
         config.simulation.signal_center_rescue_enabled ||
         config.simulation.export_signal_debug_images ||
+        config.simulation.celluniverse4_enabled ||
         config.simulation.celluniverse3_enabled) {
         std::vector<Frame::SignalCenter> centers = localizeSignalCentersForFrame(
             frame, config, firstFrame + frameIndex);
@@ -8129,6 +9664,7 @@ void CellUniverse::prepareSignalCentersForFrame(int frameIndex,
         }
         if (config.simulation.signal_guided_position_enabled ||
             config.simulation.signal_center_rescue_enabled ||
+            config.simulation.celluniverse4_enabled ||
             config.simulation.celluniverse3_enabled) {
             frame.setSignalCenters(std::move(centers));
             if (config.simulation.signal_guided_position_enabled ||
@@ -8419,6 +9955,16 @@ void CellUniverse::optimize(int frameIndex)
     Frame &frame = frames[frameIndex];
     const int absoluteFrame = firstFrame + frameIndex;
 
+    // Cells already present when a run starts are mature inputs, not newborn
+    // split daughters.  Record them before any split can occur so every cell
+    // first observed later in optimize() has an unambiguous split-birth frame,
+    // independent of whether its identifier is numeric (PAVAK) or prefixed.
+    constexpr int kMatureInitialCellAgeFrames = 1000;
+    for (const auto &cell : frame.cells) {
+        cellFirstSeenFrame.emplace(
+            cell.getName(), absoluteFrame - kMatureInitialCellAgeFrames);
+    }
+
     const bool hasPreviousFrameSummary =
         frameIndex > 0 ||
         (frameIndex == 0 && resumePreviousFrameSummaryValid);
@@ -8450,20 +9996,55 @@ void CellUniverse::optimize(int frameIndex)
     // cache (refreshFullCostCache) when bbox cost is active — saves ~32M
     // pixel ops per frame for frames 2+.
     //
-    // Frame 1 exception: there are no previous-frame snapshots, so bbox
-    // mode cannot be snap-anchored (Option A fallback would make every
-    // cell use a follow-the-cell bbox and lose the position anchor that's
-    // the whole point of bbox cost). Use full-image L2 for frame 1 instead —
-    // it's slower but gives the correct global anchoring while cells settle
-    // into their initial fit. Frames 2+ use bbox with snap-anchoring.
+    // Frame 1 exception for legacy bbox cost: there are no previous-frame
+    // snapshots, so the old optimizer uses full-image L2. The PSF objective
+    // cannot use that incremental cache safely, so it forces bbox mode; the
+    // incoming-geometry bootstrap below installs fixed bboxes before the
+    // frame-0 calibration loop can score any perturbation.
     const bool bboxActiveThisFrame =
-        config.prob.use_bbox_cost &&
-        absoluteFrame > 0 &&
-        (frameIndex > 0 || !previousSnapshots.empty());
+        config.simulation.psf_brightness_cost_enabled ||
+        (config.prob.use_bbox_cost &&
+         absoluteFrame > 0 &&
+         (frameIndex > 0 || !previousSnapshots.empty()));
     frame.setUseBboxCost(bboxActiveThisFrame,
                          config.prob.bbox_margin_scale);
 
+    // Freeze candidate-independent latent-brightness priors after the current
+    // frame's background field is installed, but before any perturbation or
+    // split mutates the incoming cells. The experimental cost therefore uses
+    // previous-tracking state rather than an oracle or the current candidate.
+    frame.freezePsfBrightnessPriors();
+
     frame.regenerateSynthFrame();
+
+    // Frame-0 calibration runs before the normal previous-snapshot bbox
+    // installation later in optimize(). Install fixed incoming-geometry
+    // regions now so making the PSF objective the default does not turn those
+    // startup perturbations into full-volume convolutions. The later install
+    // clears and refreshes these regions after calibration.
+    if (config.simulation.psf_brightness_cost_enabled &&
+        previousSnapshots.empty()) {
+        frame.clearSnapBboxes();
+        int incomingBboxes = 0;
+        for (const auto &cell : frame.cells) {
+            const float maxRadius = std::max({
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()});
+            if (maxRadius <= 1e-3f) continue;
+            const cv::Point3f position(
+                cell.getX(), cell.getY(), cell.getZ());
+            const BoundingBox3D bbox = frame.computeBboxAtPoint(
+                position, maxRadius, config.prob.bbox_margin_scale);
+            if (!bbox.isValid()) continue;
+            frame.setSnapBbox(cell.getName(), bbox);
+            ++incomingBboxes;
+        }
+        std::cout << "[Incoming PSF Bbox Bootstrap] frame "
+                  << absoluteFrame
+                  << " installed=" << incomingBboxes
+                  << " total=" << frame.cells.size()
+                  << " marginScale=" << config.prob.bbox_margin_scale
+                  << std::endl;
+    }
 
     // Signal-guided perturbation activation (yp ffc1917 — full per-frame design).
     // When enabled and enough signal centers are detected (>= previous frame
@@ -8510,6 +10091,48 @@ void CellUniverse::optimize(int frameIndex)
     int effectiveRandomPerCellIters = randomPerCellIters;
     const bool cellUniverse2Mode = config.simulation.celluniverse2_enabled;
     const bool cellUniverse3Mode = config.simulation.celluniverse3_enabled;
+    const bool cellUniverse4Mode = config.simulation.celluniverse4_enabled;
+    const bool cellUniverse4BrightnessVolumeConfigured =
+        cellUniverse4Mode &&
+        config.simulation
+            .celluniverse4_postfit_brightness_volume_reconcile_enabled;
+    const bool cellUniverse4BrightnessVolumeResumeSkip =
+        cellUniverse4BrightnessVolumeConfigured &&
+        config.simulation
+            .celluniverse4_postfit_brightness_volume_skip_resume_first_frame &&
+        ((frameIndex == 0 && firstFrame > 0) ||
+         (resumePreviousFrameSummaryValid &&
+          config.simulation.resume_from > 0 &&
+          absoluteFrame == config.simulation.resume_from));
+    const bool cellUniverse4BrightnessVolumeActive =
+        cellUniverse4BrightnessVolumeConfigured &&
+        !cellUniverse4BrightnessVolumeResumeSkip;
+    std::unordered_map<std::string, CellBrightnessVolumeAnchor>
+        cellUniverse4BrightnessVolumeAnchors;
+    if (cellUniverse4BrightnessVolumeActive) {
+        cellUniverse4BrightnessVolumeAnchors.reserve(frame.cells.size());
+        std::size_t validAnchors = 0;
+        for (const auto &cell : frame.cells) {
+            if (cell.isTrash()) continue;
+            const CellBrightnessVolumeAnchor anchor =
+                captureCellBrightnessVolumeAnchor(frame, cell);
+            if (anchor.valid) ++validAnchors;
+            cellUniverse4BrightnessVolumeAnchors.emplace(
+                cell.getName(), anchor);
+        }
+        std::cout << "[CellUniverse4 Brightness Volume Anchor] frame="
+                  << absoluteFrame
+                  << " valid=" << validAnchors
+                  << " total="
+                  << cellUniverse4BrightnessVolumeAnchors.size()
+                  << " source=exact_raster_two_region_background"
+                  << std::endl;
+    } else if (cellUniverse4BrightnessVolumeResumeSkip) {
+        std::cout << "[CellUniverse4 Brightness Volume Anchor] frame="
+                  << absoluteFrame
+                  << " action=skip_resume_first_frame"
+                  << std::endl;
+    }
     const bool cellUniverse3WindowGuidedPerturb =
         cellUniverse3Mode &&
         config.simulation.celluniverse3_window_guided_position_enabled &&
@@ -8557,12 +10180,18 @@ void CellUniverse::optimize(int frameIndex)
             ? std::max(0.0f, config.simulation.celluniverse2_conditional_perturb_radius_ratio)
             : randomPerturbRadiusRatio;
     std::ofstream candidateGraphLog = openCandidateGraphLog(outputPath, displayFrame);
+    // Daughters created during this optimize call have already completed the
+    // split path's sibling-aware burn-in and PCA refit. Keep their accepted
+    // geometry out of the generic perturb/PCA stages later in the same frame.
+    std::unordered_set<std::string> newbornSplitDaughters;
 
-    const std::string perturbModeName = useSignalGuidanceThisFrame
+    const std::string perturbModeName = cellUniverse4Mode
+        ? std::string("celluniverse4_candidate_batch")
+        : (useSignalGuidanceThisFrame
         ? (cellUniverse3WindowGuidedPerturb
                ? std::string("celluniverse3_window_guided")
                : std::string("signal_guided"))
-        : std::string("random");
+        : std::string("random"));
     std::cout << "[Optimize] frame " << displayFrame
               << " (" << frame.cells.size() << " cells, " << totalIterations << " iterations)"
               << " perturbMode=" << perturbModeName
@@ -8586,8 +10215,23 @@ void CellUniverse::optimize(int frameIndex)
               << cellUniverse2ConditionalPerturbRadiusRatio
               << " useBboxCost=" << (bboxActiveThisFrame ? 1 : 0)
               << " bboxMarginScale=" << config.prob.bbox_margin_scale
-              << (config.prob.use_bbox_cost && frameIndex == 0
-                  ? " (frame-1 forced full-image)" : "")
+              << " perturbCostMode="
+              << (config.simulation.psf_brightness_cost_enabled
+                      ? "psf_brightness_v3"
+                      : (!bboxActiveThisFrame
+                            ? "legacy_full_l2"
+                            : "legacy_asymmetric_l2"))
+              << " psfBrightnessRequested="
+              << (config.simulation.psf_brightness_cost_enabled ? 1 : 0)
+              << " psfSigma="
+              << config.simulation.psf_brightness_cost_sigma
+              << " brightnessPriorWeight="
+              << config.simulation.psf_brightness_prior_weight
+              << (config.simulation.psf_brightness_cost_enabled &&
+                          previousSnapshots.empty()
+                      ? " (incoming-geometry fixed bboxes)"
+                      : (!bboxActiveThisFrame && config.prob.use_bbox_cost
+                            ? " (no-snap legacy full-image)" : ""))
               << std::endl;
 
     // Compute mean cell brightness for brightness-proportional overlap
@@ -8689,7 +10333,7 @@ void CellUniverse::optimize(int frameIndex)
         config.prob.pca_bridge_split_enabled &&
         frameCanAttemptSplits;
     const bool allowSignalCenterSplit =
-        cellUniverse2Mode &&
+        (cellUniverse2Mode || cellUniverse4Mode) &&
         config.prob.signal_center_split_enabled &&
         frameCanAttemptSplits;
     const bool allowSplits =
@@ -8703,18 +10347,18 @@ void CellUniverse::optimize(int frameIndex)
     std::set<std::string> rejectedDeterministicSplitProposals;
     std::set<std::string> cellUniverse3FailedSignalCenterSplitEvidence;
     std::set<std::string> cellUniverse3PrimaryWindowMapSplitEvidence;
-    auto cellUniverse2SplitCoolingDown = [&](const std::string &cellName) {
-        if (!cellUniverse2Mode) return false;
-        if (cellName.empty() ||
-            (cellName.back() != '0' && cellName.back() != '1')) {
-            return false;
-        }
+    auto splitDaughterCoolingDown = [&](const std::string &cellName) {
         auto firstSeenIt = cellFirstSeenFrame.find(cellName);
         if (firstSeenIt == cellFirstSeenFrame.end()) return false;
-        const int cooldownFrames = std::max(
-            0,
-            config.prob.celluniverse2_split_daughter_resplit_cooldown_frames);
-        return displayFrame - firstSeenIt->second <= cooldownFrames;
+        int cooldownFrames = config.prob.split_daughter_resplit_cooldown_frames;
+        if (cellUniverse2Mode) {
+            cooldownFrames = std::max(
+                cooldownFrames,
+                config.prob.celluniverse2_split_daughter_resplit_cooldown_frames);
+        }
+        if (cooldownFrames < 0) return false;
+        const int daughterAge = displayFrame - firstSeenIt->second;
+        return daughterAge >= 0 && daughterAge <= cooldownFrames;
     };
 
     // P(split) is a LINEAR ramp on snapshot elongation from P_split_base
@@ -8951,6 +10595,11 @@ void CellUniverse::optimize(int frameIndex)
     std::set<std::string> pcaPositionGuardRelaxedCells;
     std::unordered_map<std::string, std::string> pcaPositionGuardRelaxReasons;
     std::unordered_map<std::string, cv::Point3f> splitRejectCompensationAnchors;
+    // CU4 continuation selection already identifies the component that best
+    // explains each parent. Preserve that exact position through the final
+    // shape pass so nearby unclaimed debris cannot redefine the PCA support.
+    std::unordered_map<std::string, cv::Point3f>
+        cellUniverse4ComponentAnchors;
     auto lockPcaPosition = [&](const std::string &cellName,
                                const std::string &reason) {
         pcaPositionLockedCells.insert(cellName);
@@ -9085,6 +10734,13 @@ void CellUniverse::optimize(int frameIndex)
         return std::min(configuredLimit, adaptiveLimit);
     };
 
+    std::unordered_map<std::string, cv::Point3f>
+        cellUniverse4PrePerturbRescueAnchors;
+    std::unordered_map<std::uint64_t, std::string>
+        cellUniverse4PrePerturbRescueCenterOwners;
+    std::unordered_set<std::string>
+        cellUniverse4BackgroundDropHoldOnly;
+
     auto runPcaShapeFit = [&]() {
     // ---- Per-cell iterative PCA shape fit ----
     // Runs after the current-frame perturb/split loop so the final frame
@@ -9173,7 +10829,9 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
         }
-        std::unordered_map<std::string, cv::Point3f> signalCenterRescueAnchors;
+        std::unordered_map<std::string, cv::Point3f>
+            signalCenterRescueAnchors =
+                cellUniverse4PrePerturbRescueAnchors;
         std::unordered_map<std::string, StaleSignalCenterRescueFailure>
             staleDaughterRescueFailures;
         applySignalCenterRescueBeforePca(frame,
@@ -9185,7 +10843,9 @@ void CellUniverse::optimize(int frameIndex)
                                          config.simulation
                                                  .celluniverse2_stale_daughter_cleanup_enabled
                                              ? &staleDaughterRescueFailures
-                                             : nullptr);
+                                             : nullptr,
+                                         nullptr,
+                                         &cellUniverse4BackgroundDropHoldOnly);
         const int nCells = static_cast<int>(frame.cells.size());
         auto applyPostFitWeightedCenterPull =
             [&](int ci, const char *stage, std::ostream &log) -> bool {
@@ -9313,7 +10973,9 @@ void CellUniverse::optimize(int frameIndex)
                                             static_cast<float>(z));
                         if (!cell.isPointInsideEllipsoid(p, 1.0f)) continue;
                         const float w = std::max(
-                            0.0f, row[x] - frame.backgroundAt(z, y, x));
+                            0.0f,
+                            row[x] -
+                                frame.foregroundReferenceAt(z, y, x));
                         if (w <= 0.0f) continue;
                         triggerWeightSum += static_cast<double>(w);
                         triggerWeightSqSum += static_cast<double>(w) * w;
@@ -9478,7 +11140,9 @@ void CellUniverse::optimize(int frameIndex)
                                 continue;
                             }
                             const float w = std::max(
-                                0.0f, row[x] - frame.backgroundAt(z, y, x));
+                                0.0f,
+                                row[x] -
+                                    frame.foregroundReferenceAt(z, y, x));
                             if (w <= 0.0f) {
                                 continue;
                             }
@@ -9563,11 +11227,9 @@ void CellUniverse::optimize(int frameIndex)
             return movedAny;
         };
         std::unordered_map<std::string, Ellipsoid> prePcaCellsByName;
-        if (config.simulation.celluniverse2_enabled) {
-            prePcaCellsByName.reserve(frame.cells.size());
-            for (const auto &cell : frame.cells) {
-                prePcaCellsByName[cell.getName()] = cell;
-            }
+        prePcaCellsByName.reserve(frame.cells.size());
+        for (const auto &cell : frame.cells) {
+            prePcaCellsByName[cell.getName()] = cell;
         }
         std::unordered_map<std::string, cv::Point3f> nearbySignalCenterAnchors;
         if (config.simulation.celluniverse2_enabled &&
@@ -9620,9 +11282,25 @@ void CellUniverse::optimize(int frameIndex)
             const float prePcaMaxR = std::max({frame.cells[ci].getARadius(),
                                                frame.cells[ci].getBRadius(),
                                                frame.cells[ci].getCRadius()});
+            if (!isTrashCell &&
+                cellUniverse4BackgroundDropHoldOnly.count(sname) > 0) {
+                shapeLogs[ci]
+                    << "  [PCA Shape] cell=" << sname
+                    << " skipped=celluniverse4_background_drop_hold"
+                    << std::endl;
+                continue;
+            }
             if (isTrashCell && !trashPcaShapeFitEnabled) {
                 shapeLogs[ci] << "  [PCA Shape] cell=" << sname
                               << " skipped=trash_fixed_size" << std::endl;
+                continue;
+            }
+            if (!isTrashCell &&
+                newbornSplitDaughters.count(sname) > 0) {
+                shapeLogs[ci]
+                    << "  [PCA Shape] cell=" << sname
+                    << " skipped=newborn_split_already_refit"
+                    << std::endl;
                 continue;
             }
             Frame::ClaimSet others = buildShapeClaimSet(sname);
@@ -9684,7 +11362,8 @@ void CellUniverse::optimize(int frameIndex)
                 !frame.getRealFrame().empty()) {
                 const auto currentStats =
                     frame.cells[ci].measureBrightnessStats(frame.getRealFrame());
-                const float background = frame.backgroundAt(cv::Point3f(
+                const float background =
+                    frame.foregroundReferenceAt(cv::Point3f(
                     frame.cells[ci].getX(),
                     frame.cells[ci].getY(),
                     frame.cells[ci].getZ()));
@@ -10139,12 +11818,19 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
 
+            const cv::Point3f *componentAnchor = nullptr;
+            const auto componentAnchorIt =
+                cellUniverse4ComponentAnchors.find(sname);
+            if (componentAnchorIt != cellUniverse4ComponentAnchors.end()) {
+                componentAnchor = &componentAnchorIt->second;
+            }
             frame.calibrateCellShapeViaPca(ci, others,
                                            pcaMaxIters, pcaScale, pcaMin,
                                            maskScale, convR, convAng,
                                            updatePosForCell, pcaPosShiftCapForCell,
                                            maskA, maskB, maskC,
-                                           &shapeLogs[ci]);
+                                           &shapeLogs[ci],
+                                           componentAnchor);
             const bool hasPreviousSnapshot =
                 previousSnapshots.find(sname) != previousSnapshots.end();
             if (updatePosForCell && !isTrashCell && hasPreviousSnapshot) {
@@ -10420,69 +12106,90 @@ void CellUniverse::optimize(int frameIndex)
                     pcaPositionGuardRelaxed
                         ? snapPositionGuardLimit(sname, prePcaMaxR, true)
                         : normalCumulativeMoveLimit;
-                bool recentDaughterNearLimitGuardRelax = false;
+                bool recentDaughterGuardRelax = false;
                 int recentDaughterAge = -1;
                 float recentDaughterRelaxedLimit = cumulativeMoveLimit;
                 float recentDaughterHalfspaceSide =
                     std::numeric_limits<float>::infinity();
-                if (config.simulation.celluniverse2_enabled && !isTrashCell &&
-                    cumulativeMoveLimit > 0.0f) {
+                if (!isTrashCell && cumulativeMoveLimit > 0.0f &&
+                    splitDaughterCoolingDown(sname)) {
                     const auto firstSeenIt = cellFirstSeenFrame.find(sname);
                     if (firstSeenIt != cellFirstSeenFrame.end()) {
                         recentDaughterAge = displayFrame - firstSeenIt->second;
-                        const int maxRecentDaughterAge =
-                            std::max(1, config.simulation
-                                            .signal_center_rescue_split_daughter_probe_frames) +
-                            1;
-                        recentDaughterRelaxedLimit =
-                            std::min(cumulativeMoveLimit * 1.08f,
-                                     cumulativeMoveLimit + 3.0f);
-                        recentDaughterNearLimitGuardRelax =
-                            recentDaughterAge >= 1 &&
-                            recentDaughterAge <= maxRecentDaughterAge &&
-                            cumulativeMove > cumulativeMoveLimit &&
-                            cumulativeMove <= recentDaughterRelaxedLimit;
-                        if (recentDaughterNearLimitGuardRelax) {
-                            const std::string siblingName =
-                                splitDaughterSiblingName(sname);
-                            auto selfSnapIt = previousSnapshots.find(sname);
-                            auto siblingSnapIt =
-                                previousSnapshots.find(siblingName);
-                            if (!siblingName.empty() &&
-                                selfSnapIt != previousSnapshots.end() &&
-                                siblingSnapIt != previousSnapshots.end() &&
-                                selfSnapIt->second.valid &&
-                                siblingSnapIt->second.valid) {
-                                const cv::Point3f selfPrev =
-                                    selfSnapIt->second.position;
-                                const cv::Point3f siblingPrev =
-                                    siblingSnapIt->second.position;
-                                const cv::Point3f halfspaceDir =
-                                    selfPrev - siblingPrev;
-                                if (cv::norm(halfspaceDir) > 1e-3f) {
-                                    const cv::Point3f midpoint =
-                                        0.5f * (selfPrev + siblingPrev);
-                                    recentDaughterHalfspaceSide =
-                                        (postPcaPos - midpoint).dot(halfspaceDir);
-                                    if (recentDaughterHalfspaceSide < 0.0f) {
-                                        recentDaughterNearLimitGuardRelax = false;
-                                    }
-                                }
+                        recentDaughterRelaxedLimit = snapPositionGuardLimit(
+                            sname, prePcaMaxR, true);
+                        const std::string siblingName =
+                            splitDaughterSiblingName(sname);
+                        auto selfSnapIt = previousSnapshots.find(sname);
+                        auto siblingSnapIt = previousSnapshots.find(siblingName);
+                        if (recentDaughterAge >= 1 &&
+                            recentDaughterRelaxedLimit > cumulativeMoveLimit &&
+                            !siblingName.empty() &&
+                            selfSnapIt != previousSnapshots.end() &&
+                            siblingSnapIt != previousSnapshots.end() &&
+                            selfSnapIt->second.valid &&
+                            siblingSnapIt->second.valid) {
+                            const cv::Point3f selfPrev =
+                                selfSnapIt->second.position;
+                            const cv::Point3f siblingPrev =
+                                siblingSnapIt->second.position;
+                            const cv::Point3f halfspaceDir =
+                                selfPrev - siblingPrev;
+                            if (cv::norm(halfspaceDir) > 1e-3f) {
+                                const cv::Point3f midpoint =
+                                    0.5f * (selfPrev + siblingPrev);
+                                recentDaughterHalfspaceSide =
+                                    (postPcaPos - midpoint).dot(halfspaceDir);
+                                recentDaughterGuardRelax =
+                                    recentDaughterHalfspaceSide >= 0.0f;
                             }
                         }
                     }
                 }
-                if (cumulativeMoveLimit > 0.0f &&
-                    cumulativeMove > cumulativeMoveLimit &&
-                    !recentDaughterNearLimitGuardRelax &&
+                const float acceptedMoveLimit = recentDaughterGuardRelax
+                    ? recentDaughterRelaxedLimit
+                    : cumulativeMoveLimit;
+                if (acceptedMoveLimit > 0.0f &&
+                    cumulativeMove > acceptedMoveLimit &&
                     !neighborPcaDriftGuardApplied) {
-                    frame.cells[ci].setPosition(prePcaPos.x, prePcaPos.y, prePcaPos.z);
+                    const cv::Point3f proposedDelta = postPcaPos - prePcaPos;
+                    const float clipScale = acceptedMoveLimit / cumulativeMove;
+                    const cv::Point3f clippedPos =
+                        prePcaPos + proposedDelta * clipScale;
+                    frame.cells[ci].setPosition(
+                        clippedPos.x, clippedPos.y, clippedPos.z);
+                    postPcaPos = clippedPos;
                     shapeLogs[ci] << "  [PCA Shape Position Guard] cell=" << sname
-                                  << " cumulativeMove=" << cumulativeMove
-                                  << " limit=" << cumulativeMoveLimit
-                                  << " action=revert_position_keep_shape"
+                                  << " proposedMove=" << cumulativeMove
+                                  << " acceptedMove=" << acceptedMoveLimit
+                                  << " normalLimit="
+                                  << normalCumulativeMoveLimit
+                                  << " recentDaughterRelax="
+                                  << (recentDaughterGuardRelax ? 1 : 0)
+                                  << " action=clip_position_then_refit_shape"
                                   << std::endl;
-                } else if (recentDaughterNearLimitGuardRelax) {
+
+                    // The first fit measured shape around the proposed
+                    // center.  Once the guard clips that center, refit with
+                    // position locked so exported radii/rotation describe
+                    // the pixels around the position we actually accepted.
+                    const int guardRefitIters = std::min(pcaMaxIters, 5);
+                    const bool guardRefitUpdated =
+                        frame.calibrateCellShapeViaPca(
+                            ci, others,
+                            guardRefitIters, pcaScale, pcaMin,
+                            maskScale, convR, convAng,
+                            false, pcaPosShiftCapForCell,
+                            maskA, maskB, maskC,
+                            &shapeLogs[ci]);
+                    shapeLogs[ci]
+                        << "  [PCA Shape Position Guard Refit] cell="
+                        << sname
+                        << " iterations=" << guardRefitIters
+                        << " updated=" << (guardRefitUpdated ? 1 : 0)
+                        << std::endl;
+                } else if (recentDaughterGuardRelax &&
+                           cumulativeMove > cumulativeMoveLimit) {
                     recentDaughterNearLimitGuardKept.insert(sname);
                     shapeLogs[ci] << "  [PCA Shape Position Guard] cell=" << sname
                                   << " cumulativeMove=" << cumulativeMove
@@ -10493,8 +12200,8 @@ void CellUniverse::optimize(int frameIndex)
                                   << " age=" << recentDaughterAge
                                   << " halfspaceSide="
                                   << recentDaughterHalfspaceSide
-                                  << " action=keep_recent_daughter_near_limit"
-                                  << " reason=recent_split_daughter_near_limit"
+                                  << " action=keep_recent_daughter_relaxed_position"
+                                  << " reason=recent_split_daughter_halfspace_safe"
                                   << std::endl;
                 } else if (pcaPositionGuardRelaxed) {
                     const auto reasonIt =
@@ -10513,11 +12220,159 @@ void CellUniverse::optimize(int frameIndex)
                                   << std::endl;
                 }
             }
+            // A cell without a persistent shape reference is on its first
+            // fit (frame 0 or immediately after birth). Clamp expansion
+            // before the weighted-center pull so an accidentally huge PCA
+            // ellipsoid cannot enlarge that pull's search region. The guard
+            // uses the configured two-sided fit bound when enabled, so the
+            // first fit cannot establish either an oversized or collapsed
+            // persistent reference.
+            if (!isTrashCell &&
+                cellShapeReference.find(sname) ==
+                    cellShapeReference.end()) {
+                const auto preIt = prePcaCellsByName.find(sname);
+                if (preIt != prePcaCellsByName.end()) {
+                    const Ellipsoid &preCell = preIt->second;
+                    const float preA = frame.cells[ci].getARadius();
+                    const float preB = frame.cells[ci].getBRadius();
+                    const float preC = frame.cells[ci].getCRadius();
+                    const bool firstFitCapEnabled =
+                        config.cell &&
+                        config.cell->pcaShapeFitGrowthCapEnabled;
+                    const float firstFitDelta = std::clamp(
+                        config.cell
+                            ? config.cell->pcaShapeFitGrowthCap
+                            : 0.10f,
+                        0.0f, 1.0f);
+                    const float upFactor = firstFitCapEnabled
+                        ? 1.0f + firstFitDelta
+                        : 1.40f;
+                    const float downFactor = firstFitCapEnabled
+                        ? 1.0f - firstFitDelta
+                        : 0.0f;
+                    const float newA = std::clamp(
+                        preA,
+                        preCell.getARadius() * downFactor,
+                        preCell.getARadius() * upFactor);
+                    const float newB = std::clamp(
+                        preB,
+                        preCell.getBRadius() * downFactor,
+                        preCell.getBRadius() * upFactor);
+                    const float newC = std::clamp(
+                        preC,
+                        preCell.getCRadius() * downFactor,
+                        preCell.getCRadius() * upFactor);
+                    if (newA != preA || newB != preB || newC != preC) {
+                        frame.cells[ci].setRadii(newA, newB, newC);
+                        shapeLogs[ci]
+                            << "  [First Fit Size Guard] cell=" << sname
+                            << " downFactor=" << downFactor
+                            << " upFactor=" << upFactor
+                            << " pre=(" << preA << "," << preB << ","
+                            << preC << ")"
+                            << " post=(" << newA << "," << newB << ","
+                            << newC << ")"
+                            << std::endl;
+                    }
+                }
+            }
             if (config.simulation.celluniverse2_enabled &&
                 config.simulation.celluniverse2_weighted_center_pull_enabled &&
                 !isTrashCell) {
                 applyPostFitWeightedCenterPull(
                     ci, "post_pca_shape_fit", shapeLogs[ci]);
+
+                // The weighted pull runs after the primary PCA position
+                // guard. Reapply that snap-relative limit here so the pull
+                // cannot bypass it. Recent daughters retain the same
+                // sibling-halfspace relaxation that allows real separation.
+                const cv::Point3f pulledPos(frame.cells[ci].getX(),
+                                             frame.cells[ci].getY(),
+                                             frame.cells[ci].getZ());
+                const float pulledMove = static_cast<float>(
+                    cv::norm(pulledPos - prePcaPos));
+                const float normalPullLimit =
+                    snapPositionGuardLimit(sname, prePcaMaxR, false);
+                float acceptedPullLimit =
+                    pcaPositionGuardRelaxedCells.count(sname) > 0
+                        ? snapPositionGuardLimit(sname, prePcaMaxR, true)
+                        : normalPullLimit;
+                bool recentDaughterPullRelax = false;
+                if (acceptedPullLimit > 0.0f &&
+                    splitDaughterCoolingDown(sname)) {
+                    const float recentLimit =
+                        snapPositionGuardLimit(sname, prePcaMaxR, true);
+                    const std::string siblingName =
+                        splitDaughterSiblingName(sname);
+                    auto selfSnapIt = previousSnapshots.find(sname);
+                    auto siblingSnapIt = previousSnapshots.find(siblingName);
+                    auto firstSeenIt = cellFirstSeenFrame.find(sname);
+                    if (recentLimit > acceptedPullLimit &&
+                        !siblingName.empty() &&
+                        selfSnapIt != previousSnapshots.end() &&
+                        siblingSnapIt != previousSnapshots.end() &&
+                        firstSeenIt != cellFirstSeenFrame.end() &&
+                        displayFrame - firstSeenIt->second >= 1 &&
+                        selfSnapIt->second.valid &&
+                        siblingSnapIt->second.valid) {
+                        const cv::Point3f halfspaceDir =
+                            selfSnapIt->second.position -
+                            siblingSnapIt->second.position;
+                        if (cv::norm(halfspaceDir) > 1e-3f) {
+                            const cv::Point3f midpoint =
+                                0.5f * (selfSnapIt->second.position +
+                                        siblingSnapIt->second.position);
+                            recentDaughterPullRelax =
+                                (pulledPos - midpoint).dot(halfspaceDir) >=
+                                0.0f;
+                            if (recentDaughterPullRelax) {
+                                acceptedPullLimit = recentLimit;
+                            }
+                        }
+                    }
+                }
+                if (acceptedPullLimit > 0.0f &&
+                    pulledMove > acceptedPullLimit) {
+                    const cv::Point3f clippedPos =
+                        prePcaPos +
+                        (pulledPos - prePcaPos) *
+                            (acceptedPullLimit / pulledMove);
+                    frame.cells[ci].setPosition(
+                        clippedPos.x, clippedPos.y, clippedPos.z);
+                    const int pullRefitIters = std::min(pcaMaxIters, 5);
+                    const bool pullRefitUpdated =
+                        frame.calibrateCellShapeViaPca(
+                            ci, others,
+                            pullRefitIters, pcaScale, pcaMin,
+                            maskScale, convR, convAng,
+                            false, pcaPosShiftCapForCell,
+                            maskA, maskB, maskC,
+                            &shapeLogs[ci]);
+                    shapeLogs[ci]
+                        << "  [Post Fit Weighted Center Guard] cell="
+                        << sname
+                        << " proposedMove=" << pulledMove
+                        << " acceptedMove=" << acceptedPullLimit
+                        << " normalLimit=" << normalPullLimit
+                        << " recentDaughterRelax="
+                        << (recentDaughterPullRelax ? 1 : 0)
+                        << " refit=" << (pullRefitUpdated ? 1 : 0)
+                        << " action=clip_position_then_refit_shape"
+                        << std::endl;
+                } else if (recentDaughterPullRelax &&
+                           pulledMove > normalPullLimit) {
+                    recentDaughterNearLimitGuardKept.insert(sname);
+                    shapeLogs[ci]
+                        << "  [Post Fit Weighted Center Guard] cell="
+                        << sname
+                        << " proposedMove=" << pulledMove
+                        << " acceptedMove=" << pulledMove
+                        << " normalLimit=" << normalPullLimit
+                        << " relaxedLimit=" << acceptedPullLimit
+                        << " recentDaughterRelax=1"
+                        << " action=keep_recent_daughter_relaxed_position"
+                        << std::endl;
+                }
             }
             if (isTrashCell) {
                 auto originalIt = cellShapeBirth.find(sname);
@@ -10721,28 +12576,97 @@ void CellUniverse::optimize(int frameIndex)
             0.0f, 1.0f);
         const float fitUpFactor = 1.0f + fitGrowthCap;
         const float fitDownFactor = 1.0f - fitGrowthCap;
+        const bool fitRoundingRescueEnabled =
+            config.cell &&
+            config.cell->pcaShapeFitRoundingRescueEnabled;
         int fitsClamped = 0;
-        if (fitGrowthCapEnabled) {
+        int fitsRoundingRescued = 0;
+        int provisionalReferencesUsed = 0;
+        if (fitGrowthCapEnabled || !prePcaCellsByName.empty()) {
             for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
                 const std::string &name = frame.cells[ci].getName();
                 if (frame.cells[ci].isTrash()) continue;
                 auto it = cellShapeReference.find(name);
-                if (it == cellShapeReference.end()) continue;
-                const auto &ref = it->second;
+                std::array<float, 3> provisionalReference{};
+                const std::array<float, 3> *reference = nullptr;
+                bool provisional = false;
+                if (it != cellShapeReference.end()) {
+                    if (!fitGrowthCapEnabled) continue;
+                    reference = &it->second;
+                } else {
+                    const auto preIt = prePcaCellsByName.find(name);
+                    if (preIt == prePcaCellsByName.end()) continue;
+                    provisionalReference = {
+                        preIt->second.getARadius(),
+                        preIt->second.getBRadius(),
+                        preIt->second.getCRadius()};
+                    reference = &provisionalReference;
+                    provisional = true;
+                    ++provisionalReferencesUsed;
+                }
+                const auto &ref = *reference;
                 const float fA = frame.cells[ci].getARadius();
                 const float fB = frame.cells[ci].getBRadius();
                 const float fC = frame.cells[ci].getCRadius();
-                const float capUpA   = ref[0] * fitUpFactor;
-                const float capUpB   = ref[1] * fitUpFactor;
-                const float capUpC   = ref[2] * fitUpFactor;
-                const float capDownA = ref[0] * fitDownFactor;
-                const float capDownB = ref[1] * fitDownFactor;
-                const float capDownC = ref[2] * fitDownFactor;
-                const float newA = std::clamp(fA, capDownA, capUpA);
-                const float newB = std::clamp(fB, capDownB, capUpB);
-                const float newC = std::clamp(fC, capDownC, capUpC);
-                if (newA != fA || newB != fB || newC != fC) {
-                    frame.cells[ci].setRadii(newA, newB, newC);
+                // A missing historical reference is normal on frame 0 and
+                // immediately after birth. When the fit cap is enabled, the
+                // current pre-PCA geometry is still a valid reference: apply
+                // the same two-sided bound so a first fit cannot establish an
+                // oversized or collapsed baseline. Preserve the historical
+                // permissive first-fit behavior only when the cap is disabled.
+                const float activeUpFactor = fitGrowthCapEnabled
+                    ? fitUpFactor
+                    : 1.40f;
+                const float activeDownFactor = fitGrowthCapEnabled
+                    ? fitDownFactor
+                    : 0.0f;
+                const float capUpA   = ref[0] * activeUpFactor;
+                const float capUpB   = ref[1] * activeUpFactor;
+                const float capUpC   = ref[2] * activeUpFactor;
+                const float capDownA = ref[0] * activeDownFactor;
+                const float capDownB = ref[1] * activeDownFactor;
+                const float capDownC = ref[2] * activeDownFactor;
+                const std::array<float, 3> uncapped{fA, fB, fC};
+                const std::array<float, 3> capped{
+                    std::clamp(fA, capDownA, capUpA),
+                    std::clamp(fB, capDownB, capUpB),
+                    std::clamp(fC, capDownC, capUpC)};
+                std::array<float, 3> resolved = capped;
+                if (fitRoundingRescueEnabled) {
+                    const auto rescue =
+                        cell_refit_guards::rescueRounderShapeAtFixedVolume(
+                            uncapped,
+                            capped,
+                            config.cell
+                                ->pcaShapeFitRoundingRescueMinElongationImprovement,
+                            config.cell
+                                ->pcaShapeFitRoundingRescueMaxAxisRedistributionFraction);
+                    if (rescue.applied) {
+                        resolved = rescue.radii;
+                        ++fitsRoundingRescued;
+                        std::cout
+                            << "[Fit Growth Cap Rounding Rescue] frame "
+                            << displayFrame << " cell=" << name
+                            << " uncappedR=(" << uncapped[0] << ","
+                            << uncapped[1] << "," << uncapped[2] << ")"
+                            << " cappedR=(" << capped[0] << ","
+                            << capped[1] << "," << capped[2] << ")"
+                            << " rescuedR=(" << resolved[0] << ","
+                            << resolved[1] << "," << resolved[2] << ")"
+                            << " elong=" << rescue.cappedElongation
+                            << "->" << rescue.rescuedElongation
+                            << " uncappedElong="
+                            << rescue.uncappedElongation
+                            << " radiusProduct="
+                            << rescue.cappedRadiusProduct << "->"
+                            << rescue.rescuedRadiusProduct
+                            << " blend=" << rescue.blend
+                            << std::endl;
+                    }
+                }
+                if (resolved != uncapped) {
+                    frame.cells[ci].setRadii(
+                        resolved[0], resolved[1], resolved[2]);
                     ++fitsClamped;
                 }
             }
@@ -10750,7 +12674,10 @@ void CellUniverse::optimize(int frameIndex)
         if (fitsClamped > 0) {
             std::cout << "[Fit Growth Cap] frame " << displayFrame
                       << " clamped=" << fitsClamped
-                      << " maxUp=" << fitGrowthCap << std::endl;
+                      << " maxUp=" << fitGrowthCap
+                      << " rounding_rescued=" << fitsRoundingRescued
+                      << " provisional_refs="
+                      << provisionalReferencesUsed << std::endl;
             // Re-render with clamped radii so downstream cost eval sees
             // the capped synth, not the pre-clamp one.
             frame.regenerateSynthFrame();
@@ -11080,58 +13007,6 @@ void CellUniverse::optimize(int frameIndex)
             }
         }
 
-        // ---- Reference-side growth cap (anti-compounding mask basis) ----
-        //
-        // Each frame the reference tracks toward the observed fit but is
-        // capped at ±refGrowthCap per frame:
-        //   ref_new[i] = clamp(fit[i], ref_old[i] * (1-cap), ref_old[i] * (1+cap))
-        // This allows legitimate multi-frame growth (daughter cells growing
-        // toward adult size at ~5%/frame passes through unchanged) while
-        // denying instantaneous bloat (20%/frame compounding hits the cap,
-        // mask can't follow, fit can't run away).
-        //
-        // New cells (frame 1 seeds, newly-born daughters): reference is
-        // captured directly from the current fit — they don't have a
-        // "previous" reference to bound against yet.
-        constexpr float refGrowthCap = 0.05f;   // 5%/frame max Δ, up or down
-        const float refLo = 1.0f - refGrowthCap;
-        const float refHi = 1.0f + refGrowthCap;
-        int refsCaptured = 0;
-        int refsUpdated = 0;
-        int birthsCaptured = 0;
-        for (const auto &cell : frame.cells) {
-            const std::string &name = cell.getName();
-            const float fA = cell.getARadius();
-            const float fB = cell.getBRadius();
-            const float fC = cell.getCRadius();
-
-            // Birth capture (once, never updated). Used for mask basis.
-            if (cellShapeBirth.find(name) == cellShapeBirth.end()) {
-                cellShapeBirth[name] = {fA, fB, fC};
-                ++birthsCaptured;
-            }
-
-            auto it = cellShapeReference.find(name);
-            if (it == cellShapeReference.end()) {
-                cellShapeReference[name] = {fA, fB, fC};
-                ++refsCaptured;
-            } else {
-                auto &ref = it->second;
-                ref[0] = std::clamp(fA, ref[0] * refLo, ref[0] * refHi);
-                ref[1] = std::clamp(fB, ref[1] * refLo, ref[1] * refHi);
-                ref[2] = std::clamp(fC, ref[2] * refLo, ref[2] * refHi);
-                ++refsUpdated;
-            }
-        }
-        if (refsCaptured > 0 || refsUpdated > 0 || birthsCaptured > 0) {
-            std::cout << "[Shape Reference] frame " << displayFrame
-                      << " births=" << birthsCaptured
-                      << " refCaptured=" << refsCaptured
-                      << " refUpdated=" << refsUpdated
-                      << " totalRef=" << cellShapeReference.size()
-                      << " totalBirth=" << cellShapeBirth.size()
-                      << " growthCap=" << refGrowthCap << std::endl;
-        }
         }
     };
 
@@ -11140,10 +13015,12 @@ void CellUniverse::optimize(int frameIndex)
     // the snap position with half-extent = bbox_margin_scale × snapMaxR.
     // perturbCell then uses this fixed bbox for every iteration in this
     // frame — so drifting away from snap incurs an undershoot cost at the
-    // abandoned snap voxels. Cells without a snap (frame 1, or newborn
-    // daughters after a split accepts mid-frame) have no entry and fall
-    // back to the legacy live pre/post-union bbox in perturbCell. Always
-    // cleared first so stale names don't leak across frames.
+    // abandoned snap voxels. Under the default PSF objective, a cell without
+    // a previous snapshot (notably frame 0) receives an equally fixed bbox at
+    // its incoming geometry. This avoids an accidental full-volume
+    // convolution while keeping candidate comparisons on one region. Legacy
+    // cost keeps its live union fallback. Always clear first so stale names do
+    // not leak across frames.
     frame.clearSnapBboxes();
     frame.clearSnapPositions();
     frame.setPositionPriorWeight(config.prob.position_prior_weight);
@@ -11163,22 +13040,38 @@ void CellUniverse::optimize(int frameIndex)
             : 0.0f);
     if (bboxActiveThisFrame) {
         int installed = 0;
+        int incomingGeometryInstalled = 0;
         for (const auto &cell : frame.cells) {
             const std::string &name = cell.getName();
             auto snapIt = previousSnapshots.find(name);
-            if (snapIt == previousSnapshots.end() || !snapIt->second.valid) continue;
-            const auto &snap = snapIt->second;
-            const float snapMaxR = std::max({snap.aRadius, snap.bRadius, snap.cRadius});
+            const bool hasValidSnapshot =
+                snapIt != previousSnapshots.end() && snapIt->second.valid;
+            if (!hasValidSnapshot &&
+                !config.simulation.psf_brightness_cost_enabled) {
+                continue;
+            }
+            const cv::Point3f anchorPosition = hasValidSnapshot
+                ? snapIt->second.position
+                : cv::Point3f(cell.getX(), cell.getY(), cell.getZ());
+            const float snapMaxR = hasValidSnapshot
+                ? std::max({snapIt->second.aRadius,
+                            snapIt->second.bRadius,
+                            snapIt->second.cRadius})
+                : std::max({cell.getARadius(),
+                            cell.getBRadius(),
+                            cell.getCRadius()});
             if (snapMaxR <= 1e-3f) continue;
             BoundingBox3D snapBbox = frame.computeBboxAtPoint(
-                snap.position, snapMaxR, config.prob.bbox_margin_scale);
+                anchorPosition, snapMaxR, config.prob.bbox_margin_scale);
             if (!snapBbox.isValid()) continue;
             frame.setSnapBbox(name, snapBbox);
-            frame.setSnapPosition(name, snap.position);
+            frame.setSnapPosition(name, anchorPosition);
+            if (!hasValidSnapshot) ++incomingGeometryInstalled;
             ++installed;
         }
         std::cout << "[Snap Bbox] frame " << displayFrame
                   << " installed=" << installed
+                  << " incomingGeometry=" << incomingGeometryInstalled
                   << " total=" << frame.cells.size()
                   << " priorWeight=" << config.prob.position_prior_weight
                   << std::endl;
@@ -11741,9 +13634,10 @@ void CellUniverse::optimize(int frameIndex)
         [&](const Ellipsoid &parent,
             const PreviousFrameSnapshot &snapshot) -> SignalCenterSplitProposalResult {
             SignalCenterSplitProposalResult best;
-            if (!config.simulation.celluniverse2_enabled ||
+            if (!(config.simulation.celluniverse2_enabled ||
+                  config.simulation.celluniverse4_enabled) ||
                 !config.prob.signal_center_split_enabled ||
-                !config.prob.pca_bridge_future_window_enabled ||
+                !config.prob.signal_center_future_rescue_enabled ||
                 !snapshot.valid) {
                 return best;
             }
@@ -11824,23 +13718,35 @@ void CellUniverse::optimize(int frameIndex)
                     config.prob
                         .signal_center_future_rescue_min_separation_parent_fraction);
             const float minSep =
-                std::max(
-                    futureRescueMinSeparationParentFraction * parentMaxR,
-                    std::max(0.0f,
-                             config.prob
-                                 .signal_center_split_min_separation_radius_scale) *
-                        parentMaxR);
+                config.prob
+                        .signal_center_future_rescue_min_separation_gate_enabled
+                    ? std::max(
+                          futureRescueMinSeparationParentFraction * parentMaxR,
+                          std::max(
+                              0.0f,
+                              config.prob
+                                  .signal_center_split_min_separation_radius_scale) *
+                              parentMaxR)
+                    : 1.0e-3f;
             const float maxSep =
-                std::max(
-                    minSep,
-                    std::max(
-                        config.prob.signal_center_split_min_separation_radius_scale,
-                        config.prob.signal_center_split_max_separation_radius_scale) *
-                        parentMaxR);
+                config.prob
+                        .signal_center_future_rescue_max_separation_gate_enabled
+                    ? std::max(
+                          minSep,
+                          std::max(
+                              0.0f,
+                              config.prob
+                                  .signal_center_future_rescue_max_separation_parent_fraction) *
+                              parentMaxR)
+                    : std::numeric_limits<float>::infinity();
             const float maxMidpointDistance =
-                std::max(0.0f,
-                         config.prob.signal_center_split_max_midpoint_radius_scale) *
-                parentMaxR;
+                config.prob.signal_center_future_rescue_midpoint_gate_enabled
+                    ? std::max(
+                          0.0f,
+                          config.prob
+                              .signal_center_future_rescue_max_midpoint_parent_fraction) *
+                          parentMaxR
+                    : std::numeric_limits<float>::infinity();
             const float minBrightness =
                 std::max(
                     0.0f,
@@ -11859,6 +13765,15 @@ void CellUniverse::optimize(int frameIndex)
                     const float sep = static_cast<float>(cv::norm(delta));
                     if (sep < minSep || sep > maxSep) {
                         ++best.rejectedBySeparation;
+                        const float sepRatio =
+                            sep / std::max(1.0e-3f, parentMaxR);
+                        if (best.bestRejectedSeparationRatio <= 0.0f ||
+                            std::abs(sepRatio - 1.45f) <
+                                std::abs(
+                                    best.bestRejectedSeparationRatio -
+                                    1.45f)) {
+                            best.bestRejectedSeparationRatio = sepRatio;
+                        }
                         continue;
                     }
 
@@ -11867,6 +13782,10 @@ void CellUniverse::optimize(int frameIndex)
                         static_cast<float>(cv::norm(midpoint - snapshot.position));
                     if (midpointDistance > maxMidpointDistance) {
                         ++best.rejectedByMidpoint;
+                        if (best.bestRejectedMidpointDistance <= 0.0f ||
+                            midpointDistance < best.bestRejectedMidpointDistance) {
+                            best.bestRejectedMidpointDistance = midpointDistance;
+                        }
                         continue;
                     }
 
@@ -12009,6 +13928,9 @@ void CellUniverse::optimize(int frameIndex)
             int currentCenterSnapRejectedByOwnedCenter = 0;
             auto currentCenterOwnedByNeighbor =
                 [&](const cv::Point3f &centerPos) {
+                    if (!config.prob.signal_center_neighbor_claim_gate_enabled) {
+                        return false;
+                    }
                     if (activeCenters != &centers) {
                         return false;
                     }
@@ -17740,7 +19662,11 @@ void CellUniverse::optimize(int frameIndex)
                       << splitAxis.z << ")"
                       << std::endl;
         };
-    if (allowSignalCenterSplit && !frame.getSignalCenters().empty()) {
+    const bool allowLocalComponentSplitCenters =
+        cellUniverse4Mode &&
+        config.candidateBatch.localComponentSplitCentersEnabled;
+    if (allowSignalCenterSplit &&
+        (!frame.getSignalCenters().empty() || allowLocalComponentSplitCenters)) {
         int signalSplitConsidered = 0;
         int signalSplitEligibleFlat = 0;
         int signalSplitTooFewCenters = 0;
@@ -17749,7 +19675,7 @@ void CellUniverse::optimize(int frameIndex)
             const Ellipsoid &cell = frame.cells[ci];
             if (cell.isTrash()) continue;
             const std::string &cellName = cell.getName();
-            if (cellUniverse2SplitCoolingDown(cellName)) continue;
+            if (splitDaughterCoolingDown(cellName)) continue;
             auto snapIt = previousSnapshots.find(cellName);
             if (snapIt == previousSnapshots.end() || !snapIt->second.valid) {
                 continue;
@@ -17762,8 +19688,31 @@ void CellUniverse::optimize(int frameIndex)
                 ++signalSplitEligibleFlat;
             }
 
+            bool localComponentEvaluated = false;
             SignalCenterSplitProposalResult signalProposal =
-                findSignalCenterSplitProposal(frame, ci, snapIt->second, config);
+                findLocalComponentSplitProposal(
+                    frame, ci, snapIt->second, config, displayFrame,
+                    &localComponentEvaluated);
+            if (!localComponentEvaluated) {
+                signalProposal =
+                    findSignalCenterSplitProposal(frame, ci, snapIt->second, config);
+            } else {
+                std::cout << "[CU4 Local Component Split Decision] frame "
+                          << displayFrame << " cell=" << cellName
+                          << " action="
+                          << (signalProposal.valid ? "propose" : "veto")
+                          << " reason=" << signalProposal.rejectReason
+                          << " components=" << signalProposal.centersInside
+                          << " pairs=" << signalProposal.candidatePairs
+                          << " rejectedSep=" << signalProposal.rejectedBySeparation
+                          << " rejectedAxis=" << signalProposal.rejectedByAxis
+                          << " rejectedMid=" << signalProposal.rejectedByMidpoint
+                          << " rejectedStraddle=" << signalProposal.rejectedByLowShape
+                          << " sep=" << signalProposal.separation
+                          << " midpoint=" << signalProposal.midpointDistance
+                          << " axisAlign=" << signalProposal.axisAlignment
+                          << std::endl;
+            }
             if (parentShape >= config.prob.signal_center_split_min_parent_elongation &&
                 signalProposal.centersInside < 2) {
                 ++signalSplitTooFewCenters;
@@ -17797,6 +19746,15 @@ void CellUniverse::optimize(int frameIndex)
                     snapIt->second,
                     parentShape,
                     signalProposal.rejectReason);
+
+                // A local component result is direct current-frame evidence:
+                // do not override a one-component/no-geometry veto with a
+                // global, future, or rod-tip seed.  If the ROI had zero
+                // threshold evidence, `localComponentEvaluated` is false and
+                // the legacy paths remain available above.
+                if (localComponentEvaluated) {
+                    continue;
+                }
 
                 const float neighborOwnedFutureRescueMinFraction =
                     std::clamp(
@@ -17875,6 +19833,8 @@ void CellUniverse::optimize(int frameIndex)
                     signalProposal.bestRejectedAxisAlignment >=
                         neighborOwnedHighShapeMinAxisAlignment;
                 const bool allowImmediateFutureSignalRescue =
+                    !config.prob
+                         .signal_center_neighbor_owned_future_rescue_scope_gate_enabled ||
                     (signalProposal.rejectReason == "axis_alignment_gate" &&
                      parentShape <=
                          config.prob.signal_center_split_min_parent_elongation + 0.08f) ||
@@ -17940,20 +19900,29 @@ void CellUniverse::optimize(int frameIndex)
                               << futureSignalProposal.candidatePairs
                               << " rejectedSep="
                               << futureSignalProposal.rejectedBySeparation
+                              << " bestRejectedSepRatio="
+                              << futureSignalProposal
+                                     .bestRejectedSeparationRatio
                               << " rejectedMid="
                               << futureSignalProposal.rejectedByMidpoint
+                              << " bestRejectedMidpointDist="
+                              << futureSignalProposal.bestRejectedMidpointDistance
                               << " crowdedNeighborOwnedRescue="
                               << (neighborOwnedDominantSignalReject ? 1 : 0)
                               << std::endl;
                 }
 
                 const bool allowRodTipFallback =
+                    (cellUniverse2Mode ||
+                     (cellUniverse4Mode &&
+                      config.prob
+                          .celluniverse4_rod_tip_split_recovery_enabled)) &&
                     signalProposal.rejectReason != "not_flat_enough";
                 RodTipSphereSplitProposalResult tipProposal;
                 if (allowRodTipFallback) {
                     tipProposal = makeRodTipSphereSplitProposal(cell, snapIt->second, config);
                 } else {
-                    tipProposal.rejectReason = "parent_not_flat_enough";
+                    tipProposal.rejectReason = "rod_tip_recovery_disabled";
                     tipProposal.parentShape = parentShape;
                 }
                 if (tipProposal.valid) {
@@ -18541,7 +20510,7 @@ void CellUniverse::optimize(int frameIndex)
                 const std::string &cellName = cell.getName();
                 if (signalCenterSplitProposals.count(cellName) > 0 ||
                     rodTipSplitFallbackProposals.count(cellName) > 0 ||
-                    cellUniverse2SplitCoolingDown(cellName)) {
+                    splitDaughterCoolingDown(cellName)) {
                     continue;
                 }
                 auto snapIt = previousSnapshots.find(cellName);
@@ -18693,7 +20662,7 @@ void CellUniverse::optimize(int frameIndex)
             const std::string &cellName = cell.getName();
             if (signalCenterSplitProposals.count(cellName) > 0 ||
                 rodTipSplitFallbackProposals.count(cellName) > 0 ||
-                cellUniverse2SplitCoolingDown(cellName)) {
+                splitDaughterCoolingDown(cellName)) {
                 continue;
             }
             auto memoryIt =
@@ -19317,6 +21286,7 @@ void CellUniverse::optimize(int frameIndex)
 
                 Ellipsoid rescuedCell(params);
                 frame.cells.push_back(rescuedCell);
+                frame.registerPsfBrightnessPriorIfMissing(frame.cells.back());
                 cellShapeBirth[name] = {rescuedCell.getARadius(),
                                         rescuedCell.getBRadius(),
                                         rescuedCell.getCRadius()};
@@ -19548,7 +21518,7 @@ void CellUniverse::optimize(int frameIndex)
         for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
             const std::string parentName = frame.cells[ci].getName();
             if (frame.cells[ci].isTrash()) continue;
-            if (cellUniverse2SplitCoolingDown(parentName)) continue;
+            if (splitDaughterCoolingDown(parentName)) continue;
             BridgeSplitProposal proposal;
             const bool hasPcaBridgeProposal =
                 frame.discoverPcaBridgeProposal(ci, config.prob, proposal);
@@ -20570,7 +22540,8 @@ void CellUniverse::optimize(int frameIndex)
             }
 
             const auto stats = cell.measureBrightnessStats(frame.getRealFrame());
-            const float background = frame.backgroundAt(cv::Point3f(
+            const float background =
+                frame.foregroundReferenceAt(cv::Point3f(
                 cell.getX(), cell.getY(), cell.getZ()));
             const float signalMean = std::max(0.0f, stats.first - background);
             const float dimMargin = std::max(
@@ -20644,6 +22615,10 @@ void CellUniverse::optimize(int frameIndex)
             for (size_t ci = 0; ci < frame.cells.size(); ++ci) {
                 const std::string &cname = frame.cells[ci].getName();
                 if (phaseNames.count(cname) == 0) continue;
+                if (newbornSplitDaughters.count(cname) > 0) continue;
+                if (cellUniverse4BackgroundDropHoldOnly.count(cname) > 0) {
+                    continue;
+                }
                 const auto lockReasonIt =
                     pcaPositionLockReasons.find(cname);
                 const bool tunnelLockedBirthDaughter =
@@ -20833,6 +22808,95 @@ void CellUniverse::optimize(int frameIndex)
                           << std::endl;
                 return;
             }
+            const bool daughterCoolingDown =
+                splitDaughterCoolingDown(cellName);
+            bool cooldownEvidenceBypass = false;
+            if (daughterCoolingDown && cellUniverse4Mode &&
+                config.candidateBatch.enabled &&
+                config.candidateBatch
+                    .splitDaughterCooldownEvidenceBypassEnabled &&
+                scheduleReason ==
+                    "celluniverse4_probability_equivalent") {
+                const auto firstSeenIt = cellFirstSeenFrame.find(cellName);
+                const auto snapshotIt = previousSnapshots.find(cellName);
+                const auto daughtersIt = expectedDaughters.find(cellName);
+                const auto keptIt =
+                    expectedDaughterKeptPixels.find(cellName);
+                const int age = firstSeenIt != cellFirstSeenFrame.end()
+                    ? displayFrame - firstSeenIt->second
+                    : -1;
+                const int kept = keptIt != expectedDaughterKeptPixels.end()
+                    ? keptIt->second
+                    : 0;
+                float separation = 0.0f;
+                float shortestRadius = 0.0f;
+                float separationRatio = 0.0f;
+                bool finiteEvidence =
+                    snapshotIt != previousSnapshots.end() &&
+                    snapshotIt->second.valid &&
+                    daughtersIt != expectedDaughters.end() &&
+                    keptIt != expectedDaughterKeptPixels.end();
+                if (finiteEvidence) {
+                    const cv::Point3f &d1 = daughtersIt->second.first;
+                    const cv::Point3f &d2 = daughtersIt->second.second;
+                    const auto &snapshot = snapshotIt->second;
+                    const float radiusB = snapshot.bRadius > 1.0e-3f
+                        ? snapshot.bRadius
+                        : snapshot.aRadius;
+                    shortestRadius = std::min({
+                        snapshot.aRadius, radiusB, snapshot.cRadius});
+                    separation = static_cast<float>(cv::norm(d2 - d1));
+                    finiteEvidence =
+                        std::isfinite(d1.x) && std::isfinite(d1.y) &&
+                        std::isfinite(d1.z) && std::isfinite(d2.x) &&
+                        std::isfinite(d2.y) && std::isfinite(d2.z) &&
+                        std::isfinite(separation) &&
+                        std::isfinite(shortestRadius) &&
+                        shortestRadius > 1.0e-3f;
+                    if (finiteEvidence) {
+                        separationRatio = separation / shortestRadius;
+                        finiteEvidence = std::isfinite(separationRatio);
+                    }
+                }
+                cooldownEvidenceBypass =
+                    finiteEvidence &&
+                    age >= config.candidateBatch
+                               .splitDaughterCooldownEvidenceBypassMinAgeFrames &&
+                    kept >= config.candidateBatch
+                                .splitDaughterCooldownEvidenceBypassMinKeptPixels &&
+                    separationRatio >=
+                        config.candidateBatch
+                            .splitDaughterCooldownEvidenceBypassMinSeparationShortRadiusFraction;
+                std::cout << "[CellUniverse4 Split Cooldown Evidence] frame="
+                          << displayFrame
+                          << " cell=" << cellName
+                          << " age=" << age
+                          << " kept=" << kept
+                          << " separation=" << separation
+                          << " shortest_radius=" << shortestRadius
+                          << " ratio=" << separationRatio
+                          << " min_age="
+                          << config.candidateBatch
+                                 .splitDaughterCooldownEvidenceBypassMinAgeFrames
+                          << " min_kept="
+                          << config.candidateBatch
+                                 .splitDaughterCooldownEvidenceBypassMinKeptPixels
+                          << " min_ratio="
+                          << config.candidateBatch
+                                 .splitDaughterCooldownEvidenceBypassMinSeparationShortRadiusFraction
+                          << " finite=" << (finiteEvidence ? 1 : 0)
+                          << " action="
+                          << (cooldownEvidenceBypass ? "bypass" : "keep_cooldown")
+                          << std::endl;
+            }
+            if (daughterCoolingDown && !cooldownEvidenceBypass) {
+                std::cout << "[Split Schedule Reject] frame " << displayFrame
+                          << " cell=" << cellName
+                          << " reason=daughter_resplit_cooldown"
+                          << " source=" << scheduleReason
+                          << std::endl;
+                return;
+            }
             ScopedStageTimer splitTimer(displayFrame,
                                         "split_attempt_" + scheduleReason);
             ++splitAttempted;
@@ -21018,7 +23082,11 @@ void CellUniverse::optimize(int frameIndex)
                 config.cellLumen.fusionSplitPriorMaxDynamicDaughterOverlapFraction,
                 config.cellLumen.fusionSplitPriorSnapshotSeedMaxRefitDrift,
                 config.cellLumen.fusionSplitPriorSkipExistingCellBuriedCheck,
-                config.cellLumen.fusionSplitPriorSkipNeighborBridgeCheck);
+                config.cellLumen.fusionSplitPriorSkipNeighborBridgeCheck,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridValleyOverrideEnabled,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridMaxValleyRatio);
 
             double costDiff = result.first;
             auto callback = result.second;
@@ -21339,11 +23407,13 @@ void CellUniverse::optimize(int frameIndex)
                 if (lumenForCell != nullptr) {
                     acceptedLumenSplits.push_back({cellName, *lumenForCell});
                 }
-                // Add daughter names to phaseNames so they become eligible
-                // for perturbation during the rest of this frame. Without
-                // this, rebuildEligible skips daughters (their names weren't
-                // in phaseNames at frame start) and they get zero perturbation
-                // iterations — only the split burn-in + refine positioning.
+                newbornSplitDaughters.insert(cellName + "0");
+                newbornSplitDaughters.insert(cellName + "1");
+                // Keep the names in the phase for bookkeeping, but the
+                // eligibility rebuild deliberately excludes them. The split
+                // path already performed burn-in and sibling-aware PCA;
+                // another independent perturb pass is what made 20/31 grow
+                // while 21/30 shrank on their birth frame.
                 phaseNames.insert(cellName + "0");
                 phaseNames.insert(cellName + "1");
                 if (cellUniverse2Mode) {
@@ -21504,6 +23574,17 @@ void CellUniverse::optimize(int frameIndex)
                           << std::endl;
             }
 
+            if (cellUniverse4Mode &&
+                !config.candidateBatch.splitRejectCompensationEnabled) {
+                std::cout << "[CellUniverse4 Split Reject Restore] frame "
+                          << displayFrame
+                          << " cell=" << cellName
+                          << " source=" << scheduleReason
+                          << " action=preserve_restored_parent"
+                          << std::endl;
+                return;
+            }
+
             // Compensation perturb. The revert left cells[cellIdx] as the
             // parent, so no find_if is needed as long as cellIdx still points
             // at the same parent after the rejected split callback.
@@ -21553,7 +23634,7 @@ void CellUniverse::optimize(int frameIndex)
             for (const auto &entry : signalCenterSplitProposals) {
                 const std::string &signalSplitName = entry.first;
                 if (phaseNames.count(signalSplitName) == 0 ||
-                    cellUniverse2SplitCoolingDown(signalSplitName) ||
+                    splitDaughterCoolingDown(signalSplitName) ||
                     splitBlacklist.count(signalSplitName) > 0) {
                     continue;
                 }
@@ -21578,7 +23659,7 @@ void CellUniverse::optimize(int frameIndex)
             for (const auto &entry : bridgeProposals) {
                 const std::string &bridgeName = entry.first;
                 if (phaseNames.count(bridgeName) == 0 ||
-                    cellUniverse2SplitCoolingDown(bridgeName) ||
+                    splitDaughterCoolingDown(bridgeName) ||
                     splitBlacklist.count(bridgeName) > 0) {
                     continue;
                 }
@@ -21600,7 +23681,7 @@ void CellUniverse::optimize(int frameIndex)
             for (const auto &entry : rodTipSplitFallbackProposals) {
                 const std::string &fallbackName = entry.first;
                 if (phaseNames.count(fallbackName) == 0 ||
-                    cellUniverse2SplitCoolingDown(fallbackName) ||
+                    splitDaughterCoolingDown(fallbackName) ||
                     splitBlacklist.count(fallbackName) > 0) {
                     continue;
                 }
@@ -21686,6 +23767,734 @@ void CellUniverse::optimize(int frameIndex)
                                     /*useLumenPrior=*/false);
             }
             rebuildEligible();
+        }
+
+        // CellUniverse 4.0: one immutable, center-only candidate batch per
+        // parent. Each forced-position proposal is evaluated then rolled back
+        // immediately, so every alternative sees the same parent state and
+        // synth frame. The selected winner is re-evaluated once before the
+        // callback commits it. A small explicit post-center refinement then
+        // runs before the shared final PCA stage.
+        if (cellUniverse4Mode && config.candidateBatch.enabled) {
+            std::vector<ChunkEvidence> chunkEvidence;
+            const auto appendChunkEvidence =
+                [&](const std::vector<Frame::SignalCenter> &centers,
+                    int sourceFrameOffset) {
+                    for (const Frame::SignalCenter &center : centers) {
+                        ChunkEvidence evidence;
+                        evidence.stableId = center.stableId;
+                        evidence.sourceFrameOffset = sourceFrameOffset;
+                        evidence.weightedCenter = center.position;
+                        evidence.geometricCenter = center.geometricPosition;
+                        evidence.robustCenter = center.robustPosition;
+                        evidence.peakCenter = center.peakPosition;
+                        evidence.bboxMin = center.bboxMin;
+                        evidence.bboxMax = center.bboxMax;
+                        evidence.brightness = center.brightness;
+                        evidence.confidence = center.confidence;
+                        evidence.voxelCount = center.sizeVoxels;
+                        evidence.elongation = center.shapeElongation;
+                        evidence.boxCount = center.boxes;
+                        chunkEvidence.push_back(evidence);
+                    }
+                };
+            chunkEvidence.reserve(frame.getSignalCenters().size());
+            appendChunkEvidence(frame.getSignalCenters(), 0);
+
+            int lookaheadCentersAdded = 0;
+            if (config.candidateBatch.lookaheadEvidenceEnabled) {
+                const int lookaheadFrames =
+                    std::max(0, config.candidateBatch.lookaheadFrames);
+                for (int offset = 1; offset <= lookaheadFrames; ++offset) {
+                    const int futureFrameIndex = frameIndex + offset;
+                    if (futureFrameIndex < 0 ||
+                        static_cast<size_t>(futureFrameIndex) >= frames.size()) {
+                        break;
+                    }
+
+                    std::vector<cv::Mat> futureRealFrame;
+                    auto cached = preparedFrameStacks.find(futureFrameIndex);
+                    if (cached != preparedFrameStacks.end() &&
+                        !cached->second.realFrame.empty()) {
+                        futureRealFrame = cached->second.realFrame;
+                    } else if (frames[futureFrameIndex].hasImageStacks()) {
+                        futureRealFrame = frames[futureFrameIndex].getRealFrame();
+                    } else {
+                        // Publish the prepared stack into the rolling cache.
+                        // The next optimization frame and overlapping
+                        // lookahead windows must reuse the same N2V2 result
+                        // rather than denoising the volume again.
+                        cachePreparedFrameStack(futureFrameIndex);
+                        cached = preparedFrameStacks.find(futureFrameIndex);
+                        if (cached != preparedFrameStacks.end()) {
+                            futureRealFrame = cached->second.realFrame;
+                        }
+                    }
+                    if (futureRealFrame.empty()) continue;
+
+                    Frame futureFrame(
+                        config.simulation,
+                        std::vector<Ellipsoid>{},
+                        Path(outputPath),
+                        imagePaths[static_cast<size_t>(futureFrameIndex)]
+                            .filename()
+                            .string());
+                    futureFrame.loadImageStacks(futureRealFrame);
+                    std::vector<Frame::SignalCenter> futureCenters =
+                        localizeSignalCentersForFrame(
+                            futureFrame,
+                            config,
+                            firstFrame + futureFrameIndex,
+                            /*verbose=*/false);
+                    lookaheadCentersAdded +=
+                        static_cast<int>(futureCenters.size());
+                    appendChunkEvidence(futureCenters, offset);
+                }
+            }
+            if (config.candidateBatch.lookaheadEvidenceEnabled) {
+                std::cout << "[CellUniverse4 Lookahead Evidence] frame="
+                          << displayFrame
+                          << " current_centers="
+                          << frame.getSignalCenters().size()
+                          << " future_centers=" << lookaheadCentersAdded
+                          << " lookahead_frames="
+                          << config.candidateBatch.lookaheadFrames
+                          << " penalty_per_frame="
+                          << config.candidateBatch
+                                 .lookaheadPriorityPenaltyPerFrame
+                          << std::endl;
+            }
+
+            const bool shadowMode = config.candidateBatch.shadowMode;
+            const auto hasStrongSplitFirstEvidence =
+                [&](const std::string &name,
+                    float &separation,
+                    float &shortestRadius,
+                    float &separationRatio,
+                    int &keptPixels) {
+                    separation = 0.0f;
+                    shortestRadius = 0.0f;
+                    separationRatio = 0.0f;
+                    keptPixels = 0;
+                    if (!config.candidateBatch
+                             .splitScheduleEvidenceFirstEnabled) {
+                        return false;
+                    }
+                    const auto snapshotIt = previousSnapshots.find(name);
+                    const auto daughtersIt = expectedDaughters.find(name);
+                    const auto keptIt = expectedDaughterKeptPixels.find(name);
+                    if (snapshotIt == previousSnapshots.end() ||
+                        !snapshotIt->second.valid ||
+                        daughtersIt == expectedDaughters.end() ||
+                        keptIt == expectedDaughterKeptPixels.end()) {
+                        return false;
+                    }
+                    const cv::Point3f &d1 = daughtersIt->second.first;
+                    const cv::Point3f &d2 = daughtersIt->second.second;
+                    const auto &snapshot = snapshotIt->second;
+                    keptPixels = keptIt->second;
+                    separation = static_cast<float>(cv::norm(d2 - d1));
+                    const float radiusB = snapshot.bRadius > 1.0e-3f
+                        ? snapshot.bRadius
+                        : snapshot.aRadius;
+                    shortestRadius = std::min({
+                        snapshot.aRadius, radiusB,
+                        snapshot.cRadius});
+                    if (!std::isfinite(d1.x) || !std::isfinite(d1.y) ||
+                        !std::isfinite(d1.z) || !std::isfinite(d2.x) ||
+                        !std::isfinite(d2.y) || !std::isfinite(d2.z)) {
+                        return false;
+                    }
+                    return cell_refit_guards::
+                        qualifiesPcaSeparationForSplitFirst(
+                            separation,
+                            shortestRadius,
+                            keptPixels,
+                            config.candidateBatch
+                                .splitScheduleEvidenceFirstMinSeparationShortRadiusFraction,
+                            config.candidateBatch
+                                .splitScheduleEvidenceFirstMinKeptPixels,
+                            separationRatio);
+                };
+            const auto scheduleCellUniverse4ProbabilitySplits =
+                [&](bool evidenceFirstPhase) {
+                if (shadowMode ||
+                    config.candidateBatch.splitScheduleMode !=
+                        "probability_equivalent_per_parent" ||
+                    !allowStandardSplits || lumenSplitRandomDisabled) {
+                    return;
+                }
+                std::vector<std::string> splitScheduleNames;
+                splitScheduleNames.reserve(eligible.size());
+                for (const size_t index : eligible) {
+                    if (index < frame.cells.size()) {
+                        splitScheduleNames.push_back(
+                            frame.cells[index].getName());
+                    }
+                }
+                std::sort(splitScheduleNames.begin(), splitScheduleNames.end());
+                splitScheduleNames.erase(
+                    std::unique(splitScheduleNames.begin(),
+                                splitScheduleNames.end()),
+                    splitScheduleNames.end());
+                const int referenceIterations = std::max(
+                    0, config.candidateBatch
+                           .splitScheduleReferenceIterationsPerCell);
+                for (const std::string &name : splitScheduleNames) {
+                    if (splitBlacklist.count(name) > 0) continue;
+                    auto probabilityIt = splitProbabilities.find(name);
+                    if (probabilityIt == splitProbabilities.end()) continue;
+                    const double perOpportunity = std::clamp(
+                        static_cast<double>(probabilityIt->second), 0.0, 1.0);
+                    if (perOpportunity <= 0.0 || referenceIterations <= 0) {
+                        continue;
+                    }
+                    const double equivalentProbability =
+                        1.0 - std::pow(1.0 - perOpportunity,
+                                       static_cast<double>(referenceIterations));
+                    const double draw = CandidateBatch::deterministicUnit(
+                        config.candidateBatch.deterministicSeed,
+                        config.candidateBatch.deterministicSeedNamespace,
+                        displayFrame, name, "split_schedule");
+                    const double forceThreshold = std::clamp(
+                        static_cast<double>(config.candidateBatch
+                                                .splitScheduleForceProbabilityThreshold),
+                        0.0, 1.0);
+                    const bool forcedByProbability =
+                        forceThreshold > 0.0 &&
+                        perOpportunity >= forceThreshold;
+                    const bool attempt =
+                        forcedByProbability || draw < equivalentProbability;
+                    float evidenceSeparation = 0.0f;
+                    float evidenceShortestRadius = 0.0f;
+                    float evidenceSeparationRatio = 0.0f;
+                    int evidenceKeptPixels = 0;
+                    const bool strongSplitFirstEvidence =
+                        hasStrongSplitFirstEvidence(
+                            name, evidenceSeparation,
+                            evidenceShortestRadius,
+                            evidenceSeparationRatio,
+                            evidenceKeptPixels);
+                    if (strongSplitFirstEvidence != evidenceFirstPhase) {
+                        continue;
+                    }
+                    std::cout << "[CellUniverse4 Split Schedule] frame="
+                              << displayFrame
+                              << " cell=" << name
+                              << " per_opportunity=" << perOpportunity
+                              << " reference_iterations=" << referenceIterations
+                              << " equivalent_probability="
+                              << equivalentProbability
+                              << " draw=" << draw
+                              << " force_threshold=" << forceThreshold
+                              << " forced_by_probability="
+                              << (forcedByProbability ? 1 : 0)
+                              << " phase="
+                              << (evidenceFirstPhase
+                                      ? "evidence_first"
+                                      : "post_continuation")
+                              << " evidence_kept=" << evidenceKeptPixels
+                              << " evidence_separation="
+                              << evidenceSeparation
+                              << " evidence_short_radius="
+                              << evidenceShortestRadius
+                              << " evidence_ratio="
+                              << evidenceSeparationRatio
+                              << " attempt=" << (attempt ? 1 : 0)
+                              << std::endl;
+                    if (!attempt) continue;
+                    auto cellIt = std::find_if(
+                        frame.cells.begin(), frame.cells.end(),
+                        [&](const Ellipsoid &cell) {
+                            return cell.getName() == name;
+                        });
+                    if (cellIt == frame.cells.end()) continue;
+                    const std::mt19937 generatorBeforeSplitProbe = gen;
+                    attemptSplitAtIndex(
+                        static_cast<size_t>(
+                            std::distance(frame.cells.begin(), cellIt)),
+                        name, "celluniverse4_probability_equivalent",
+                        /*useLumenPrior=*/false);
+                    if (evidenceFirstPhase &&
+                        splitAcceptedInPhase.count(name) == 0) {
+                        // A rejected split callback restores cells, synth, and
+                        // cost. Restore every phase-local side effect as well
+                        // so this early diagnostic probe cannot alter
+                        // continuation or any later parent's claim geometry.
+                        gen = generatorBeforeSplitProbe;
+                        splitBlacklist.erase(name);
+                        splitRejectedInPhase.erase(name);
+                        std::cout
+                            << "[CellUniverse4 Split Reject Probe Restore] frame="
+                            << displayFrame
+                            << " cell=" << name
+                            << " phase=evidence_first"
+                            << " restored=rng,blacklist,rejected_claim_state"
+                            << std::endl;
+                    }
+                }
+                rebuildEligible();
+            };
+
+            // Only a clearly resolved two-lobe parent receives split-first
+            // priority. Marginal probability-only attempts stay after the
+            // continuation batch, preserving the stable early-frame behavior.
+            // A rejected split restores the frozen parent exactly; an accepted
+            // parent is replaced by newborn daughters and removed from
+            // `eligible` by rebuildEligible().
+            scheduleCellUniverse4ProbabilitySplits(
+                /*evidenceFirstPhase=*/true);
+
+            std::vector<std::string> batchNames;
+            batchNames.reserve(eligible.size());
+            for (const size_t index : eligible) {
+                if (index < frame.cells.size()) {
+                    batchNames.push_back(frame.cells[index].getName());
+                }
+            }
+            std::sort(batchNames.begin(), batchNames.end());
+            batchNames.erase(std::unique(batchNames.begin(), batchNames.end()),
+                             batchNames.end());
+
+            std::size_t proposedCount = 0;
+            std::size_t evaluatedCount = 0;
+            std::size_t committedCount = 0;
+            std::size_t noOpCount = 0;
+            std::size_t refinementAttemptedCount = 0;
+            std::size_t refinementAcceptedCount = 0;
+            std::size_t refinementAnchorRejectedCount = 0;
+            std::size_t siblingHalfspaceRejectedCount = 0;
+            struct ContinuationSiblingHalfspace {
+                bool valid = false;
+                cv::Point3f midpoint{0.0f, 0.0f, 0.0f};
+                cv::Point3f direction{0.0f, 0.0f, 0.0f};
+                float tolerance = 0.0f;
+            };
+            const auto continuationSiblingHalfspaceFor =
+                [&](const std::string &name,
+                    float parentMinRadius) {
+                    ContinuationSiblingHalfspace halfspace;
+                    if (!config.candidateBatch
+                             .continuationSiblingHalfspaceEnabled) {
+                        return halfspace;
+                    }
+                    const std::string siblingName =
+                        splitDaughterSiblingName(name);
+                    if (siblingName.empty()) return halfspace;
+                    const auto thisSnapshot = previousSnapshots.find(name);
+                    const auto siblingSnapshot =
+                        previousSnapshots.find(siblingName);
+                    const auto thisSeen = cellFirstSeenFrame.find(name);
+                    const auto siblingSeen =
+                        cellFirstSeenFrame.find(siblingName);
+                    if (thisSnapshot == previousSnapshots.end() ||
+                        siblingSnapshot == previousSnapshots.end() ||
+                        !thisSnapshot->second.valid ||
+                        !siblingSnapshot->second.valid ||
+                        thisSeen == cellFirstSeenFrame.end() ||
+                        siblingSeen == cellFirstSeenFrame.end() ||
+                        thisSeen->second != siblingSeen->second ||
+                        displayFrame <= thisSeen->second) {
+                        return halfspace;
+                    }
+                    cv::Point3f direction =
+                        thisSnapshot->second.position -
+                        siblingSnapshot->second.position;
+                    const float directionNorm =
+                        static_cast<float>(cv::norm(direction));
+                    if (directionNorm <= 1.0e-3f) return halfspace;
+                    halfspace.valid = true;
+                    halfspace.midpoint = 0.5f *
+                        (thisSnapshot->second.position +
+                         siblingSnapshot->second.position);
+                    halfspace.direction = direction * (1.0f / directionNorm);
+                    halfspace.tolerance =
+                        std::max(0.0f, parentMinRadius) *
+                        config.candidateBatch
+                            .continuationSiblingHalfspaceToleranceMinRadiusFraction;
+                    return halfspace;
+                };
+            const auto preservesSiblingHalfspace =
+                [](const cv::Point3f &position,
+                   const ContinuationSiblingHalfspace &halfspace) {
+                    return !halfspace.valid ||
+                        (position - halfspace.midpoint)
+                                .dot(halfspace.direction) >=
+                            -halfspace.tolerance;
+                };
+            for (const std::string &name : batchNames) {
+                auto cellIt = std::find_if(
+                    frame.cells.begin(), frame.cells.end(),
+                    [&](const Ellipsoid &cell) {
+                        return cell.getName() == name;
+                    });
+                if (cellIt == frame.cells.end() || cellIt->isTrash()) continue;
+                const size_t cellIndex = static_cast<size_t>(
+                    std::distance(frame.cells.begin(), cellIt));
+                const Ellipsoid baselineCell = frame.cells[cellIndex];
+                if (config.simulation.celluniverse4_component_filter_enabled) {
+                    cellUniverse4ComponentAnchors[name] = cv::Point3f(
+                        baselineCell.getX(), baselineCell.getY(),
+                        baselineCell.getZ());
+                }
+                const bool heldForBackgroundDrop =
+                    cellUniverse4BackgroundDropHoldOnly.count(name) > 0;
+                const bool reattachedBeforePerturb =
+                    cellUniverse4PrePerturbRescueAnchors.count(name) > 0 &&
+                    !heldForBackgroundDrop;
+                const bool hasExplicitSplitProposal =
+                    signalCenterSplitProposals.count(name) > 0 ||
+                    rodTipSplitFallbackProposals.count(name) > 0;
+                const bool bypassBackgroundDropHold =
+                    config.candidateBatch
+                        .backgroundDropExplicitSplitBypassHoldEnabled &&
+                    hasExplicitSplitProposal;
+                if (!bypassBackgroundDropHold &&
+                    (heldForBackgroundDrop ||
+                     (config.candidateBatch
+                          .backgroundDropSkipCandidateBatchIfReattached &&
+                      reattachedBeforePerturb))) {
+                    ++noOpCount;
+                    std::cout << "[CellUniverse4 Candidate Batch Hold] frame="
+                              << displayFrame
+                              << " cell=" << name
+                              << " reason="
+                              << (heldForBackgroundDrop
+                                      ? "pre_perturb_background_drop_no_safe_center"
+                                      : "pre_perturb_background_drop_reattach")
+                              << std::endl;
+                    continue;
+                }
+                if (bypassBackgroundDropHold &&
+                    (heldForBackgroundDrop || reattachedBeforePerturb)) {
+                    std::cout
+                        << "[CellUniverse4 Background Drop Explicit Split Bypass] frame="
+                        << displayFrame
+                        << " cell=" << name
+                        << " reattached=" << (reattachedBeforePerturb ? 1 : 0)
+                        << " holdOnly=" << (heldForBackgroundDrop ? 1 : 0)
+                        << " action=evaluate_explicit_split_candidate"
+                        << std::endl;
+                }
+
+                CandidateBatchInput input;
+                input.frame = displayFrame;
+                input.parentName = name;
+                input.baselinePosition = cv::Point3f(
+                    baselineCell.getX(), baselineCell.getY(),
+                    baselineCell.getZ());
+                input.parentMinRadius = std::max(
+                    1.0e-3f,
+                    std::min({baselineCell.getARadius(),
+                              baselineCell.getBRadius(),
+                              baselineCell.getCRadius()}));
+                const ContinuationSiblingHalfspace siblingHalfspace =
+                    continuationSiblingHalfspaceFor(
+                        name, input.parentMinRadius);
+                auto snapshotIt = previousSnapshots.find(name);
+                if (snapshotIt != previousSnapshots.end() &&
+                    snapshotIt->second.valid) {
+                    input.snapshotPosition = snapshotIt->second.position;
+                }
+                input.evidence.reserve(chunkEvidence.size());
+                for (const ChunkEvidence &evidence : chunkEvidence) {
+                    if (config.candidateBatch
+                            .perParentFreshEvidencePoolEnabled) {
+                        input.evidence.push_back(evidence);
+                        continue;
+                    }
+                    const auto ownerIt =
+                        cellUniverse4PrePerturbRescueCenterOwners.find(
+                            evidence.stableId);
+                    if (evidence.sourceFrameOffset > 0 ||
+                        ownerIt ==
+                            cellUniverse4PrePerturbRescueCenterOwners.end() ||
+                        ownerIt->second == name) {
+                        input.evidence.push_back(evidence);
+                    }
+                }
+
+                CandidateBatchConfig batchConfig = config.candidateBatch;
+                CandidateBatch batch(input, batchConfig);
+                proposedCount += batch.candidates().size();
+                const std::vector<size_t> expensive =
+                    batch.expensiveCandidateIndices();
+                for (const size_t proposalIndex : expensive) {
+                    if (proposalIndex == 0) continue;
+                    const CandidateProposal &proposal =
+                        batch.candidates()[proposalIndex];
+                    const cv::Point3f target = proposal.position;
+                    if (!preservesSiblingHalfspace(
+                            target, siblingHalfspace)) {
+                        batch.recordEvaluation(
+                            proposalIndex, 0.0);
+                        ++siblingHalfspaceRejectedCount;
+                        if (config.candidateBatch.exportDiagnostics) {
+                            std::ostringstream note;
+                            note << "score_is_total_cost_diff"
+                                 << ";candidate_batch=1"
+                                 << ";candidate_id=" << proposal.stableId
+                                 << ";source="
+                                 << candidateSourceName(proposal.source)
+                                 << ";evidence_id=" << proposal.evidenceId
+                                 << ";evidence_frame_offset="
+                                 << proposal.evidenceFrameOffset
+                                 << ";sibling_halfspace_rejected=1"
+                                 << ";stage=target";
+                            logPerturbCandidate(
+                                "celluniverse4_candidate", name,
+                                baselineCell, 0.0,
+                                false, randomPerturbRadiusRatio, note.str());
+                        }
+                        continue;
+                    }
+                    auto result = frame.perturbCell(
+                        cellIndex, overlapWeight,
+                        /*useSignalGuidance=*/false,
+                        randomPerturbRadiusRatio,
+                        /*pcaRefitWellFilledMove=*/false,
+                        /*useSignalMapGuidance=*/false,
+                        &target);
+                    const double costDiff = result.first;
+                    const Ellipsoid evaluatedCell = frame.cells[cellIndex];
+                    const cv::Point3f evaluatedPosition(
+                        evaluatedCell.getX(), evaluatedCell.getY(),
+                        evaluatedCell.getZ());
+                    const bool siblingHalfspaceSafe =
+                        preservesSiblingHalfspace(
+                            evaluatedPosition, siblingHalfspace);
+                    result.second(false);
+                    batch.recordEvaluation(
+                        proposalIndex,
+                        siblingHalfspaceSafe
+                            ? costDiff
+                            : 0.0);
+                    if (!siblingHalfspaceSafe) {
+                        ++siblingHalfspaceRejectedCount;
+                    }
+                    ++evaluatedCount;
+                    if (config.candidateBatch.exportDiagnostics) {
+                        std::ostringstream note;
+                        note << "score_is_total_cost_diff"
+                             << ";candidate_batch=1"
+                             << ";candidate_id=" << proposal.stableId
+                             << ";source="
+                             << candidateSourceName(proposal.source)
+                             << ";evidence_id=" << proposal.evidenceId
+                             << ";evidence_frame_offset="
+                             << proposal.evidenceFrameOffset
+                             << ";confidence="
+                             << proposal.evidenceConfidence
+                             << ";cheap_priority="
+                             << proposal.cheapPriority
+                             << ";sibling_halfspace_rejected="
+                             << (siblingHalfspaceSafe ? 0 : 1)
+                             << ";shadow=" << (shadowMode ? 1 : 0);
+                        logPerturbCandidate(
+                            "celluniverse4_candidate", name,
+                            evaluatedCell, costDiff, false,
+                            randomPerturbRadiusRatio, note.str());
+                    }
+                }
+
+                double baselineObjective = 0.0;
+                if (batchConfig.fractionalImprovementMargin > 0.0) {
+                    baselineObjective = frame.calculateCost(
+                        frame.getSynthFrame());
+                }
+                cv::Point3f refinementAnchor = input.baselinePosition;
+                bool refinementAnchorFromWinner = false;
+                const std::optional<size_t> winner =
+                    batch.selectWinner(baselineObjective);
+                if (!winner.has_value()) {
+                    ++noOpCount;
+                } else {
+                    const CandidateProposal selected =
+                        batch.candidates()[*winner];
+                    const cv::Point3f target = selected.position;
+                    auto winnerResult = frame.perturbCell(
+                        cellIndex, overlapWeight,
+                        /*useSignalGuidance=*/false,
+                        randomPerturbRadiusRatio,
+                        /*pcaRefitWellFilledMove=*/false,
+                        /*useSignalMapGuidance=*/false,
+                        &target);
+                    const double reevaluatedCost = winnerResult.first;
+                    const double tolerance =
+                        batchConfig.winnerReevaluationTolerance *
+                        (1.0 + std::abs(selected.costDiff));
+                    const bool stableReevaluation =
+                        std::isfinite(reevaluatedCost) &&
+                        std::abs(reevaluatedCost - selected.costDiff) <= tolerance;
+                    const Ellipsoid winnerCell = frame.cells[cellIndex];
+                    const cv::Point3f winnerPosition(
+                        winnerCell.getX(), winnerCell.getY(),
+                        winnerCell.getZ());
+                    const bool siblingHalfspaceSafe =
+                        preservesSiblingHalfspace(
+                            winnerPosition, siblingHalfspace);
+                    const bool accept = stableReevaluation &&
+                        siblingHalfspaceSafe && !shadowMode;
+                    winnerResult.second(accept);
+                    if (config.candidateBatch.exportDiagnostics) {
+                        std::ostringstream note;
+                        note << "score_is_total_cost_diff"
+                             << ";candidate_batch_winner=1"
+                             << ";candidate_id=" << selected.stableId
+                             << ";source="
+                             << candidateSourceName(selected.source)
+                             << ";evidence_frame_offset="
+                             << selected.evidenceFrameOffset
+                             << ";recorded_cost=" << selected.costDiff
+                             << ";reevaluated_cost=" << reevaluatedCost
+                             << ";reevaluation_tolerance=" << tolerance
+                             << ";stable="
+                             << (stableReevaluation ? 1 : 0)
+                             << ";sibling_halfspace_rejected="
+                             << (siblingHalfspaceSafe ? 0 : 1)
+                             << ";shadow=" << (shadowMode ? 1 : 0);
+                        logPerturbCandidate(
+                            "celluniverse4_candidate_winner", name,
+                            winnerCell, reevaluatedCost, accept,
+                            randomPerturbRadiusRatio, note.str());
+                    }
+                    if (!siblingHalfspaceSafe) {
+                        ++siblingHalfspaceRejectedCount;
+                        std::cout << "[CellUniverse4 Winner Reject] frame="
+                                  << displayFrame << " cell=" << name
+                                  << " reason=sibling_halfspace"
+                                  << std::endl;
+                    } else if (!stableReevaluation) {
+                        std::cout << "[CellUniverse4 Winner Reject] frame="
+                                  << displayFrame << " cell=" << name
+                                  << " reason=reevaluation_mismatch"
+                                  << " recorded=" << selected.costDiff
+                                  << " reevaluated=" << reevaluatedCost
+                                  << " tolerance=" << tolerance << std::endl;
+                    } else if (accept) {
+                        refinementAnchor = winnerPosition;
+                        refinementAnchorFromWinner = true;
+                        if (config.simulation
+                                .celluniverse4_component_filter_enabled) {
+                            cellUniverse4ComponentAnchors[name] =
+                                selected.position;
+                        }
+                        ++committedCount;
+                        ++perturbAccepted;
+                        residSum += reevaluatedCost;
+                        absResidSum += std::abs(reevaluatedCost);
+                        ++residCount;
+                    }
+                }
+
+                // After the center winner (or no-op) is settled, run the
+                // small YAML-bounded continuation refinement. These are the
+                // traditional parameter perturbations. Marginal probability-
+                // equivalent split scheduling follows parent refinement;
+                // strong PCA-separation evidence was probed before it. The
+                // shared final shape stage still runs afterward.
+                if (!shadowMode) {
+                    for (int refine = 0;
+                         refine < batchConfig
+                                      .continuationRefineIterationsPerParent;
+                         ++refine) {
+                        auto result = frame.perturbCell(
+                            cellIndex, overlapWeight,
+                            /*useSignalGuidance=*/false,
+                            randomPerturbRadiusRatio,
+                            /*pcaRefitWellFilledMove=*/true,
+                            /*useSignalMapGuidance=*/false);
+                        const double costDiff = result.first;
+                        const Ellipsoid refinedCell = frame.cells[cellIndex];
+                        const cv::Point3f refinedPosition(
+                            refinedCell.getX(), refinedCell.getY(),
+                            refinedCell.getZ());
+                        const bool siblingHalfspaceSafe =
+                            preservesSiblingHalfspace(
+                                refinedPosition, siblingHalfspace);
+                        const float refinementAnchorDistance =
+                            static_cast<float>(cv::norm(
+                                refinedPosition - refinementAnchor));
+                        const float refinementAnchorMaxDistance =
+                            std::max(0.0f, input.parentMinRadius) *
+                            batchConfig
+                                .continuationRefineMaxAnchorDistanceMinRadiusFraction;
+                        const bool refinementAnchorSafe =
+                            !batchConfig
+                                 .continuationRefineAnchorDistanceGateEnabled ||
+                            refinementAnchorDistance <=
+                                refinementAnchorMaxDistance + 1.0e-4f;
+                        const bool accept =
+                            siblingHalfspaceSafe && refinementAnchorSafe &&
+                            costDiff < -batchConfig
+                                            .continuationRefineAbsoluteImprovementMargin;
+                        result.second(accept);
+                        if (!siblingHalfspaceSafe) {
+                            ++siblingHalfspaceRejectedCount;
+                        }
+                        if (!refinementAnchorSafe) {
+                            ++refinementAnchorRejectedCount;
+                        }
+                        ++refinementAttemptedCount;
+                        if (config.candidateBatch.exportDiagnostics) {
+                            std::ostringstream note;
+                            note << "score_is_total_cost_diff"
+                                 << ";candidate_batch_refinement=1"
+                                 << ";refine_ordinal=" << refine
+                                 << ";absolute_improvement_margin="
+                                 << batchConfig
+                                        .continuationRefineAbsoluteImprovementMargin
+                                 << ";sibling_halfspace_rejected="
+                                 << (siblingHalfspaceSafe ? 0 : 1)
+                                 << ";refinement_anchor="
+                                 << (refinementAnchorFromWinner
+                                         ? "winner"
+                                         : "baseline")
+                                 << ";refinement_anchor_distance="
+                                 << refinementAnchorDistance
+                                 << ";refinement_anchor_max_distance="
+                                 << refinementAnchorMaxDistance
+                                 << ";refinement_anchor_rejected="
+                                 << (refinementAnchorSafe ? 0 : 1);
+                            logPerturbCandidate(
+                                "celluniverse4_post_center_refine", name,
+                                refinedCell, costDiff, accept,
+                                randomPerturbRadiusRatio, note.str());
+                        }
+                        if (accept) {
+                            ++refinementAcceptedCount;
+                            ++perturbAccepted;
+                            residSum += costDiff;
+                            absResidSum += std::abs(costDiff);
+                            ++residCount;
+                        }
+                    }
+                }
+            }
+
+            std::cout << "[CellUniverse4 Candidate Batch Summary] frame="
+                      << displayFrame
+                      << " parents=" << batchNames.size()
+                      << " chunks=" << chunkEvidence.size()
+                      << " proposed=" << proposedCount
+                      << " evaluated=" << evaluatedCount
+                      << " committed=" << committedCount
+                      << " noop=" << noOpCount
+                      << " refine_attempted="
+                      << refinementAttemptedCount
+                      << " refine_accepted="
+                      << refinementAcceptedCount
+                      << " refinement_anchor_rejected="
+                      << refinementAnchorRejectedCount
+                      << " sibling_halfspace_rejected="
+                      << siblingHalfspaceRejectedCount
+                      << " shadow=" << (shadowMode ? 1 : 0)
+                      << std::endl;
+            if (!shadowMode) {
+                scheduleCellUniverse4ProbabilitySplits(
+                    /*evidenceFirstPhase=*/false);
+                return;
+            }
         }
 
         ScopedStageTimer perturbLoopTimer(displayFrame, "perturb_iteration_loop");
@@ -21926,6 +24735,495 @@ void CellUniverse::optimize(int frameIndex)
     // Unified loop over ALL cells. Classification removed; all cells share
     // the same perturb+split iteration budget, and the split attempt gets
     // both snap-axis and image-PCA candidates regardless of snap elongation.
+    if (cellUniverse4Mode &&
+        config.candidateBatch.backgroundDropReattachEnabled) {
+        const int reattached = applySignalCenterRescueBeforePca(
+            frame,
+            config,
+            previousSnapshots,
+            cellFirstSeenFrame,
+            absoluteFrame,
+            &cellUniverse4PrePerturbRescueAnchors,
+            nullptr,
+            &cellUniverse4PrePerturbRescueCenterOwners,
+            &cellUniverse4BackgroundDropHoldOnly);
+        if (!cellUniverse4PrePerturbRescueAnchors.empty()) {
+            if (config.candidateBatch
+                    .backgroundDropCurrentLocalSplitOnlyEnabled) {
+                int localSplitAccepted = 0;
+                int localSplitHeld = 0;
+                for (const auto &entry :
+                     cellUniverse4PrePerturbRescueAnchors) {
+                    const std::string &cellName = entry.first;
+                    const auto trustedProposalIt =
+                        signalCenterSplitProposals.find(cellName);
+                    const bool preserveTrustedLocalComponentPair =
+                        config.candidateBatch.localComponentSplitCentersEnabled &&
+                        trustedProposalIt != signalCenterSplitProposals.end() &&
+                        trustedProposalIt->second.currentFrameLocalOnly &&
+                        trustedProposalIt->second.trustedLocalComponentPair;
+                    if (preserveTrustedLocalComponentPair) {
+                        const BridgeSplitProposal &trusted =
+                            trustedProposalIt->second;
+                        ++localSplitAccepted;
+                        std::cout
+                            << "[CU4 Local Component Split Trusted Pair Bypass] frame="
+                            << displayFrame
+                            << " cell=" << cellName
+                            << " action=preserve_skip_background_drop_reground"
+                            << " d1=(" << trusted.d1Pos.x << ","
+                            << trusted.d1Pos.y << "," << trusted.d1Pos.z
+                            << ") d2=(" << trusted.d2Pos.x << ","
+                            << trusted.d2Pos.y << "," << trusted.d2Pos.z
+                            << ")"
+                            << std::endl;
+                        continue;
+                    }
+                    // Any proposal created before recovery was evaluated at
+                    // the dropped position and may contain unrelated future
+                    // centers. A rescued parent gets one fresh current-frame
+                    // local-center decision and nothing else.
+                    signalCenterSplitProposals.erase(cellName);
+                    rodTipSplitFallbackProposals.erase(cellName);
+
+                    auto cellIt = std::find_if(
+                        frame.cells.begin(), frame.cells.end(),
+                        [&](const Ellipsoid &candidate) {
+                            return candidate.getName() == cellName;
+                        });
+                    const auto snapshotIt =
+                        previousSnapshots.find(cellName);
+                    if (cellIt == frame.cells.end() ||
+                        snapshotIt == previousSnapshots.end() ||
+                        !snapshotIt->second.valid) {
+                        ++localSplitHeld;
+                        std::cout
+                            << "[CellUniverse4 Background Drop Local Split] frame="
+                            << displayFrame
+                            << " cell=" << cellName
+                            << " action=hold reason=missing_cell_or_snapshot"
+                            << std::endl;
+                        continue;
+                    }
+
+                    const size_t cellIndex = static_cast<size_t>(
+                        std::distance(frame.cells.begin(), cellIt));
+                    SignalCenterSplitProposalResult localProposal =
+                        findSignalCenterSplitProposal(
+                            frame, cellIndex, snapshotIt->second, config,
+                            /*rescuedCurrentLocalPool=*/true);
+                    bool usedCurrentLocalPrepass = false;
+                    if (!localProposal.valid &&
+                        config.candidateBatch
+                            .backgroundDropCurrentLocalPrepassFallbackEnabled) {
+                        // Rebuild this parent's evidence after recovery.  The
+                        // frame-start pre-pass was centered on the stale
+                        // snapshot position and let every neighbor contribute
+                        // two speculative daughter claims.  Reusing that pair
+                        // can seed a daughter between two real current-frame
+                        // bodies (cell 51 at frame 31).  A recovered parent
+                        // instead gets its own fresh pool: one current live
+                        // center per other cell, then a weighted two-cluster
+                        // gather seeded at the recovered body and the
+                        // opposite side of the current split axis.
+                        const cv::Point3f parentPos(
+                            cellIt->getX(), cellIt->getY(), cellIt->getZ());
+                        PreviousFrameSnapshot recoveredSnapshot =
+                            snapshotIt->second;
+                        recoveredSnapshot.position = parentPos;
+                        const float recoveredParentMaxR = std::max({
+                            recoveredSnapshot.aRadius,
+                            recoveredSnapshot.bRadius,
+                            recoveredSnapshot.cRadius,
+                            cellIt->getARadius(), cellIt->getBRadius(),
+                            cellIt->getCRadius(), 1.0f});
+                        cv::Point3f projectedSeed1 = parentPos;
+                        cv::Point3f projectedSeed2 = parentPos;
+                        bool hasProjectedOppositeSeed = false;
+                        const auto oldDaughtersIt =
+                            expectedDaughters.find(cellName);
+                        if (oldDaughtersIt != expectedDaughters.end()) {
+                            const cv::Point3f oldDelta =
+                                oldDaughtersIt->second.second -
+                                oldDaughtersIt->second.first;
+                            const float oldSeparation = static_cast<float>(
+                                cv::norm(oldDelta));
+                            if (std::isfinite(oldSeparation) &&
+                                oldSeparation > 1.0e-3f) {
+                                recoveredSnapshot.splitAxisDir =
+                                    oldDelta * (1.0f / oldSeparation);
+                                recoveredSnapshot.splitAxisLength =
+                                    oldSeparation;
+                                const float distanceToOldD1 =
+                                    static_cast<float>(cv::norm(
+                                        parentPos -
+                                        oldDaughtersIt->second.first));
+                                const float distanceToOldD2 =
+                                    static_cast<float>(cv::norm(
+                                        parentPos -
+                                        oldDaughtersIt->second.second));
+                                cv::Point3f outwardAxis =
+                                    oldDelta * (1.0f / oldSeparation);
+                                if (distanceToOldD2 < distanceToOldD1) {
+                                    outwardAxis *= -1.0f;
+                                }
+                                const float projectedDistance = std::max(
+                                    oldSeparation,
+                                    recoveredParentMaxR *
+                                        config.candidateBatch
+                                            .backgroundDropCurrentLocalProjectedSeedDistanceRadiusFraction);
+                                projectedSeed2 =
+                                    parentPos + outwardAxis * projectedDistance;
+                                hasProjectedOppositeSeed = true;
+                            }
+                        }
+
+                        Frame::ClaimSet currentFrameClaims;
+                        for (const auto &other : frame.cells) {
+                            const std::string otherName = other.getName();
+                            if (otherName == cellName) {
+                                continue;
+                            }
+                            currentFrameClaims[otherName].push_back(
+                                cv::Point3f(other.getX(), other.getY(),
+                                            other.getZ()));
+                        }
+                        cv::Point3f regroundedD1;
+                        cv::Point3f regroundedD2;
+                        int regroundedKeptPixels = 0;
+                        float minClusterWeightFraction = 0.0f;
+                        float clusterVarianceReduction = 0.0f;
+                        const bool currentFrameClustered =
+                            hasProjectedOppositeSeed &&
+                            frame.clusterCurrentFrameSplitCenters(
+                                cellIndex, recoveredSnapshot,
+                                currentFrameClaims, projectedSeed1,
+                                projectedSeed2,
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalClusterGatherRadiusScale,
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalClusterIterations,
+                                regroundedD1, regroundedD2,
+                                &regroundedKeptPixels,
+                                &minClusterWeightFraction,
+                                &clusterVarianceReduction);
+                        const bool currentFrameRegrounded =
+                            currentFrameClustered &&
+                            minClusterWeightFraction >=
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalClusterMinWeightFraction &&
+                            clusterVarianceReduction >=
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalClusterMinVarianceReduction;
+                        if (currentFrameRegrounded) {
+                            expectedDaughters[cellName] = {
+                                regroundedD1, regroundedD2};
+                            expectedDaughterKeptPixels[cellName] =
+                                regroundedKeptPixels;
+                        }
+                        std::cout
+                            << "[CellUniverse4 Background Drop Local Reground] frame="
+                            << displayFrame
+                            << " cell=" << cellName
+                            << " action="
+                            << (currentFrameRegrounded ? "accept" : "hold")
+                            << " kept=" << regroundedKeptPixels
+                            << " recoveredParent=(" << parentPos.x << ","
+                            << parentPos.y << "," << parentPos.z << ")"
+                            << " projectedSeed2=(" << projectedSeed2.x << ","
+                            << projectedSeed2.y << "," << projectedSeed2.z
+                            << ")"
+                            << " d1=(" << regroundedD1.x << ","
+                            << regroundedD1.y << "," << regroundedD1.z << ")"
+                            << " d2=(" << regroundedD2.x << ","
+                            << regroundedD2.y << "," << regroundedD2.z << ")"
+                            << " claimCells=" << currentFrameClaims.size()
+                            << " minClusterWeightFraction="
+                            << minClusterWeightFraction
+                            << " varianceReduction="
+                            << clusterVarianceReduction
+                            << " minRequiredWeightFraction="
+                            << config.candidateBatch
+                                   .backgroundDropCurrentLocalClusterMinWeightFraction
+                            << " minRequiredVarianceReduction="
+                            << config.candidateBatch
+                                   .backgroundDropCurrentLocalClusterMinVarianceReduction
+                            << std::endl;
+
+                        const auto daughtersIt =
+                            expectedDaughters.find(cellName);
+                        const auto keptIt =
+                            expectedDaughterKeptPixels.find(cellName);
+                        std::string fallbackReject = currentFrameRegrounded
+                            ? "missing_current_frame_reground_evidence"
+                            : "current_frame_reground_failed";
+                        if (currentFrameRegrounded &&
+                            daughtersIt != expectedDaughters.end() &&
+                            keptIt != expectedDaughterKeptPixels.end()) {
+                            cv::Point3f d1 = daughtersIt->second.first;
+                            cv::Point3f d2 = daughtersIt->second.second;
+                            const cv::Point3f anchor = entry.second;
+                            // Recovery deliberately places the parent on one
+                            // daughter-side bright center.  A valid split pair
+                            // therefore must straddle and remain centered on
+                            // the pre-recovery parent, not on that recovered
+                            // daughter-side anchor.  Using parentPos here made
+                            // the frame-31 cell-51 pair fail its midpoint gate
+                            // even though its midpoint stayed at the copied
+                            // parent center.
+                            const cv::Point3f parentReference =
+                                snapshotIt->second.position;
+                            const cv::Point3f delta = d2 - d1;
+                            const float separation =
+                                static_cast<float>(cv::norm(delta));
+                            const float parentMaxR = std::max({
+                                snapshotIt->second.aRadius,
+                                snapshotIt->second.bRadius,
+                                snapshotIt->second.cRadius,
+                                cellIt->getARadius(),
+                                cellIt->getBRadius(),
+                                cellIt->getCRadius()});
+                            const bool finite =
+                                std::isfinite(d1.x) && std::isfinite(d1.y) &&
+                                std::isfinite(d1.z) && std::isfinite(d2.x) &&
+                                std::isfinite(d2.y) && std::isfinite(d2.z) &&
+                                std::isfinite(separation) &&
+                                std::isfinite(parentMaxR) &&
+                                separation > 1.0e-3f && parentMaxR > 1.0e-3f;
+                            float midpointDistance =
+                                std::numeric_limits<float>::infinity();
+                            float nearestAnchorDistance =
+                                std::numeric_limits<float>::infinity();
+                            float axisAlignment = 0.0f;
+                            float side1 = 0.0f;
+                            float side2 = 0.0f;
+                            if (finite) {
+                                const cv::Point3f midpoint = 0.5f * (d1 + d2);
+                                midpointDistance = static_cast<float>(
+                                    cv::norm(midpoint - parentReference));
+                                nearestAnchorDistance = std::min(
+                                    static_cast<float>(cv::norm(d1 - anchor)),
+                                    static_cast<float>(cv::norm(d2 - anchor)));
+                                const cv::Point3f axis = delta * (1.0f / separation);
+                                cv::Point3f referenceAxis =
+                                    snapshotIt->second.splitAxisDir;
+                                const float referenceNorm = static_cast<float>(
+                                    cv::norm(referenceAxis));
+                                if (referenceNorm > 1.0e-6f) {
+                                    referenceAxis *= (1.0f / referenceNorm);
+                                    axisAlignment =
+                                        std::abs(axis.dot(referenceAxis));
+                                }
+                                side1 = (d1 - parentReference).dot(axis);
+                                side2 = (d2 - parentReference).dot(axis);
+                            }
+                            const float minSeparation =
+                                std::max(0.0f,
+                                    config.prob
+                                        .signal_center_split_min_separation_radius_scale) *
+                                parentMaxR;
+                            const float maxSeparation =
+                                std::max(
+                                    config.prob
+                                        .signal_center_split_min_separation_radius_scale,
+                                    config.prob
+                                        .signal_center_split_max_separation_radius_scale) *
+                                parentMaxR;
+                            const float maxAnchorDistance =
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalPrepassFallbackMaxAnchorDistanceRadiusFraction *
+                                parentMaxR;
+                            const float maxMidpointDistance =
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction *
+                                parentMaxR;
+                            const float minAxisAlignment =
+                                std::clamp(
+                                    config.prob
+                                        .signal_center_split_min_axis_alignment,
+                                    0.0f, 1.0f) *
+                                std::clamp(
+                                    config.prob
+                                        .signal_center_relaxed_axis_alignment_fraction,
+                                    0.0f, 1.0f);
+                            if (!finite) {
+                                fallbackReject = "nonfinite_or_degenerate";
+                            } else if (
+                                keptIt->second <
+                                config.candidateBatch
+                                    .backgroundDropCurrentLocalPrepassFallbackMinKeptPixels) {
+                                fallbackReject = "insufficient_kept_pixels";
+                            } else if (separation < minSeparation ||
+                                       separation > maxSeparation) {
+                                fallbackReject = "separation_gate";
+                            } else if (nearestAnchorDistance > maxAnchorDistance) {
+                                fallbackReject = "anchor_distance_gate";
+                            } else if (midpointDistance > maxMidpointDistance) {
+                                fallbackReject = "midpoint_gate";
+                            } else if (axisAlignment < minAxisAlignment) {
+                                fallbackReject = "axis_alignment_gate";
+                            } else if (!(side1 <= 0.0f && side2 >= 0.0f)) {
+                                fallbackReject = "parent_straddle_gate";
+                            } else {
+                                if (delta.dot(snapshotIt->second.splitAxisDir) < 0.0f) {
+                                    std::swap(d1, d2);
+                                }
+                                const int sidePixels =
+                                    std::max(1, keptIt->second / 2);
+                                localProposal = SignalCenterSplitProposalResult{};
+                                localProposal.valid = true;
+                                localProposal.rejectReason = "ok";
+                                localProposal.centerIndexA =
+                                    std::numeric_limits<size_t>::max();
+                                localProposal.centerIndexB =
+                                    std::numeric_limits<size_t>::max();
+                                localProposal.parentShape = std::max(
+                                    cellIt->shapeElongation(),
+                                    snapshotIt->second.shapeElongation);
+                                localProposal.separation = separation;
+                                localProposal.separationRatio =
+                                    separation / parentMaxR;
+                                localProposal.midpointDistance =
+                                    midpointDistance;
+                                localProposal.axisAlignment = axisAlignment;
+                                localProposal.score =
+                                    midpointDistance / parentMaxR +
+                                    std::abs(localProposal.separationRatio - 1.0f);
+                                localProposal.proposal.d1Pos = d1;
+                                localProposal.proposal.d2Pos = d2;
+                                localProposal.proposal.candidateIdA = -1;
+                                localProposal.proposal.candidateIdB = -1;
+                                localProposal.proposal.elongation =
+                                    localProposal.score;
+                                localProposal.proposal.signalCenterScore =
+                                    localProposal.score;
+                                localProposal.proposal.currentFrameLocalOnly = true;
+                                localProposal.proposal.costImprovementThresholdOverride =
+                                    config.candidateBatch
+                                        .backgroundDropCurrentLocalPrepassFallbackMinCostImprovement;
+                                localProposal.proposal.parentShapeElongation =
+                                    localProposal.parentShape;
+                                localProposal.proposal.elongatedParentRescued = true;
+                                localProposal.proposal.gapStartBin = -4;
+                                localProposal.proposal.gapEndBin = -4;
+                                localProposal.proposal.leftPixelCount = sidePixels;
+                                localProposal.proposal.rightPixelCount = sidePixels;
+                                usedCurrentLocalPrepass = true;
+                            }
+                            std::cout
+                                << "[CellUniverse4 Background Drop Local Reground Gate] frame="
+                                << displayFrame
+                                << " cell=" << cellName
+                                << " action="
+                                << (usedCurrentLocalPrepass ? "accept" : "reject")
+                                << " reason="
+                                << (usedCurrentLocalPrepass ? "ok" : fallbackReject)
+                                << " kept=" << keptIt->second
+                                << " separation=" << separation
+                                << " separationRatio="
+                                << (parentMaxR > 1.0e-3f
+                                        ? separation / parentMaxR : 0.0f)
+                                << " midpointDistance=" << midpointDistance
+                                << " anchorDistance=" << nearestAnchorDistance
+                                << " parentReference=("
+                                << parentReference.x << ","
+                                << parentReference.y << ","
+                                << parentReference.z << ")"
+                                << " axisAlignment=" << axisAlignment
+                                << " sides=" << side1 << "," << side2
+                                << std::endl;
+                        }
+                    }
+                    if (!localProposal.valid) {
+                        ++localSplitHeld;
+                        std::cout
+                            << "[CellUniverse4 Background Drop Local Split] frame="
+                            << displayFrame
+                            << " cell=" << cellName
+                            << " action=hold reason="
+                            << localProposal.rejectReason
+                            << " centersInside="
+                            << localProposal.centersInside
+                            << " candidatePairs="
+                            << localProposal.candidatePairs
+                            << " rejectedNeighborOwned="
+                            << localProposal.rejectedByNeighborOwnedCenter
+                            << std::endl;
+                        continue;
+                    }
+
+                    localProposal.proposal.immediateFutureCenterBacked = false;
+                    signalCenterSplitProposals[cellName] =
+                        localProposal.proposal;
+                    ++localSplitAccepted;
+                    std::cout
+                        << "[CellUniverse4 Background Drop Local Split] frame="
+                        << displayFrame
+                        << " cell=" << cellName
+                        << " action=replace_with_current_local_pair"
+                        << " source="
+                        << (usedCurrentLocalPrepass
+                                ? "per_parent_current_frame_reground"
+                                : "global_signal_centers")
+                        << " centerA="
+                        << (usedCurrentLocalPrepass
+                                ? -1LL
+                                : static_cast<long long>(localProposal.centerIndexA))
+                        << " centerB="
+                        << (usedCurrentLocalPrepass
+                                ? -1LL
+                                : static_cast<long long>(localProposal.centerIndexB))
+                        << " separation=" << localProposal.separation
+                        << " midpointDistance="
+                        << localProposal.midpointDistance
+                        << " d1=("
+                        << localProposal.proposal.d1Pos.x << ","
+                        << localProposal.proposal.d1Pos.y << ","
+                        << localProposal.proposal.d1Pos.z << ")"
+                        << " d2=("
+                        << localProposal.proposal.d2Pos.x << ","
+                        << localProposal.proposal.d2Pos.y << ","
+                        << localProposal.proposal.d2Pos.z << ")"
+                        << std::endl;
+                }
+                std::cout
+                    << "[CellUniverse4 Background Drop Local Split Summary] frame="
+                    << displayFrame
+                    << " accepted=" << localSplitAccepted
+                    << " held=" << localSplitHeld
+                    << std::endl;
+            }
+            // Every later cost evaluation must see the recovered placement.
+            // Hold the recovered cell for this frame: the known-bad local L2
+            // direction must not immediately walk it back onto background,
+            // and a biologically meaningful split can wait for one supported
+            // frame after reattachment.
+            frame.regenerateSynthFrame();
+            for (const auto &entry :
+                 cellUniverse4PrePerturbRescueAnchors) {
+                const bool hasExplicitSplitProposal =
+                    signalCenterSplitProposals.count(entry.first) > 0 ||
+                    rodTipSplitFallbackProposals.count(entry.first) > 0;
+                if (!config.candidateBatch
+                         .backgroundDropExplicitSplitBypassHoldEnabled ||
+                    !hasExplicitSplitProposal) {
+                    splitBlacklist.insert(entry.first);
+                }
+            }
+            std::cout << "[CellUniverse4 Pre-Perturb Reattach] frame="
+                      << displayFrame
+                      << " protectedCells="
+                      << cellUniverse4PrePerturbRescueAnchors.size()
+                      << " reattached=" << reattached
+                      << " holdOnly="
+                      << cellUniverse4BackgroundDropHoldOnly.size()
+                      << " reservedCenters="
+                      << cellUniverse4PrePerturbRescueCenterOwners.size()
+                      << " action=hold_position_and_split_for_frame"
+                      << std::endl;
+        }
+    }
+
     std::set<std::string> allNames;
     for (const auto &cell : frame.cells) {
         allNames.insert(cell.getName());
@@ -22193,6 +25491,28 @@ void CellUniverse::optimize(int frameIndex)
         }
     }
 
+    // Some specialized split routes do not pass through runPhase's accepted
+    // callback bookkeeping. Detect every unregistered lineage daughter before
+    // the generic fit so those already-refitted births receive the same
+    // protection.
+    for (const auto &cell : frame.cells) {
+        if (!cell.isTrash() &&
+            cellFirstSeenFrame.find(cell.getName()) ==
+                cellFirstSeenFrame.end() &&
+            isSplitDaughterLineageName(cell.getName())) {
+            newbornSplitDaughters.insert(cell.getName());
+        }
+    }
+
+    std::unordered_map<std::string, std::array<float, 3>>
+        finalShapeBaselineByName;
+    finalShapeBaselineByName.reserve(frame.cells.size());
+    for (const auto &cell : frame.cells) {
+        if (cell.isTrash()) continue;
+        finalShapeBaselineByName[cell.getName()] = {
+            cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+    }
+
     {
         ScopedStageTimer pcaTimer(displayFrame, "final_pca_shape");
         runPcaShapeFit();
@@ -22217,6 +25537,18 @@ void CellUniverse::optimize(int frameIndex)
             if (splitBlacklist.count(parentName) > 0) {
                 continue;
             }
+            // A nonnegative universal cooldown is a hard cross-route policy.
+            // In particular, do not let the severe post-PCA rod retry bypass
+            // it; that bypass was a major source of immediate daughter cascades.
+            if (config.prob.split_daughter_resplit_cooldown_frames >= 0 &&
+                splitDaughterCoolingDown(parentName)) {
+                std::cout << "[Post PCA Bridge Split Skip] frame "
+                          << displayFrame
+                          << " parent=" << parentName
+                          << " reason=daughter_resplit_cooldown"
+                          << std::endl;
+                continue;
+            }
             auto snapIt = previousSnapshots.find(parentName);
             if (snapIt == previousSnapshots.end() || !snapIt->second.valid) {
                 continue;
@@ -22231,7 +25563,7 @@ void CellUniverse::optimize(int frameIndex)
                 std::max(1.0f, snapIt->second.shapeElongation);
             const float elongationJump = currentElongation / snapshotElongation;
             const bool recentDaughterPostPcaRod =
-                cellUniverse2SplitCoolingDown(parentName) &&
+                splitDaughterCoolingDown(parentName) &&
                 currentElongation >=
                     config.prob.post_pca_bridge_severe_new_rod_min_shape;
             const bool severeNewPostPcaRod =
@@ -22244,7 +25576,7 @@ void CellUniverse::optimize(int frameIndex)
                      config.prob
                          .post_pca_bridge_severe_new_rod_min_elongation_jump ||
                  recentDaughterPostPcaRod);
-            if (cellUniverse2SplitCoolingDown(parentName) &&
+            if (splitDaughterCoolingDown(parentName) &&
                 !severeNewPostPcaRod) {
                 continue;
             }
@@ -22263,7 +25595,7 @@ void CellUniverse::optimize(int frameIndex)
                           << " recentDaughterPostPcaRod="
                           << (recentDaughterPostPcaRod ? 1 : 0)
                           << std::endl;
-            } else if (cellUniverse2SplitCoolingDown(parentName)) {
+            } else if (splitDaughterCoolingDown(parentName)) {
                 std::cout << "[Post PCA Bridge Retry Cooldown Bypass] frame "
                           << displayFrame
                           << " cell=" << parentName
@@ -22287,7 +25619,7 @@ void CellUniverse::optimize(int frameIndex)
             const size_t cellIdx =
                 static_cast<size_t>(std::distance(frame.cells.begin(), it));
             const bool recentDaughterPostPcaRod =
-                cellUniverse2SplitCoolingDown(parentName) &&
+                splitDaughterCoolingDown(parentName) &&
                 frame.cells[cellIdx].shapeElongation() >=
                     config.prob.post_pca_bridge_severe_new_rod_min_shape;
 
@@ -23060,7 +26392,11 @@ void CellUniverse::optimize(int frameIndex)
                 config.cellLumen.fusionSplitPriorMaxDynamicDaughterOverlapFraction,
                 config.cellLumen.fusionSplitPriorSnapshotSeedMaxRefitDrift,
                 config.cellLumen.fusionSplitPriorSkipExistingCellBuriedCheck,
-                config.cellLumen.fusionSplitPriorSkipNeighborBridgeCheck);
+                config.cellLumen.fusionSplitPriorSkipNeighborBridgeCheck,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridValleyOverrideEnabled,
+                config.candidateBatch
+                    .localComponentSplitSaturatedSparseHybridMaxValleyRatio);
 
             const bool accept = result.first < 0.0;
             result.second(accept);
@@ -23685,7 +27021,9 @@ void CellUniverse::optimize(int frameIndex)
         }
     }
 
-    if (config.cell && config.cell->pcaShapeRatioBoundEnabled) {
+    if (config.cell && config.cell->pcaShapeRatioBoundEnabled &&
+        !(cellUniverse4Mode &&
+          config.cell->pcaShapeRatioBoundHardLimitEnabled)) {
         const float maxLongMidRatio =
             std::max(1.0f, config.cell->pcaShapeMaxLongMidRatio);
         const float maxMidShortRatio =
@@ -23738,6 +27076,17 @@ void CellUniverse::optimize(int frameIndex)
                 }
             }
 
+            // A ratio correction must not bypass the configured per-frame
+            // PCA shrink bound.  This also protects daughters born after the
+            // main PCA/reference update, before they have a prior snapshot.
+            if (config.cell->pcaShapeFitGrowthCapEnabled) {
+                const float shrinkFloor = 1.0f - std::clamp(
+                    config.cell->pcaShapeFitGrowthCap, 0.0f, 1.0f);
+                radii[0] = std::max(radii[0], original[0] * shrinkFloor);
+                radii[1] = std::max(radii[1], original[1] * shrinkFloor);
+                radii[2] = std::max(radii[2], original[2] * shrinkFloor);
+            }
+
             const bool changed =
                 std::abs(radii[0] - original[0]) > 1e-4f ||
                 std::abs(radii[1] - original[1]) > 1e-4f ||
@@ -23782,6 +27131,890 @@ void CellUniverse::optimize(int frameIndex)
                       << " maxLongShort=" << maxLongShortRatio
                       << std::endl;
             frame.regenerateSynthFrame();
+        }
+    }
+
+    // Final exported-geometry guard.  Several post-PCA stages (the cumulative
+    // birth cap and, in CU3, the ratio bound above) run after the main fit
+    // cap/reference update.
+    // Reapply the same two-sided bound against the previous exported shape,
+    // or the frame-entry geometry on the first frame, so no late stage can
+    // silently reintroduce a one-frame collapse.  Newly born daughters have
+    // neither reference and are protected at the ratio-bound site above.
+    if (config.cell && config.cell->pcaShapeFitGrowthCapEnabled) {
+        const float finalDelta = std::clamp(
+            config.cell->pcaShapeFitGrowthCap, 0.0f, 1.0f);
+        const float finalDown = 1.0f - finalDelta;
+        const float finalUp = 1.0f + finalDelta;
+        int finalShapeClamped = 0;
+        int finalShapeRoundingRescued = 0;
+        for (auto &cell : frame.cells) {
+            if (cell.isTrash()) continue;
+            const std::string &name = cell.getName();
+            std::array<float, 3> reference{};
+            const char *referenceKind = nullptr;
+            auto snapIt = previousSnapshots.find(name);
+            if (snapIt != previousSnapshots.end() && snapIt->second.valid) {
+                reference = {snapIt->second.aRadius,
+                             snapIt->second.bRadius,
+                             snapIt->second.cRadius};
+                referenceKind = "previous_snapshot";
+            } else {
+                auto preIt = finalShapeBaselineByName.find(name);
+                if (preIt == finalShapeBaselineByName.end()) continue;
+                reference = preIt->second;
+                referenceKind = "frame_entry";
+            }
+
+            const std::array<float, 3> before{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            const std::array<float, 3> ordinaryAfter{
+                std::clamp(before[0], reference[0] * finalDown,
+                           reference[0] * finalUp),
+                std::clamp(before[1], reference[1] * finalDown,
+                           reference[1] * finalUp),
+                std::clamp(before[2], reference[2] * finalDown,
+                           reference[2] * finalUp)};
+            std::array<float, 3> after = ordinaryAfter;
+            if (config.cell->pcaShapeFitRoundingRescueEnabled) {
+                const auto rescue =
+                    cell_refit_guards::rescueRounderShapeAtFixedVolume(
+                        before,
+                        ordinaryAfter,
+                        config.cell
+                            ->pcaShapeFitRoundingRescueMinElongationImprovement,
+                        config.cell
+                            ->pcaShapeFitRoundingRescueMaxAxisRedistributionFraction);
+                if (rescue.applied) {
+                    after = rescue.radii;
+                    ++finalShapeRoundingRescued;
+                    std::cout
+                        << "[Final Shape Guard Rounding Rescue] frame "
+                        << displayFrame << " cell=" << name
+                        << " beforeR=(" << before[0] << "," << before[1]
+                        << "," << before[2] << ")"
+                        << " ordinaryR=(" << ordinaryAfter[0] << ","
+                        << ordinaryAfter[1] << "," << ordinaryAfter[2]
+                        << ") rescuedR=(" << after[0] << "," << after[1]
+                        << "," << after[2] << ")"
+                        << " elong=" << rescue.cappedElongation << "->"
+                        << rescue.rescuedElongation
+                        << " radiusProduct="
+                        << rescue.cappedRadiusProduct << "->"
+                        << rescue.rescuedRadiusProduct
+                        << std::endl;
+                }
+            }
+            if (after == before) continue;
+            cell.setRadii(after[0], after[1], after[2]);
+            ++finalShapeClamped;
+            std::cout << "[Final Shape Guard] frame " << displayFrame
+                      << " cell=" << name
+                      << " reference=" << referenceKind
+                      << " refR=(" << reference[0] << "," << reference[1]
+                      << "," << reference[2] << ")"
+                      << " beforeR=(" << before[0] << "," << before[1]
+                      << "," << before[2] << ")"
+                      << " afterR=(" << after[0] << "," << after[1]
+                      << "," << after[2] << ")"
+                      << " maxDelta=" << finalDelta << std::endl;
+        }
+        if (finalShapeClamped > 0) {
+            frame.regenerateSynthFrame();
+            std::cout << "[Final Shape Guard Summary] frame "
+                      << displayFrame
+                      << " clamped=" << finalShapeClamped
+                      << " roundingRescued="
+                      << finalShapeRoundingRescued
+                      << " maxDelta=" << finalDelta << std::endl;
+        }
+    }
+
+    struct CellUniverse4RawSplitShapeEvidence
+    {
+        float shapeElongation = 1.0f;
+        cv::Point3f splitAxisDirection{1.0f, 0.0f, 0.0f};
+        float splitAxisLength = 0.0f;
+    };
+    std::unordered_map<std::string, CellUniverse4RawSplitShapeEvidence>
+        cellUniverse4RawSplitShapeEvidence;
+
+    // CU4 hard shape projection runs after the temporal guard so its limits
+    // cannot be weakened by the legacy 10% shrink floor. It only shrinks the
+    // overlong axes, including on a daughter's birth frame, and leaves the
+    // shared sibling volume guard free to apply a later uniform scale. Raw
+    // split evidence is captured immediately above before any projection.
+    if (cellUniverse4Mode && config.cell &&
+        config.cell->pcaShapeRatioBoundEnabled &&
+        config.cell->pcaShapeRatioBoundHardLimitEnabled) {
+        if (config.cell->pcaShapeRatioBoundPreserveSplitEvidence) {
+            cellUniverse4RawSplitShapeEvidence.reserve(frame.cells.size());
+            for (const auto &cell : frame.cells) {
+                if (cell.isTrash()) continue;
+                CellUniverse4RawSplitShapeEvidence evidence;
+                evidence.shapeElongation = cell.shapeElongation();
+                cell.worldSplitAxis(
+                    evidence.splitAxisDirection,
+                    evidence.splitAxisLength);
+                cellUniverse4RawSplitShapeEvidence.emplace(
+                    cell.getName(), evidence);
+            }
+        }
+
+        const int minimumAge =
+            std::max(0, config.cell->pcaShapeRatioBoundMinAgeFrames);
+        int projectedCells = 0;
+        int unsatisfiedCells = 0;
+        for (auto &cell : frame.cells) {
+            if (cell.isTrash()) continue;
+            const auto firstSeenIt =
+                cellFirstSeenFrame.find(cell.getName());
+            const int age = firstSeenIt == cellFirstSeenFrame.end()
+                ? 0
+                : absoluteFrame - firstSeenIt->second;
+            if (age < minimumAge) continue;
+
+            const std::array<float, 3> before{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            if (config.prob.celluniverse4_rod_tip_hard_reject_enabled) {
+                std::array<float, 3> sortedBefore = before;
+                std::sort(
+                    sortedBefore.begin(),
+                    sortedBefore.end(),
+                    std::greater<float>());
+                const float longR = std::max(1e-3f, sortedBefore[0]);
+                const float midR = std::max(1e-3f, sortedBefore[1]);
+                const float shortR = std::max(1e-3f, sortedBefore[2]);
+                const float longShort = longR / shortR;
+                const float longMid = longR / midR;
+                const float midShort = midR / shortR;
+                const bool rodTipFailure =
+                    longShort >= std::max(
+                        1.0f,
+                        config.prob
+                            .celluniverse4_rod_tip_min_long_short_ratio) &&
+                    longMid >= std::max(
+                        1.0f,
+                        config.prob
+                            .celluniverse4_rod_tip_min_long_mid_ratio) &&
+                    midShort <= std::max(
+                        1.0f,
+                        config.prob
+                            .celluniverse4_rod_tip_max_mid_short_ratio);
+                if (rodTipFailure) {
+                    bool restoredPrevious = false;
+                    auto snapshotIt = previousSnapshots.find(cell.getName());
+                    if (snapshotIt != previousSnapshots.end() &&
+                        snapshotIt->second.valid) {
+                        const PreviousFrameSnapshot &snapshot =
+                            snapshotIt->second;
+                        std::array<float, 3> snapshotRadii{
+                            snapshot.aRadius,
+                            snapshot.bRadius,
+                            snapshot.cRadius};
+                        std::sort(
+                            snapshotRadii.begin(),
+                            snapshotRadii.end(),
+                            std::greater<float>());
+                        const float snapshotLongShort =
+                            snapshotRadii[0] /
+                            std::max(1e-3f, snapshotRadii[2]);
+                        const float snapshotLongMid =
+                            snapshotRadii[0] /
+                            std::max(1e-3f, snapshotRadii[1]);
+                        const float snapshotMidShort =
+                            snapshotRadii[1] /
+                            std::max(1e-3f, snapshotRadii[2]);
+                        const bool previousWasRodTip =
+                            snapshotLongShort >= std::max(
+                                1.0f,
+                                config.prob
+                                    .celluniverse4_rod_tip_min_long_short_ratio) &&
+                            snapshotLongMid >= std::max(
+                                1.0f,
+                                config.prob
+                                    .celluniverse4_rod_tip_min_long_mid_ratio) &&
+                            snapshotMidShort <= std::max(
+                                1.0f,
+                                config.prob
+                                    .celluniverse4_rod_tip_max_mid_short_ratio);
+                        if (!previousWasRodTip) {
+                            cell.setPosition(
+                                snapshot.position.x,
+                                snapshot.position.y,
+                                snapshot.position.z);
+                            cell.setRadii(
+                                snapshot.aRadius,
+                                snapshot.bRadius,
+                                snapshot.cRadius);
+                            cell.setRotation(
+                                snapshot.thetaX,
+                                snapshot.thetaY,
+                                snapshot.thetaZ);
+                            cell.setBrightness(snapshot.brightness);
+                            restoredPrevious = true;
+                        }
+                    }
+
+                    if (!restoredPrevious) {
+                        int longestIndex = 0;
+                        if (before[1] > before[longestIndex]) longestIndex = 1;
+                        if (before[2] > before[longestIndex]) longestIndex = 2;
+                        const float maxLongMid = std::max(
+                            1.0f,
+                            config.prob
+                                .celluniverse4_rod_tip_hard_reject_max_long_mid_ratio);
+                        const float maxLongShort = std::max(
+                            1.0f,
+                            config.prob
+                                    .celluniverse4_rod_tip_min_long_short_ratio -
+                                0.05f);
+                        std::array<float, 3> rejectedRadii = before;
+                        rejectedRadii[longestIndex] = std::min(
+                            before[longestIndex],
+                            std::min(
+                                midR * maxLongMid,
+                                shortR * maxLongShort));
+                        cell.setRadii(
+                            rejectedRadii[0],
+                            rejectedRadii[1],
+                            rejectedRadii[2]);
+                    }
+                    ++projectedCells;
+                    std::cout
+                        << "[CellUniverse4 Rod Tip Hard Reject] frame="
+                        << displayFrame
+                        << " cell=" << cell.getName()
+                        << " action="
+                        << (restoredPrevious
+                                ? "restore_previous_non_rod"
+                                : "shrink_long_axis")
+                        << " beforeR=(" << before[0] << "," << before[1]
+                        << "," << before[2] << ")"
+                        << " beforeRatios=(" << longMid << "," << midShort
+                        << "," << longShort << ")"
+                        << " afterR=(" << cell.getARadius() << ","
+                        << cell.getBRadius() << "," << cell.getCRadius()
+                        << ")" << std::endl;
+                    continue;
+                }
+            }
+            const auto projection =
+                cell_refit_guards::projectAspectRatiosShrinkOnly(
+                    before,
+                    config.cell->pcaShapeMaxLongMidRatio,
+                    config.cell->pcaShapeMaxMidShortRatio,
+                    config.cell->pcaShapeMaxLongShortRatio);
+            if (!projection.valid || !projection.changed) continue;
+
+            cell.setRadii(
+                projection.radii[0],
+                projection.radii[1],
+                projection.radii[2]);
+            const std::array<float, 3> actual{
+                cell.getARadius(), cell.getBRadius(), cell.getCRadius()};
+            const auto verification =
+                cell_refit_guards::projectAspectRatiosShrinkOnly(
+                    actual,
+                    config.cell->pcaShapeMaxLongMidRatio,
+                    config.cell->pcaShapeMaxMidShortRatio,
+                    config.cell->pcaShapeMaxLongShortRatio);
+            const bool satisfied =
+                verification.valid && !verification.changed;
+            ++projectedCells;
+            if (!satisfied) ++unsatisfiedCells;
+            std::cout << "[CellUniverse4 Hard Shape Ratio Bound] frame="
+                      << displayFrame
+                      << " cell=" << cell.getName()
+                      << " age=" << age
+                      << " beforeR=(" << before[0] << "," << before[1]
+                      << "," << before[2] << ")"
+                      << " projectedR=(" << projection.radii[0] << ","
+                      << projection.radii[1] << ","
+                      << projection.radii[2] << ")"
+                      << " actualR=(" << actual[0] << "," << actual[1]
+                      << "," << actual[2] << ")"
+                      << " beforeRatios=(" << projection.beforeLongMid
+                      << "," << projection.beforeMidShort << ","
+                      << projection.beforeLongShort << ")"
+                      << " afterRatios=(" << verification.beforeLongMid
+                      << "," << verification.beforeMidShort << ","
+                      << verification.beforeLongShort << ")"
+                      << " satisfied=" << (satisfied ? 1 : 0)
+                      << std::endl;
+        }
+        if (projectedCells > 0) {
+            frame.regenerateSynthFrame();
+            std::cout
+                << "[CellUniverse4 Hard Shape Ratio Bound Summary] frame="
+                << displayFrame
+                << " projected=" << projectedCells
+                << " unsatisfied=" << unsatisfiedCells
+                << " maxLongMid="
+                << config.cell->pcaShapeMaxLongMidRatio
+                << " maxMidShort="
+                << config.cell->pcaShapeMaxMidShortRatio
+                << " maxLongShort="
+                << config.cell->pcaShapeMaxLongShortRatio
+                << std::endl;
+        }
+    }
+
+    // Split-sibling stability guard. Birth-frame behavior remains the
+    // default. A dataset profile may extend it through a short post-division
+    // window and bound each daughter to its accepted birth volume before
+    // balancing the pair. Initial cells are registered with a mature age and
+    // never enter the recent-daughter path.
+    if (config.prob.split_birth_sibling_volume_guard_enabled &&
+        config.prob.split_birth_sibling_volume_ratio_max >= 1.0f) {
+        std::unordered_map<std::string, size_t> liveCellByName;
+        liveCellByName.reserve(frame.cells.size());
+        for (size_t i = 0; i < frame.cells.size(); ++i) {
+            if (!frame.cells[i].isTrash()) {
+                liveCellByName.emplace(frame.cells[i].getName(), i);
+            }
+        }
+
+        int siblingPairsChecked = 0;
+        int largerSiblingsClamped = 0;
+        int daughterEnvelopesClamped = 0;
+        const float maxRatio =
+            config.prob.split_birth_sibling_volume_ratio_max;
+        const int recentGuardFrames = std::max(
+            0, config.prob.split_sibling_volume_guard_recent_frames);
+        const float minBirthFactor =
+            config.prob.split_recent_daughter_volume_min_birth_factor;
+        const float maxBirthFactor =
+            config.prob.split_recent_daughter_volume_max_birth_factor;
+        for (size_t firstIdx = 0; firstIdx < frame.cells.size(); ++firstIdx) {
+            const Ellipsoid &first = frame.cells[firstIdx];
+            const std::string &firstName = first.getName();
+            if (first.isTrash() || firstName.empty() ||
+                firstName.back() != '0' ||
+                !isSplitDaughterLineageName(firstName)) {
+                continue;
+            }
+            const std::string siblingName =
+                splitDaughterSiblingName(firstName);
+            const auto siblingIt = liveCellByName.find(siblingName);
+            if (siblingIt == liveCellByName.end()) continue;
+
+            const auto firstSeenIt = cellFirstSeenFrame.find(firstName);
+            const auto siblingSeenIt =
+                cellFirstSeenFrame.find(siblingName);
+            const bool sameFrameBirth =
+                firstSeenIt == cellFirstSeenFrame.end() &&
+                siblingSeenIt == cellFirstSeenFrame.end();
+            int daughterAge = 0;
+            if (!sameFrameBirth) {
+                if (firstSeenIt == cellFirstSeenFrame.end() ||
+                    siblingSeenIt == cellFirstSeenFrame.end() ||
+                    firstSeenIt->second != siblingSeenIt->second) {
+                    continue;
+                }
+                daughterAge = absoluteFrame - firstSeenIt->second;
+                if (daughterAge < 1 ||
+                    daughterAge > recentGuardFrames) {
+                    continue;
+                }
+            }
+
+            const size_t secondIdx = siblingIt->second;
+            if (!sameFrameBirth &&
+                minBirthFactor > 0.0f &&
+                maxBirthFactor >= minBirthFactor) {
+                const auto applyBirthEnvelope =
+                    [&](size_t cellIdx, const std::string &cellName) {
+                        const auto birthIt = cellShapeBirth.find(cellName);
+                        if (birthIt == cellShapeBirth.end()) return;
+                        Ellipsoid &cell = frame.cells[cellIdx];
+                        const std::array<float, 3> currentRadii{
+                            cell.getARadius(), cell.getBRadius(),
+                            cell.getCRadius()};
+                        const auto envelope =
+                            computeSplitDaughterBirthVolumeEnvelope(
+                                currentRadii, birthIt->second,
+                                minBirthFactor, maxBirthFactor);
+                        if (!envelope.valid || !envelope.changed) return;
+                        cell.setRadii(
+                            currentRadii[0] * envelope.radiusScale,
+                            currentRadii[1] * envelope.radiusScale,
+                            currentRadii[2] * envelope.radiusScale);
+                        ++daughterEnvelopesClamped;
+                        std::cout
+                            << "[Split Recent Daughter Volume Envelope] frame "
+                            << displayFrame
+                            << " cell=" << cellName
+                            << " age=" << daughterAge
+                            << " currentVolume=" << envelope.currentVolume
+                            << " birthVolume=" << envelope.birthVolume
+                            << " targetVolume=" << envelope.targetVolume
+                            << " minFactor=" << minBirthFactor
+                            << " maxFactor=" << maxBirthFactor
+                            << " radiusScale=" << envelope.radiusScale
+                            << std::endl;
+                    };
+                applyBirthEnvelope(firstIdx, firstName);
+                applyBirthEnvelope(secondIdx, siblingName);
+            }
+
+            const Ellipsoid &second = frame.cells[secondIdx];
+            const std::array<float, 3> firstRadii{
+                frame.cells[firstIdx].getARadius(),
+                frame.cells[firstIdx].getBRadius(),
+                frame.cells[firstIdx].getCRadius()};
+            const std::array<float, 3> secondRadii{
+                second.getARadius(), second.getBRadius(), second.getCRadius()};
+            const SplitSiblingVolumeGuardResult guard =
+                computeSplitSiblingVolumeGuard(
+                    firstRadii, secondRadii, maxRatio);
+            if (!guard.valid) continue;
+            ++siblingPairsChecked;
+            if (!guard.changed) {
+                std::cout << "[Split Birth Sibling Volume Guard] frame "
+                          << displayFrame
+                          << " parent="
+                          << firstName.substr(0, firstName.size() - 1)
+                          << " d0=" << firstName
+                          << " d1=" << siblingName
+                          << " age=" << daughterAge
+                          << " beforeRatio=" << guard.beforeRatio
+                          << " afterRatio=" << guard.afterRatio
+                          << " maxRatio=" << maxRatio
+                          << " action=keep" << std::endl;
+                continue;
+            }
+
+            const size_t largerIdx =
+                guard.firstIsLarger ? firstIdx : secondIdx;
+            Ellipsoid &larger = frame.cells[largerIdx];
+            const std::array<float, 3> beforeRadii{
+                larger.getARadius(), larger.getBRadius(), larger.getCRadius()};
+            larger.setRadii(
+                beforeRadii[0] * guard.largerRadiusScale,
+                beforeRadii[1] * guard.largerRadiusScale,
+                beforeRadii[2] * guard.largerRadiusScale);
+            const SplitSiblingVolumeGuardResult afterGuard =
+                computeSplitSiblingVolumeGuard(
+                    {frame.cells[firstIdx].getARadius(),
+                     frame.cells[firstIdx].getBRadius(),
+                     frame.cells[firstIdx].getCRadius()},
+                    {frame.cells[secondIdx].getARadius(),
+                     frame.cells[secondIdx].getBRadius(),
+                     frame.cells[secondIdx].getCRadius()},
+                    maxRatio);
+            ++largerSiblingsClamped;
+            std::cout << "[Split Birth Sibling Volume Guard] frame "
+                      << displayFrame
+                      << " parent="
+                      << firstName.substr(0, firstName.size() - 1)
+                      << " d0=" << firstName
+                      << " d1=" << siblingName
+                      << " age=" << daughterAge
+                      << " larger=" << larger.getName()
+                      << " beforeRatio=" << guard.beforeRatio
+                      << " afterRatio=" << afterGuard.beforeRatio
+                      << " maxRatio=" << maxRatio
+                      << " radiusScale=" << guard.largerRadiusScale
+                      << " action=shrink_larger" << std::endl;
+        }
+        if (largerSiblingsClamped > 0 || daughterEnvelopesClamped > 0) {
+            frame.regenerateSynthFrame();
+        }
+        if (siblingPairsChecked > 0) {
+            std::cout << "[Split Birth Sibling Volume Guard Summary] frame "
+                      << displayFrame
+                      << " pairs=" << siblingPairsChecked
+                      << " clamped=" << largerSiblingsClamped
+                      << " envelopeClamped="
+                      << daughterEnvelopesClamped
+                      << " maxRatio=" << maxRatio << std::endl;
+        }
+    }
+
+    if (cellUniverse4Mode &&
+        config.simulation
+            .celluniverse4_postfit_bright_cell_size_review_enabled &&
+        !frame.cells.empty()) {
+        const float minimumBrightness =
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_min_brightness;
+        const int attempts = std::max(
+            1,
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_attempts);
+        const float radiusStep =
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_radius_step_fraction;
+        const float maximumRadiusScale =
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_max_radius_scale;
+        const double minimumCostImprovement =
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_min_cost_improvement;
+        const int minimumGainVoxels = std::max(
+            0,
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels);
+        const float minimumGainFraction =
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction;
+        const float bboxMarginScale =
+            config.simulation
+                .celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale;
+
+        int reviewed = 0;
+        int accepted = 0;
+        int componentRejected = 0;
+        for (size_t cellIndex = 0;
+             cellIndex < frame.cells.size();
+             ++cellIndex) {
+            const Ellipsoid baselineCell = frame.cells[cellIndex];
+            if (baselineCell.isTrash() ||
+                baselineCell.getBrightness() < minimumBrightness ||
+                cellUniverse4BackgroundDropHoldOnly.count(
+                    baselineCell.getName()) > 0) {
+                continue;
+            }
+            ++reviewed;
+
+            const AnchoredBrightComponent component =
+                gatherAnchoredBrightComponent(
+                    frame,
+                    baselineCell,
+                    maximumRadiusScale,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_component_min_voxels,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled);
+            if (!component.valid) {
+                ++componentRejected;
+                std::cout
+                    << "[CellUniverse4 Bright Cell Size Review] frame="
+                    << displayFrame
+                    << " cell=" << baselineCell.getName()
+                    << " action=skip reason=no_anchored_component"
+                    << " componentVoxels=" << component.voxels.size()
+                    << " threshold=" << component.meanThreshold
+                    << " neighborSurface="
+                    << (component.terminatedAtNeighborSurface ? 1 : 0)
+                    << " neighbor=" << component.touchedNeighborName
+                    << std::endl;
+                continue;
+            }
+
+            const bool anisotropicShapeReview =
+                config.simulation
+                    .celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled;
+            const std::array<float, 3> baselineRadii{
+                baselineCell.getARadius(), baselineCell.getBRadius(),
+                baselineCell.getCRadius()};
+            const std::array<float, 3> componentExtents =
+                componentLocalAxisExtents(
+                    component,
+                    baselineCell,
+                    config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile);
+            std::array<float, 3> componentTargetScales{1.0f, 1.0f, 1.0f};
+            bool componentShowsLargerCell = false;
+            for (size_t axis = 0; axis < 3; ++axis) {
+                componentTargetScales[axis] = std::clamp(
+                    componentExtents[axis] /
+                        std::max(1.0e-3f, baselineRadii[axis]),
+                    1.0f,
+                    maximumRadiusScale);
+                componentShowsLargerCell = componentShowsLargerCell ||
+                    componentTargetScales[axis] > 1.0f + 1.0e-4f;
+            }
+            if (anisotropicShapeReview && !componentShowsLargerCell) {
+                std::cout
+                    << "[CellUniverse4 Bright Cell Size Review] frame="
+                    << displayFrame
+                    << " cell=" << baselineCell.getName()
+                    << " action=skip reason=component_not_larger"
+                    << " threshold=" << component.meanThreshold
+                    << " componentVoxels=" << component.voxels.size()
+                    << " neighborSurface="
+                    << (component.terminatedAtNeighborSurface ? 1 : 0)
+                    << " neighbor=" << component.touchedNeighborName
+                    << " extents=(" << componentExtents[0] << ","
+                    << componentExtents[1] << "," << componentExtents[2]
+                    << ")"
+                    << std::endl;
+                continue;
+            }
+
+            const std::size_t baselineCaptured =
+                countComponentCapturedByCell(component, baselineCell);
+            const std::size_t requiredGain = std::max<std::size_t>(
+                static_cast<std::size_t>(minimumGainVoxels),
+                static_cast<std::size_t>(std::ceil(
+                    static_cast<double>(baselineCaptured) *
+                    minimumGainFraction)));
+            const float baselineMaxRadius = std::max({
+                baselineCell.getARadius(), baselineCell.getBRadius(),
+                baselineCell.getCRadius()});
+            const BoundingBox3D comparisonBbox = frame.computeBboxAtPoint(
+                cv::Point3f(
+                    baselineCell.getX(), baselineCell.getY(),
+                    baselineCell.getZ()),
+                baselineMaxRadius * maximumRadiusScale,
+                bboxMarginScale);
+            if (!comparisonBbox.isValid()) {
+                ++componentRejected;
+                continue;
+            }
+            const std::vector<std::uint8_t> noMask;
+            const int voronoiCellIndex = frame.isVoronoiCostEnabled()
+                ? static_cast<int>(cellIndex)
+                : -1;
+            const auto evaluateImageCost =
+                [&](const Ellipsoid &cell,
+                    const std::vector<cv::Mat> &synthFrame) {
+                    if (config.simulation.psf_brightness_cost_enabled) {
+                        const PsfBrightnessCostContext context =
+                            frame.makePsfBrightnessCostContext(
+                                {&cell}, baselineCell.getName());
+                        return frame.calculateBboxCost(
+                            comparisonBbox, synthFrame, noMask,
+                            voronoiCellIndex, &context);
+                    }
+                    return frame.calculateBboxCost(
+                        comparisonBbox, synthFrame, noMask,
+                        voronoiCellIndex);
+                };
+
+            const std::vector<cv::Mat> baselineSynth =
+                frame.getSynthFrame();
+            const double baselineImageCost =
+                evaluateImageCost(baselineCell, baselineSynth);
+            const double baselineOverlapCost =
+                frame.computeOverlapForCell(cellIndex, overlapWeight);
+            const double baselineObjective =
+                baselineImageCost + baselineOverlapCost;
+            double bestObjective = baselineObjective;
+            Ellipsoid bestCell = baselineCell;
+            std::size_t bestCaptured = baselineCaptured;
+            std::array<float, 3> previousAxisScales{1.0f, 1.0f, 1.0f};
+
+            for (int attempt = 1; attempt <= attempts; ++attempt) {
+                const float radiusScale = std::min(
+                    maximumRadiusScale,
+                    1.0f + radiusStep * static_cast<float>(attempt));
+                std::array<float, 3> axisScales{
+                    radiusScale, radiusScale, radiusScale};
+                if (anisotropicShapeReview) {
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        axisScales[axis] = std::min(
+                            radiusScale, componentTargetScales[axis]);
+                    }
+                }
+                if (axisScales == previousAxisScales) break;
+                previousAxisScales = axisScales;
+
+                Ellipsoid candidate = baselineCell;
+                candidate.setRadii(
+                    baselineRadii[0] * axisScales[0],
+                    baselineRadii[1] * axisScales[1],
+                    baselineRadii[2] * axisScales[2]);
+                const CellRasterSupportStats candidateSupport =
+                    measureCellRasterSupport(frame, candidate);
+                bool brightnessCoupled = false;
+                if (config.simulation
+                        .celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled &&
+                    cellUniverse4BrightnessVolumeActive &&
+                    candidateSupport.valid) {
+                    const auto anchorIt =
+                        cellUniverse4BrightnessVolumeAnchors.find(
+                            baselineCell.getName());
+                    if (anchorIt !=
+                            cellUniverse4BrightnessVolumeAnchors.end() &&
+                        anchorIt->second.valid) {
+                        const CellBrightnessVolumeAnchor &anchor =
+                            anchorIt->second;
+                        const double proposalContrast = std::max(
+                            0.0,
+                            static_cast<double>(baselineCell.getBrightness()) -
+                                candidateSupport.meanBackground);
+                        const auto reconciliation =
+                            cell_refit_guards::reconcileIntegratedContrast(
+                                anchor.support,
+                                anchor.contrast,
+                                candidateSupport.support,
+                                static_cast<double>(candidateSupport.support) *
+                                    proposalContrast,
+                                config.simulation
+                                    .celluniverse4_postfit_brightness_volume_inverse_volume_exponent,
+                                config.simulation
+                                    .celluniverse4_postfit_brightness_volume_log_deadband,
+                                config.simulation
+                                    .celluniverse4_postfit_brightness_volume_strength,
+                                config.simulation
+                                    .celluniverse4_postfit_brightness_volume_max_contrast_step_fraction);
+                        if (reconciliation.valid) {
+                            candidate.setBrightness(static_cast<float>(
+                                candidateSupport.meanBackground +
+                                reconciliation.reconciledIntegratedContrast /
+                                    static_cast<double>(candidateSupport.support)));
+                            brightnessCoupled = true;
+                        }
+                    }
+                }
+
+                const std::size_t captured =
+                    countComponentCapturedByCell(component, candidate);
+                const std::size_t gained = captured > baselineCaptured
+                    ? captured - baselineCaptured
+                    : 0;
+                const bool componentPass =
+                    captured <= component.voxels.size() &&
+                    gained >= requiredGain;
+
+                frame.cells[cellIndex] = candidate;
+                frame.regenerateSynthFrame();
+                const std::vector<cv::Mat> candidateSynth =
+                    frame.getSynthFrame();
+                const double candidateImageCost =
+                    evaluateImageCost(candidate, candidateSynth);
+                const double candidateOverlapCost =
+                    frame.computeOverlapForCell(cellIndex, overlapWeight);
+                const double candidateObjective =
+                    candidateImageCost + candidateOverlapCost;
+                const bool costPass =
+                    candidateObjective + minimumCostImprovement <
+                    baselineObjective;
+                const bool bestPass =
+                    candidateObjective + minimumCostImprovement <
+                    bestObjective;
+
+                std::cout
+                    << "[CellUniverse4 Bright Cell Size Review] frame="
+                    << displayFrame
+                    << " cell=" << baselineCell.getName()
+                    << " attempt=" << attempt
+                    << " radiusScale=" << radiusScale
+                    << " axisScale=(" << axisScales[0] << ","
+                    << axisScales[1] << "," << axisScales[2] << ")"
+                    << " componentExtent=(" << componentExtents[0] << ","
+                    << componentExtents[1] << "," << componentExtents[2]
+                    << ")"
+                    << " neighborSurface="
+                    << (component.terminatedAtNeighborSurface ? 1 : 0)
+                    << " neighbor=" << component.touchedNeighborName
+                    << " brightness=" << baselineCell.getBrightness()
+                    << "->" << candidate.getBrightness()
+                    << " brightnessCoupled="
+                    << (brightnessCoupled ? 1 : 0)
+                    << " component=" << baselineCaptured
+                    << "->" << captured
+                    << "/" << component.voxels.size()
+                    << " requiredGain=" << requiredGain
+                    << " imageCost=" << baselineImageCost
+                    << "->" << candidateImageCost
+                    << " overlapCost=" << baselineOverlapCost
+                    << "->" << candidateOverlapCost
+                    << " objectiveDelta="
+                    << (candidateObjective - baselineObjective)
+                    << " componentPass=" << (componentPass ? 1 : 0)
+                    << " costPass=" << (costPass ? 1 : 0)
+                    << std::endl;
+
+                if (componentPass && costPass && bestPass) {
+                    bestObjective = candidateObjective;
+                    bestCell = candidate;
+                    bestCaptured = captured;
+                }
+            }
+
+            frame.cells[cellIndex] = bestCell;
+            frame.regenerateSynthFrame();
+            if (bestObjective + 1.0e-9 < baselineObjective) {
+                ++accepted;
+                std::cout
+                    << "[CellUniverse4 Bright Cell Size Review Accept] frame="
+                    << displayFrame
+                    << " cell=" << baselineCell.getName()
+                    << " radii=(" << baselineCell.getARadius()
+                    << "," << baselineCell.getBRadius()
+                    << "," << baselineCell.getCRadius() << ")->("
+                    << bestCell.getARadius() << ","
+                    << bestCell.getBRadius() << ","
+                    << bestCell.getCRadius() << ")"
+                    << " brightness=" << baselineCell.getBrightness()
+                    << "->" << bestCell.getBrightness()
+                    << " component=" << baselineCaptured
+                    << "->" << bestCaptured
+                    << " objectiveDelta="
+                    << (bestObjective - baselineObjective)
+                    << std::endl;
+            }
+        }
+        std::cout
+            << "[CellUniverse4 Bright Cell Size Review Summary] frame="
+            << displayFrame
+            << " reviewed=" << reviewed
+            << " accepted=" << accepted
+            << " componentRejected=" << componentRejected
+            << " minBrightness=" << minimumBrightness
+            << std::endl;
+    }
+
+    // Update persistent shape references only after every post-PCA split,
+    // restore, ratio correction, and final guard has settled the geometry
+    // that will be exported. This prevents next-frame fits from following a
+    // pre-guard radius that the current frame never actually emitted.
+    if (config.cell && config.cell->pcaShapeMaxIters > 0 &&
+        !frame.cells.empty()) {
+        constexpr float refGrowthCap = 0.05f;
+        const float refLo = 1.0f - refGrowthCap;
+        const float refHi = 1.0f + refGrowthCap;
+        int refsCaptured = 0;
+        int refsUpdated = 0;
+        int birthsCaptured = 0;
+        for (const auto &cell : frame.cells) {
+            const std::string &name = cell.getName();
+            const float fA = cell.getARadius();
+            const float fB = cell.getBRadius();
+            const float fC = cell.getCRadius();
+
+            // Birth capture is immutable and now includes daughters created
+            // by post-PCA split routes in their final accepted geometry.
+            if (cellShapeBirth.find(name) == cellShapeBirth.end()) {
+                cellShapeBirth[name] = {fA, fB, fC};
+                ++birthsCaptured;
+            }
+
+            auto it = cellShapeReference.find(name);
+            if (it == cellShapeReference.end()) {
+                cellShapeReference[name] = {fA, fB, fC};
+                ++refsCaptured;
+            } else {
+                auto &ref = it->second;
+                ref[0] = std::clamp(fA, ref[0] * refLo, ref[0] * refHi);
+                ref[1] = std::clamp(fB, ref[1] * refLo, ref[1] * refHi);
+                ref[2] = std::clamp(fC, ref[2] * refLo, ref[2] * refHi);
+                ++refsUpdated;
+            }
+        }
+        if (refsCaptured > 0 || refsUpdated > 0 || birthsCaptured > 0) {
+            std::cout << "[Shape Reference] frame " << displayFrame
+                      << " births=" << birthsCaptured
+                      << " refCaptured=" << refsCaptured
+                      << " refUpdated=" << refsUpdated
+                      << " totalRef=" << cellShapeReference.size()
+                      << " totalBirth=" << cellShapeBirth.size()
+                      << " growthCap=" << refGrowthCap
+                      << " stage=post_final_geometry" << std::endl;
         }
     }
 
@@ -23839,17 +28072,37 @@ void CellUniverse::optimize(int frameIndex)
         }
 
         // Triaxial fitted-shape elongation is the classification signal.
-        // max(a,b,c)/min(a,b,c) from the fit, plus the world-space direction
-        // and length of the longest axis. No image-PCA anymore.
+        // max(a,b,c)/min(a,b,c) comes from the fit. worldSplitAxis() follows
+        // the existing split contract and returns the shortest-axis direction
+        // and length (not the longest axis). No image-PCA anymore.
         const float fitShapeElong = frame.cells[ci].shapeElongation();
         cv::Point3f fitSplitAxisDir;
         float fitSplitAxisLength = 0.0f;
         frame.cells[ci].worldSplitAxis(fitSplitAxisDir, fitSplitAxisLength);
+        float snapshotShapeElong = fitShapeElong;
+        cv::Point3f snapshotSplitAxisDir = fitSplitAxisDir;
+        const char *snapshotShapeSource = "exported_shape";
+        const auto rawShapeIt =
+            cellUniverse4RawSplitShapeEvidence.find(p.name);
+        if (cellUniverse4Mode && config.cell &&
+            config.cell->pcaShapeRatioBoundPreserveSplitEvidence &&
+            rawShapeIt != cellUniverse4RawSplitShapeEvidence.end() &&
+            rawShapeIt->second.shapeElongation > snapshotShapeElong) {
+            // Preserve the pre-cap elongation trigger and direction so a rod
+            // that should divide is not hidden by the display/export guard.
+            // Keep the final shortest-axis length because the later sibling
+            // guard may have uniformly scaled the emitted parent.
+            snapshotShapeElong =
+                rawShapeIt->second.shapeElongation;
+            snapshotSplitAxisDir =
+                rawShapeIt->second.splitAxisDirection;
+            snapshotShapeSource = "pre_hard_cap_split_evidence";
+        }
 
         PreviousFrameSnapshot snap;
         snap.valid = true;
-        snap.shapeElongation = fitShapeElong;
-        snap.splitAxisDir = fitSplitAxisDir;
+        snap.shapeElongation = snapshotShapeElong;
+        snap.splitAxisDir = snapshotSplitAxisDir;
         snap.splitAxisLength = fitSplitAxisLength;
 
         snap.position = cv::Point3f(p.x, p.y, p.z);
@@ -23865,6 +28118,8 @@ void CellUniverse::optimize(int frameIndex)
 
         std::cout << "  " << p.name
                   << " shapeElong=" << snap.shapeElongation
+                  << " exportedShapeElong=" << fitShapeElong
+                  << " shapeSource=" << snapshotShapeSource
                   << " splitAxisLen=" << snap.splitAxisLength
                   << " pos=(" << snap.position.x
                   << "," << snap.position.y
@@ -23872,13 +28127,24 @@ void CellUniverse::optimize(int frameIndex)
                   << std::endl;
     }
 
-    const float brightnessBlend = std::clamp(config.cell ? config.cell->brightnessUpdateBlend : 0.0f, 0.0f, 1.0f);
+    const float brightnessBlend = std::clamp(
+        config.cell ? config.cell->brightnessUpdateBlend : 0.0f,
+        0.0f, 1.0f);
+    bool brightnessModelChanged = false;
     if (brightnessBlend > 0.0f && config.cell) {
         const auto &realFrame = frame.getRealFrame();
         const float brightnessAmplification = std::max(0.0f, config.cell->brightnessMeanAmplification);
         const float brightnessMeasurementTopPercentile =
             std::clamp(config.cell->brightnessMeasurementTopPercentile, 0.0f, 1.0f);
         for (auto &cell : frame.cells) {
+            if (cellUniverse4BackgroundDropHoldOnly.count(
+                    cell.getName()) > 0) {
+                std::cout << "[Brightness Update] frame=" << displayFrame
+                          << " cell=" << cell.getName()
+                          << " action=skip_celluniverse4_background_drop_hold"
+                          << std::endl;
+                continue;
+            }
             const float observedBrightness =
                 cell.measureMeanBrightness(realFrame, brightnessMeasurementTopPercentile);
             const float amplifiedObservedBrightness = observedBrightness * brightnessAmplification;
@@ -23886,6 +28152,293 @@ void CellUniverse::optimize(int frameIndex)
                 cell.getBrightness() * (1.0f - brightnessBlend) + amplifiedObservedBrightness * brightnessBlend;
             cell.setBrightness(updatedBrightness);
         }
+        brightnessModelChanged = true;
+    }
+
+    if (cellUniverse4BrightnessVolumeActive) {
+        const double inverseVolumeExponent =
+            config.simulation
+                .celluniverse4_postfit_brightness_volume_inverse_volume_exponent;
+        const double logDeadband =
+            config.simulation
+                .celluniverse4_postfit_brightness_volume_log_deadband;
+        const double strength =
+            config.simulation
+                .celluniverse4_postfit_brightness_volume_strength;
+        const double minimumAnchorContrast =
+            config.simulation
+                .celluniverse4_postfit_brightness_volume_min_anchor_contrast;
+        const double maximumContrastStep =
+            config.simulation
+                .celluniverse4_postfit_brightness_volume_max_contrast_step_fraction;
+        int individualApplied = 0;
+        int groupedApplied = 0;
+        int skipped = 0;
+
+        // Cells with an exact frame-entry identity, including recent
+        // daughters, use their own frozen support/contrast anchor.
+        for (auto &cell : frame.cells) {
+            if (cell.isTrash()) continue;
+            if (cellUniverse4BackgroundDropHoldOnly.count(
+                    cell.getName()) > 0) {
+                ++skipped;
+                std::cout
+                    << "[CellUniverse4 Brightness Volume Reconcile] frame="
+                    << displayFrame
+                    << " cell=" << cell.getName()
+                    << " mode=individual"
+                    << " action=skip_background_drop_hold"
+                    << std::endl;
+                continue;
+            }
+            const auto anchorIt =
+                cellUniverse4BrightnessVolumeAnchors.find(cell.getName());
+            if (anchorIt == cellUniverse4BrightnessVolumeAnchors.end()) {
+                continue;
+            }
+            const CellBrightnessVolumeAnchor &anchor = anchorIt->second;
+            if (!anchor.valid ||
+                anchor.contrast < minimumAnchorContrast) {
+                ++skipped;
+                continue;
+            }
+            const CellRasterSupportStats current =
+                measureCellRasterSupport(frame, cell);
+            if (!current.valid) {
+                ++skipped;
+                continue;
+            }
+            const double proposalBrightness =
+                static_cast<double>(cell.getBrightness());
+            const double proposalContrast = std::max(
+                0.0, proposalBrightness - current.meanBackground);
+            const double proposedIntegratedContrast =
+                static_cast<double>(current.support) * proposalContrast;
+            const auto reconciliation =
+                cell_refit_guards::reconcileIntegratedContrast(
+                    anchor.support,
+                    anchor.contrast,
+                    current.support,
+                    proposedIntegratedContrast,
+                    inverseVolumeExponent,
+                    logDeadband,
+                    strength,
+                    maximumContrastStep);
+            if (!reconciliation.valid) {
+                ++skipped;
+                continue;
+            }
+
+            const float beforeBrightness = cell.getBrightness();
+            const double reconciledContrast =
+                reconciliation.reconciledIntegratedContrast /
+                static_cast<double>(current.support);
+            const double reconciledBrightness =
+                current.meanBackground + reconciledContrast;
+            cell.setBrightness(
+                static_cast<float>(reconciledBrightness));
+            const float afterBrightness = cell.getBrightness();
+            if (std::abs(afterBrightness - beforeBrightness) > 1.0e-7f) {
+                brightnessModelChanged = true;
+                ++individualApplied;
+            }
+            std::cout
+                << "[CellUniverse4 Brightness Volume Reconcile] frame="
+                << displayFrame
+                << " cell=" << cell.getName()
+                << " mode=individual"
+                << " anchorSupport=" << anchor.support
+                << " currentSupport=" << current.support
+                << " anchorBackground=" << anchor.meanBackground
+                << " currentBackground=" << current.meanBackground
+                << " anchorContrast=" << anchor.contrast
+                << " proposalContrast=" << proposalContrast
+                << " expectedIntegratedContrast="
+                << reconciliation.expectedIntegratedContrast
+                << " proposedIntegratedContrast="
+                << reconciliation.proposedIntegratedContrast
+                << " reconciledIntegratedContrast="
+                << reconciliation.reconciledIntegratedContrast
+                << " scale=" << reconciliation.contrastScale
+                << " zeroContrastRecovery="
+                << (reconciliation.usedZeroContrastFallback ? 1 : 0)
+                << " brightness=" << beforeBrightness
+                << "->" << afterBrightness
+                << " applied=" << (reconciliation.applied ? 1 : 0)
+                << std::endl;
+        }
+
+        // Same-frame daughters have no individual entry anchor. Reconcile the
+        // pair against the removed parent's integrated contrast and apply one
+        // common contrast scale, preserving the image-supported daughter
+        // brightness ratio even when they sit on different background regions.
+        if (config.simulation
+                .celluniverse4_postfit_brightness_volume_group_newborn_siblings) {
+            std::unordered_map<std::string, std::size_t> liveByName;
+            liveByName.reserve(frame.cells.size());
+            for (std::size_t i = 0; i < frame.cells.size(); ++i) {
+                liveByName.emplace(frame.cells[i].getName(), i);
+            }
+            for (std::size_t firstIndex = 0;
+                 firstIndex < frame.cells.size(); ++firstIndex) {
+                Ellipsoid &first = frame.cells[firstIndex];
+                const std::string firstName = first.getName();
+                if (first.isTrash() || firstName.empty() ||
+                    firstName.back() != '0' ||
+                    newbornSplitDaughters.count(firstName) == 0 ||
+                    cellUniverse4BrightnessVolumeAnchors.count(firstName) > 0 ||
+                    cellUniverse4BackgroundDropHoldOnly.count(firstName) > 0) {
+                    continue;
+                }
+                std::string secondName = firstName;
+                secondName.back() = '1';
+                const auto secondIt = liveByName.find(secondName);
+                if (secondIt == liveByName.end() ||
+                    newbornSplitDaughters.count(secondName) == 0) {
+                    ++skipped;
+                    std::cout
+                        << "[CellUniverse4 Brightness Volume Reconcile] frame="
+                        << displayFrame
+                        << " cell=" << firstName
+                        << " mode=newborn_group action=skip_incomplete_sibling"
+                        << std::endl;
+                    continue;
+                }
+                Ellipsoid &second = frame.cells[secondIt->second];
+                if (second.isTrash() ||
+                    cellUniverse4BrightnessVolumeAnchors.count(secondName) > 0 ||
+                    cellUniverse4BackgroundDropHoldOnly.count(secondName) > 0) {
+                    ++skipped;
+                    continue;
+                }
+                const std::string parentName =
+                    firstName.substr(0, firstName.size() - 1);
+                const auto parentAnchorIt =
+                    cellUniverse4BrightnessVolumeAnchors.find(parentName);
+                if (parentAnchorIt ==
+                        cellUniverse4BrightnessVolumeAnchors.end() ||
+                    !parentAnchorIt->second.valid ||
+                    parentAnchorIt->second.contrast <
+                        minimumAnchorContrast) {
+                    ++skipped;
+                    continue;
+                }
+
+                const CellRasterSupportStats firstStats =
+                    measureCellRasterSupport(frame, first);
+                const CellRasterSupportStats secondStats =
+                    measureCellRasterSupport(frame, second);
+                if (!firstStats.valid || !secondStats.valid) {
+                    ++skipped;
+                    continue;
+                }
+                const double firstProposalContrast = std::max(
+                    0.0,
+                    static_cast<double>(first.getBrightness()) -
+                        firstStats.meanBackground);
+                const double secondProposalContrast = std::max(
+                    0.0,
+                    static_cast<double>(second.getBrightness()) -
+                        secondStats.meanBackground);
+                const std::size_t combinedSupport =
+                    firstStats.support + secondStats.support;
+                const double proposedIntegratedContrast =
+                    static_cast<double>(firstStats.support) *
+                        firstProposalContrast +
+                    static_cast<double>(secondStats.support) *
+                        secondProposalContrast;
+                const CellBrightnessVolumeAnchor &parentAnchor =
+                    parentAnchorIt->second;
+                const auto reconciliation =
+                    cell_refit_guards::reconcileIntegratedContrast(
+                        parentAnchor.support,
+                        parentAnchor.contrast,
+                        combinedSupport,
+                        proposedIntegratedContrast,
+                        inverseVolumeExponent,
+                        logDeadband,
+                        strength,
+                        maximumContrastStep);
+                if (!reconciliation.valid) {
+                    ++skipped;
+                    continue;
+                }
+
+                const float firstBefore = first.getBrightness();
+                const float secondBefore = second.getBrightness();
+                if (reconciliation.usedZeroContrastFallback) {
+                    const double recoveredContrast =
+                        reconciliation.reconciledIntegratedContrast /
+                        static_cast<double>(combinedSupport);
+                    first.setBrightness(static_cast<float>(
+                        firstStats.meanBackground + recoveredContrast));
+                    second.setBrightness(static_cast<float>(
+                        secondStats.meanBackground + recoveredContrast));
+                } else {
+                    first.setBrightness(static_cast<float>(
+                        firstStats.meanBackground +
+                        reconciliation.contrastScale *
+                            firstProposalContrast));
+                    second.setBrightness(static_cast<float>(
+                        secondStats.meanBackground +
+                        reconciliation.contrastScale *
+                            secondProposalContrast));
+                }
+                if (std::abs(first.getBrightness() - firstBefore) > 1.0e-7f ||
+                    std::abs(second.getBrightness() - secondBefore) > 1.0e-7f) {
+                    brightnessModelChanged = true;
+                    ++groupedApplied;
+                }
+                std::cout
+                    << "[CellUniverse4 Brightness Volume Reconcile] frame="
+                    << displayFrame
+                    << " parent=" << parentName
+                    << " daughters=" << firstName << "," << secondName
+                    << " mode=newborn_group"
+                    << " anchorSupport=" << parentAnchor.support
+                    << " currentSupport=" << combinedSupport
+                    << " anchorContrast=" << parentAnchor.contrast
+                    << " expectedIntegratedContrast="
+                    << reconciliation.expectedIntegratedContrast
+                    << " proposedIntegratedContrast="
+                    << reconciliation.proposedIntegratedContrast
+                    << " scale=" << reconciliation.contrastScale
+                    << " brightness0=" << firstBefore
+                    << "->" << first.getBrightness()
+                    << " brightness1=" << secondBefore
+                    << "->" << second.getBrightness()
+                    << " applied=" << (reconciliation.applied ? 1 : 0)
+                    << std::endl;
+            }
+        }
+        std::cout
+            << "[CellUniverse4 Brightness Volume Reconcile Summary] frame="
+            << displayFrame
+            << " individualApplied=" << individualApplied
+            << " groupedApplied=" << groupedApplied
+            << " skipped=" << skipped
+            << " inverseVolumeExponent=" << inverseVolumeExponent
+            << " logDeadband=" << logDeadband
+            << " strength=" << strength
+            << " maxContrastStep=" << maximumContrastStep
+            << std::endl;
+    }
+
+    // Snapshot creation precedes the existing brightness EMA. CU4's new
+    // photometric path explicitly synchronizes that final live value so next
+    // frame, compact export, and checkpoint state agree. Resume-skip frames
+    // still need this sync when the legacy EMA is enabled.
+    if (cellUniverse4BrightnessVolumeConfigured) {
+        for (const auto &cell : frame.cells) {
+            const auto snapshotIt =
+                previousSnapshots.find(cell.getName());
+            if (snapshotIt != previousSnapshots.end() &&
+                snapshotIt->second.valid) {
+                snapshotIt->second.brightness = cell.getBrightness();
+            }
+        }
+    }
+    if (brightnessModelChanged) {
         frame.regenerateSynthFrame();
     }
 
@@ -24108,7 +28661,11 @@ void CellUniverse::saveCompactFrame(int frameIndex)
     }
 
     std::string pipelineMode = "traditional";
-    if (config.simulation.celluniverse3_enabled)
+    if (config.simulation.celluniverse4_enabled)
+    {
+        pipelineMode = "celluniverse4";
+    }
+    else if (config.simulation.celluniverse3_enabled)
     {
         pipelineMode = "celluniverse3";
     }
@@ -24121,15 +28678,13 @@ void CellUniverse::saveCompactFrame(int frameIndex)
         pipelineMode = "cell_lumen_fusion";
     }
 
-    // ImageHandler expands Z with an integer factor converted from the
-    // configured value. Record that actual runtime factor rather than a
-    // potentially fractional YAML value that was not used as such.
-    const int effectiveZInterpolationFactor =
-        static_cast<int>(config.simulation.z_scaling);
-    if (effectiveZInterpolationFactor < 1)
+    const float effectiveZInterpolationRatio =
+        config.simulation.z_scaling;
+    if (!std::isfinite(effectiveZInterpolationRatio) ||
+        effectiveZInterpolationRatio < 1.0f)
     {
         throw std::runtime_error(
-            "compact export requires a positive runtime Z interpolation factor");
+            "compact export requires a finite runtime Z interpolation ratio of at least 1");
     }
 
     const auto record =
@@ -24137,7 +28692,7 @@ void CellUniverse::saveCompactFrame(int frameIndex)
             frame,
             absoluteFrame,
             pipelineMode,
-            static_cast<float>(effectiveZInterpolationFactor),
+            effectiveZInterpolationRatio,
             config.simulation.z_scaling_source,
             config.simulation.initial_z_space,
             analyticBackground);

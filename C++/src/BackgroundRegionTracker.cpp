@@ -642,12 +642,15 @@ float updateScalarConservatively(
         base = clampUnit(base);
         candidate = clampUnit(candidate);
     }
-    const float boundedDelta = std::clamp(
-        candidate - base,
-        -options.maximumIntensityStep,
-        options.maximumIntensityStep);
-    float updated =
-        base + options.intensityEmaAlpha * boundedDelta;
+    const float proposedDelta =
+        options.intensityEmaAlpha * (candidate - base);
+    const float boundedDelta = options.intensityStepLimitEnabled
+        ? std::clamp(
+              proposedDelta,
+              -options.maximumIntensityStep,
+              options.maximumIntensityStep)
+        : proposedDelta;
+    float updated = base + boundedDelta;
     if (options.clampBackgroundToUnitRange) {
         updated = clampUnit(updated);
     }
@@ -1172,6 +1175,8 @@ bool BackgroundRegionTracker::update(
     const bool holdSeedIntensities =
         firstUpdate &&
         options_.holdSeedIntensitiesOnFirstUpdate;
+    bool intensityAccepted = false;
+    bool intensitySnapped = false;
     if (!holdSeedIntensities) {
         bool acceptIntensityEstimates =
             finiteFloat(coldEstimate) && finiteFloat(hotEstimate);
@@ -1191,18 +1196,31 @@ bool BackgroundRegionTracker::update(
             }
         }
         if (acceptIntensityEstimates) {
-            state_.coldBackground =
-                updateScalarConservatively(
+            intensityAccepted = true;
+            intensitySnapped =
+                firstUpdate &&
+                options_.snapIntensityEstimatesOnFirstUpdate;
+            if (intensitySnapped) {
+                state_.coldBackground =
+                    options_.clampBackgroundToUnitRange
+                        ? clampUnit(coldEstimate)
+                        : coldEstimate;
+                state_.hotBackground =
+                    options_.clampBackgroundToUnitRange
+                        ? clampUnit(hotEstimate)
+                        : hotEstimate;
+            } else {
+                state_.coldBackground = updateScalarConservatively(
                     state_.coldBackground,
                     seed_.coldBackground,
                     coldEstimate,
                     options_);
-            state_.hotBackground =
-                updateScalarConservatively(
+                state_.hotBackground = updateScalarConservatively(
                     state_.hotBackground,
                     seed_.hotBackground,
                     hotEstimate,
                     options_);
+            }
         }
     }
 
@@ -1213,6 +1231,13 @@ bool BackgroundRegionTracker::update(
     state_.evidenceSamples = evidenceSamples;
     state_.hotSamples = hotSamples;
     state_.coldSamples = coldSamples;
+    state_.coveredFaces = countSetBits(coveredFaces);
+    state_.coldCandidate =
+        finiteFloat(coldEstimate) ? coldEstimate : state_.coldBackground;
+    state_.hotCandidate =
+        finiteFloat(hotEstimate) ? hotEstimate : state_.hotBackground;
+    state_.intensityAccepted = intensityAccepted;
+    state_.intensitySnapped = intensitySnapped;
     ++updatesSeen_;
     return geometryAccepted;
 }

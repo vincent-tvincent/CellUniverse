@@ -88,9 +88,32 @@ cell:
   # Typical peaked cell: 15% inflation captures the visible halo.
   # Over-inflating (>1.2) risks halo bloat; stay ≤ 1.2 unless evidence.
   pcaShapeRadiusInflationBright: 1.15
+  # PCA-only prepared-domain support. Split/bridge routines keep the
+  # initializer-confirmed foreground reference. Enable this for pipelines
+  # whose preprocessing changes the image intensity domain (for example,
+  # normalization followed by N2V2).
+  pcaShapeLocalSupportEnabled: false
+  pcaShapeLocalSupportPeakPercentile: 0.90
+  pcaShapeLocalSupportFraction: 0.25
+  pcaShapeLocalSupportMinMargin: 0.02
+  pcaShapeLocalSupportMaxVolumeFactor: 1.50
+  pcaShapeLocalSupportMinVolumeFraction: 0.10
+  pcaShapeLocalSupportLowSnrCutoffFraction: 0.50
   pcaShapeRadiusPercentile: 0.90
   pcaShapeFitGrowthCapEnabled: true
-  pcaShapeFitGrowthCap: 0.90
+  # Maximum per-frame change for each fitted radius around its bounded
+  # reference. 0.10 means 0.90x-1.10x; 0.90 would permit 0.10x-1.90x and
+  # therefore provides almost no protection against one-frame collapse.
+  pcaShapeFitGrowthCap: 0.10
+  # Legacy pipelines keep the gradual ratio correction. CU4 can promote the
+  # same limits to an exact shrink-only post-fit projection.
+  pcaShapeRatioBoundEnabled: false
+  pcaShapeRatioBoundHardLimitEnabled: false
+  pcaShapeRatioBoundPreserveSplitEvidence: true
+  pcaShapeRatioBoundMinAgeFrames: 0
+  pcaShapeMaxLongMidRatio: 0.0
+  pcaShapeMaxMidShortRatio: 0.0
+  pcaShapeMaxLongShortRatio: 0.0
   trashPcaShapeFitEnabled: true
   trashPcaShapeUpdatePosition: false
   trashPcaShapeMaxOriginalRadiusFactor: 2.0
@@ -313,6 +336,38 @@ simulation:
   # movement/split random-search budgets are skipped and the existing final
   # PCA shape fit becomes the direct per-frame movement/shape update.
   celluniverse2_enabled: false
+  celluniverse4_enabled: false
+  # CU4-only: remove detached bright support from final parent-shape PCA.
+  # Split discovery and placement deliberately retain the complete parent
+  # support so genuine daughter lobes are not removed as debris.
+  celluniverse4_component_filter_enabled: false
+  celluniverse4_component_connectivity_radius: 1
+  celluniverse4_component_min_voxels: 20
+  celluniverse4_component_companion_min_fraction: 0.60
+  celluniverse4_component_max_components: 2
+  # 0 disables the frozen-anchor trim. Values >= 1 retain final-PCA support
+  # inside this multiple of the incoming ellipsoid around the selected center.
+  celluniverse4_pca_component_anchor_radius_scale: 0.0
+  # A percentile used only to cap an overfull connected component is not a
+  # noise estimate. CU4 profiles may use the physical cutoff for SNR instead.
+  celluniverse4_pca_volume_cap_snr_decoupling_enabled: false
+  # CU4 may still fit a nominally low-SNR body when one sufficiently large
+  # connected component reaches the frozen cell anchor. Disabled here so the
+  # traditional, CU2, CU3, and CellLumen pipelines retain prior behavior.
+  celluniverse4_pca_component_low_snr_rescue_enabled: false
+  celluniverse4_pca_component_low_snr_rescue_min_support_fraction: 0.75
+  # 0 disables the anchor-distance limit; CU4 uses the conservative value.
+  celluniverse4_pca_component_low_snr_rescue_max_anchor_distance: 1.50
+  # CU4-only inverse size/foreground-contrast relation. The compiled/default
+  # profile remains off; config_celluniverse4.yaml enables it explicitly.
+  celluniverse4_postfit_brightness_volume_reconcile_enabled: false
+  celluniverse4_postfit_brightness_volume_inverse_volume_exponent: 1.0
+  celluniverse4_postfit_brightness_volume_log_deadband: 0.14
+  celluniverse4_postfit_brightness_volume_strength: 0.50
+  celluniverse4_postfit_brightness_volume_min_anchor_contrast: 0.05
+  celluniverse4_postfit_brightness_volume_max_contrast_step_fraction: 0.20
+  celluniverse4_postfit_brightness_volume_group_newborn_siblings: true
+  celluniverse4_postfit_brightness_volume_skip_resume_first_frame: true
   z_scaling: 7
   blur_sigma: 1.1 # 0.0
   preprocess_mode: n2v2
@@ -520,6 +575,16 @@ simulation:
   # 0.03 = just above typical background noise (~0.01-0.02).
   asymmetric_cost_threshold: 0.03
 
+  # PSF-forward symmetric L2 plus a frozen frame-entry brightness prior is the
+  # default objective. Set this false only for legacy asymmetric-L2
+  # reproduction/comparison runs.
+  psf_brightness_cost_enabled: true
+  psf_brightness_cost_sigma: 1.0
+  psf_brightness_prior_weight: 0.1
+  psf_brightness_prior_tolerance: 0.005
+  psf_brightness_prior_spread: 0.0
+  psf_brightness_contrast_floor: 0.05
+
   signal_guided_position_enabled: false
   # Signal-detection box side length in voxels/pixels. Smaller = more boxes,
   # finer-grain clusters.
@@ -639,8 +704,30 @@ prob:
   # Reject if generated daughters overlap each other by more than this
   # fraction of either daughter's voxel body.
   split_daughter_overlap_gate_enabled: true
+  # CU4 can independently reject the specific false-division signature where
+  # both raw daughter PCA fits are rods and their exact ellipsoids overlap.
+  celluniverse4_split_sibling_rod_overlap_gate_enabled: false
+  celluniverse4_split_sibling_rod_min_raw_shape_ratio: 1.80
+  celluniverse4_split_sibling_rod_max_overlap_fraction: 0.07
+  # Candidate ranking/refinement still penalize sibling overlap. When true,
+  # only the winning siblings' mutual bounding-sphere penalty is omitted from
+  # the final split acceptance cost; overlap with existing cells remains.
+  # Keep false globally and opt in only for a validated dataset profile.
+  split_acceptance_ignore_sibling_pair_overlap_cost: false
   split_max_daughter_overlap_fraction: 0.05
   split_daughter_overlap_scale: 1.0
+
+  # Preserve a split's dedicated daughter refit through its birth frame. If
+  # the final ellipsoid volumes still differ too much, shrink only the larger
+  # sibling; never inflate the smaller one from unsupported image volume.
+  split_birth_sibling_volume_guard_enabled: true
+  split_birth_sibling_volume_ratio_max: 1.25
+  # Birth-frame-only by default. Dataset profiles may keep the guard active
+  # briefly after division and optionally bound recent daughter volume to the
+  # accepted split geometry. Zero factors disable the birth-volume envelope.
+  split_sibling_volume_guard_recent_frames: 0
+  split_recent_daughter_volume_min_birth_factor: 0.0
+  split_recent_daughter_volume_max_birth_factor: 0.0
 
   bio_daughter_size_ratio_max: 1.5
   bio_combined_volume_min_fraction: 0.6

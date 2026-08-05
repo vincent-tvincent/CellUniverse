@@ -187,6 +187,135 @@ void testSmallShapeChangeAccepted()
                 "tracker changed fixed theta_z");
 }
 
+void testRuntimeIntensityScaleRecalibration()
+{
+    BackgroundRegionTracker::SeedRecord seed;
+    seed.center = cv::Point3f(32.0f, 32.0f, 20.0f);
+    seed.radii = cv::Vec3f(18.0f, 14.0f, 10.0f);
+    seed.coldBackground = 0.12f;
+    seed.hotBackground = 0.53f;
+    seed.softMargin = 0.08f;
+
+    BackgroundRegionTracker::SeedRecord runtimeTruth = seed;
+    runtimeTruth.coldBackground = 0.02f;
+    runtimeTruth.hotBackground = 0.08f;
+    BackgroundRegionTracker truthTracker(runtimeTruth);
+    const auto runtimeFrame =
+        truthTracker.render(41, 64, 64).background;
+
+    BackgroundRegionTracker tracker(seed);
+    require(!tracker.update(0, runtimeFrame, {}),
+            "confirmed first-frame geometry should remain held");
+    const auto &first = tracker.currentState();
+    require(first.intensityAccepted,
+            "safe first-frame runtime intensity estimates were rejected");
+    require(first.intensitySnapped,
+            "first-frame runtime intensity estimates were not snapped");
+    requireNear(first.coldBackground, runtimeTruth.coldBackground, 0.002f,
+                "cold background retained the initializer intensity scale");
+    requireNear(first.hotBackground, runtimeTruth.hotBackground, 0.002f,
+                "hot background retained the initializer intensity scale");
+    requireNear(first.coldBackground, first.coldCandidate, 1.0e-6f,
+                "snapped cold value differs from measured candidate");
+    requireNear(first.hotBackground, first.hotCandidate, 1.0e-6f,
+                "snapped hot value differs from measured candidate");
+
+    BackgroundRegionTracker::SeedRecord dimmerTruth = runtimeTruth;
+    dimmerTruth.hotBackground = 0.04f;
+    BackgroundRegionTracker dimmerTracker(dimmerTruth);
+    const auto dimmerFrame =
+        dimmerTracker.render(41, 64, 64).background;
+    (void)tracker.update(1, dimmerFrame, {});
+    const auto &second = tracker.currentState();
+    require(second.intensityAccepted && !second.intensitySnapped,
+            "later-frame intensity update used the first-frame snap path");
+    requireNear(second.hotBackground, second.hotCandidate, 1.0e-6f,
+                "safe current-frame estimate retained temporal brightness lag");
+
+    BackgroundRegionTracker::SeedRecord brighterTruth = runtimeTruth;
+    brighterTruth.hotBackground = 0.40f;
+    BackgroundRegionTracker brighterTracker(brighterTruth);
+    const auto brighterFrame =
+        brighterTracker.render(41, 64, 64).background;
+    const float previousHot = tracker.currentState().hotBackground;
+    (void)tracker.update(2, brighterFrame, {});
+    const auto &third = tracker.currentState();
+    require(third.intensityAccepted && !third.intensitySnapped,
+            "later-frame bounded update used the first-frame snap path");
+    requireNear(third.hotBackground - previousHot, 0.05f, 0.002f,
+                "maximumIntensityStep did not cap the final intensity update");
+}
+
+void testHotEstimateResistsBrightCellLeakage()
+{
+    BackgroundRegionTracker::SeedRecord truth;
+    truth.center = cv::Point3f(32.0f, 32.0f, 20.0f);
+    truth.radii = cv::Vec3f(18.0f, 14.0f, 10.0f);
+    truth.coldBackground = 0.02f;
+    truth.hotBackground = 0.08f;
+    truth.softMargin = 0.08f;
+
+    BackgroundRegionTracker truthTracker(truth);
+    auto contaminated = truthTracker.render(41, 64, 64).background;
+    for (int z = 0; z < static_cast<int>(contaminated.size()); ++z) {
+        cv::Mat &slice = contaminated[static_cast<std::size_t>(z)];
+        for (int y = 0; y < slice.rows; ++y) {
+            float *row = slice.ptr<float>(y);
+            for (int x = 0; x < slice.cols; ++x) {
+                const cv::Point3f point(
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(z));
+                if (truthTracker.membershipAt(point) >= 0.95f &&
+                    (7 * x + 11 * y + 13 * z) % 17 < 3) {
+                    row[x] = 1.0f;
+                }
+            }
+        }
+    }
+
+    BackgroundRegionTracker::SeedRecord mismatched = truth;
+    mismatched.coldBackground = 0.12f;
+    mismatched.hotBackground = 0.53f;
+    BackgroundRegionTracker tracker(mismatched);
+    (void)tracker.update(0, contaminated, {});
+    require(tracker.currentState().intensityAccepted,
+            "contaminated first-frame estimate was rejected");
+    require(tracker.currentState().hotBackground < 0.10f,
+            "bright cell leakage biased the robust hot estimate");
+}
+
+void testIntensityStepLimitCanBeDisabled()
+{
+    BackgroundRegionTracker::SeedRecord seed;
+    seed.center = cv::Point3f(32.0f, 32.0f, 20.0f);
+    seed.radii = cv::Vec3f(18.0f, 14.0f, 10.0f);
+    seed.coldBackground = 0.02f;
+    seed.hotBackground = 0.04f;
+    seed.softMargin = 0.08f;
+
+    BackgroundRegionTracker::Options options;
+    options.intensityStepLimitEnabled = false;
+    BackgroundRegionTracker tracker(seed, options);
+
+    BackgroundRegionTracker firstTruth(seed);
+    (void)tracker.update(0, firstTruth.render(41, 64, 64).background, {});
+
+    BackgroundRegionTracker::SeedRecord brightTruth = seed;
+    brightTruth.hotBackground = 0.40f;
+    BackgroundRegionTracker brightTracker(brightTruth);
+    (void)tracker.update(
+        1, brightTracker.render(41, 64, 64).background, {});
+    require(tracker.currentState().intensityAccepted,
+            "unlimited intensity update was rejected");
+    requireNear(tracker.currentState().hotBackground,
+                tracker.currentState().hotCandidate,
+                1.0e-6f,
+                "disabled intensity step limit retained temporal lag");
+    require(tracker.currentState().hotBackground > 0.30f,
+            "disabled intensity step limit still behaved like the 0.05 cap");
+}
+
 void validatePavakCsvs(int argc, char **argv)
 {
     const std::array<int, 9> expectedCounts{
@@ -198,12 +327,12 @@ void validatePavakCsvs(int argc, char **argv)
         require(metadata.present &&
                     metadata.initializerSchemaVersion == 2,
                 csv.string() + ": missing schema-v2 metadata");
-        requireNear(metadata.zInterpolationRatio, 4.0f, 1.0e-6f,
+        requireNear(metadata.zInterpolationRatio, 5.5f, 1.0e-6f,
                     csv.string() + ": unexpected z ratio");
         require(metadata.zCoordinateSpace == "scaled",
                 csv.string() + ": unexpected z coordinate space");
         const InitialCsvDocument document = CsvHandler::loadInitialCsv(
-            csv.string(), "SPIMA_t001.tif", 4.0f, 1.0f, "scaled");
+            csv.string(), "SPIMA_t001.tif", 5.5f, 1.0f, "scaled");
         require(document.hasBackground &&
                     document.background.name == "embryo_envelope",
                 csv.string() + ": missing embryo envelope");
@@ -249,6 +378,9 @@ int main(int argc, char **argv)
         testFutureSchemaRejected(fixtureDir);
         testSoftBackgroundAndFreeze();
         testSmallShapeChangeAccepted();
+        testRuntimeIntensityScaleRecalibration();
+        testIntensityStepLimitCanBeDisabled();
+        testHotEstimateResistsBrightCellLeakage();
         std::cout << "[PASS] initial CSV/background focused tests\n";
         return 0;
     } catch (const std::exception &error) {

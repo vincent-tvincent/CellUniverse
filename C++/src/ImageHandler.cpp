@@ -1,10 +1,12 @@
 #include "../includes/ImageHandler.hpp"
+#include "../includes/ZInterpolation.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -641,6 +643,26 @@ int chooseNearestDivisorSize(int axisLength, float targetSize)
     return bestDivisor;
 }
 
+std::uint64_t stableBrightComponentId(
+    const std::vector<std::array<int, 3>> &gridCoordinates)
+{
+    std::vector<std::array<int, 3>> sorted = gridCoordinates;
+    std::sort(sorted.begin(), sorted.end());
+    std::uint64_t hash = 1469598103934665603ULL;
+    constexpr std::uint64_t kPrime = 1099511628211ULL;
+    for (const auto &coordinate : sorted) {
+        for (const int value : coordinate) {
+            const std::uint32_t encoded = static_cast<std::uint32_t>(value);
+            for (int byte = 0; byte < 4; ++byte) {
+                hash ^= static_cast<std::uint64_t>(
+                    (encoded >> static_cast<unsigned>(byte * 8)) & 0xffU);
+                hash *= kPrime;
+            }
+        }
+    }
+    return hash;
+}
+
 std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &stack,
                                                               const BaseConfig &config)
 {
@@ -752,6 +774,9 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
         double xSum = 0.0;
         double ySum = 0.0;
         double zSum = 0.0;
+        double geometricXSum = 0.0;
+        double geometricYSum = 0.0;
+        double geometricZSum = 0.0;
         double brightnessSum = 0.0;
         int clusterBoxes = 0;
         int totalVoxels = 0;
@@ -761,6 +786,12 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
         float maxX = std::numeric_limits<float>::lowest();
         float maxY = std::numeric_limits<float>::lowest();
         float maxZ = std::numeric_limits<float>::lowest();
+        float peakBrightness = std::numeric_limits<float>::lowest();
+        cv::Point3f peakPosition{0.0f, 0.0f, 0.0f};
+        std::vector<float> memberX;
+        std::vector<float> memberY;
+        std::vector<float> memberZ;
+        std::vector<std::array<int, 3>> memberGridCoordinates;
 
         while (!queue.empty())
         {
@@ -772,6 +803,9 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
             xSum += weight * static_cast<double>(box.center.x);
             ySum += weight * static_cast<double>(box.center.y);
             zSum += weight * static_cast<double>(box.center.z);
+            geometricXSum += box.center.x;
+            geometricYSum += box.center.y;
+            geometricZSum += box.center.z;
             brightnessSum += static_cast<double>(box.brightness);
             ++clusterBoxes;
             totalVoxels += std::max(0, box.voxels);
@@ -781,6 +815,14 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
             maxX = std::max(maxX, box.center.x);
             maxY = std::max(maxY, box.center.y);
             maxZ = std::max(maxZ, box.center.z);
+            memberX.push_back(box.center.x);
+            memberY.push_back(box.center.y);
+            memberZ.push_back(box.center.z);
+            memberGridCoordinates.push_back({box.ix, box.iy, box.iz});
+            if (box.brightness > peakBrightness) {
+                peakBrightness = box.brightness;
+                peakPosition = box.center;
+            }
 
             static constexpr std::array<std::array<int, 3>, 6> kFaceNeighbors{{
                 {{ 1,  0,  0}}, {{-1,  0,  0}},
@@ -813,10 +855,32 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
         }
 
         Frame::SignalCenter center;
+        center.stableId = stableBrightComponentId(memberGridCoordinates);
         center.position = cv::Point3f(
             static_cast<float>(xSum / weightSum),
             static_cast<float>(ySum / weightSum),
             static_cast<float>(zSum / weightSum));
+        center.geometricPosition = cv::Point3f(
+            static_cast<float>(geometricXSum / clusterBoxes),
+            static_cast<float>(geometricYSum / clusterBoxes),
+            static_cast<float>(geometricZSum / clusterBoxes));
+        const auto median = [](std::vector<float> values) {
+            const size_t middle = values.size() / 2;
+            std::nth_element(values.begin(), values.begin() + middle,
+                             values.end());
+            float result = values[middle];
+            if (values.size() % 2 == 0) {
+                const float lower = *std::max_element(
+                    values.begin(), values.begin() + middle);
+                result = 0.5f * (lower + result);
+            }
+            return result;
+        };
+        center.robustPosition = cv::Point3f(
+            median(memberX), median(memberY), median(memberZ));
+        center.peakPosition = peakPosition;
+        center.bboxMin = cv::Point3f(minX, minY, minZ);
+        center.bboxMax = cv::Point3f(maxX, maxY, maxZ);
         center.brightness = static_cast<float>(brightnessSum / static_cast<double>(clusterBoxes));
         center.boxes = clusterBoxes;
         center.sizeVoxels = static_cast<float>(std::max(totalVoxels, clusterBoxes));
@@ -841,6 +905,27 @@ std::vector<Frame::SignalCenter> localizeSignalCentersInStack(const ImageStack &
         center.sigmaScale = std::max(
             config.simulation.signal_guided_min_sigma_scale,
             1.0f - normalized * (1.0f - config.simulation.signal_guided_min_sigma_scale));
+        const float sizeSaturation = std::max(
+            1.0e-6f,
+            config.candidateBatch.chunkConfidenceSizeSaturationBoxes);
+        const float sizeScore = std::clamp(
+            std::log1p(static_cast<float>(std::max(0, center.boxes))) /
+                std::log1p(sizeSaturation),
+            0.0f, 1.0f);
+        const float compactness = std::pow(
+            1.0f / std::max(1.0f, center.shapeElongation),
+            config.candidateBatch.chunkConfidenceCompactnessExponent);
+        const float weightSum = std::max(
+            1.0e-6f,
+            config.candidateBatch.chunkConfidenceBrightnessWeight +
+                config.candidateBatch.chunkConfidenceSizeWeight +
+                config.candidateBatch.chunkConfidenceCompactnessWeight);
+        center.confidence = std::clamp(
+            (config.candidateBatch.chunkConfidenceBrightnessWeight * normalized +
+             config.candidateBatch.chunkConfidenceSizeWeight * sizeScore +
+             config.candidateBatch.chunkConfidenceCompactnessWeight * compactness) /
+                weightSum,
+            0.0f, 1.0f);
     }
 
     std::sort(centers.begin(), centers.end(),
@@ -936,6 +1021,35 @@ ImageStack runN2V2PreprocessingFromRawTiff(const std::string &imageFile,
     ImageStack rawStack = n2v2::loadTiffStack(imagePath);
     log << "[N2V2FrameLoad] frame=" << frameName
         << " stage=raw_tiff_done slices=" << rawStack.size() << std::endl;
+    if (simulation.frame_intensity_normalization_before_n2v2_enabled)
+    {
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < static_cast<int>(rawStack.size()); ++i)
+        {
+            cv::Mat floatSlice;
+            rawStack[static_cast<std::size_t>(i)].convertTo(floatSlice, CV_32F);
+            rawStack[static_cast<std::size_t>(i)] = std::move(floatSlice);
+        }
+        const auto [lowReference, highReference] =
+            normalizeStackToFrameIntensity(rawStack, simulation);
+        log << "[Frame Intensity Scale] frame=" << frameName
+            << " pipeline=experimental_normalized_before_n2v2"
+            << " mean=" << computeStackMeanForLog(rawStack)
+            << " low_ref=" << lowReference
+            << " high_ref=" << highReference
+            << " hard_max=" << simulation.frame_intensity_hard_max
+            << std::endl;
+        printStackStats(log,
+                        "experimental_normalized_before_n2v2",
+                        imageFile,
+                        rawStack);
+    }
+    else
+    {
+        log << "[Frame Intensity Scale] frame=" << frameName
+            << " pipeline=n2v2_input enabled=0"
+            << std::endl;
+    }
     log << "[N2V2FrameLoad] frame=" << frameName << " stage=process_stack_begin" << std::endl;
     n2v2::PreprocessResult result = runtime->processStack(rawStack, imagePath, log);
     log << "[N2V2FrameLoad] frame=" << frameName
@@ -960,44 +1074,8 @@ ImageStack finalizeExternalPreprocessedStack(const ImageStack &processedSlices,
         return interpolatedZSlices;
     }
 
-    if (normalizedSlices.size() == 1)
-    {
-        interpolatedZSlices = normalizedSlices;
-    }
-    else
-    {
-        const int expandFactor = config.simulation.z_scaling;
-        const unsigned numSynthSlices =
-            static_cast<unsigned>(expandFactor) * (normalizedSlices.size() - 1U) + 1U;
-
-        interpolatedZSlices.resize(numSynthSlices);
-        #pragma omp parallel for schedule(static)
-        for (int synthSliceIndex = 0; synthSliceIndex < static_cast<int>(numSynthSlices); ++synthSliceIndex)
-        {
-            const unsigned synthSlice = static_cast<unsigned>(synthSliceIndex);
-            const int sourceSlice = static_cast<int>(synthSlice / expandFactor);
-            if (synthSlice % expandFactor == 0)
-            {
-                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
-                    normalizedSlices[static_cast<std::size_t>(sourceSlice)];
-            }
-            else
-            {
-                const double t = static_cast<double>(synthSlice % expandFactor) /
-                                 static_cast<double>(expandFactor);
-                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
-                    (1.0 - t) * normalizedSlices[static_cast<std::size_t>(sourceSlice)] +
-                    t * normalizedSlices[static_cast<std::size_t>(sourceSlice + 1)];
-            }
-        }
-
-        if (interpolatedZSlices.size() != numSynthSlices)
-        {
-            throw std::runtime_error(
-                "interpolatedZSlices must have exactly " + std::to_string(numSynthSlices) +
-                " slices, but has " + std::to_string(interpolatedZSlices.size()) + " slices");
-        }
-    }
+    interpolatedZSlices = celluniverse::zinterpolation::resampleLinear(
+        normalizedSlices, config.simulation.z_scaling);
 
     printStackStats(log, "post_interpolation", imageFile, interpolatedZSlices);
     ImageStack preCubePoolingSlices = cloneStack(interpolatedZSlices);
@@ -1926,44 +2004,8 @@ std::vector<cv::Mat> ImageHandler::preprocessLoadedFrame(const std::vector<cv::M
         return interpolatedZSlices;
     }
 
-    if (processedZSlices.size() == 1)
-    {
-        interpolatedZSlices = processedZSlices;
-    }
-    else
-    {
-        const int expandFactor = config.simulation.z_scaling;
-        const unsigned numSynthSlices =
-            static_cast<unsigned>(expandFactor) * (processedZSlices.size() - 1U) + 1U;
-
-        interpolatedZSlices.resize(numSynthSlices);
-        #pragma omp parallel for schedule(static)
-        for (int synthSliceIndex = 0; synthSliceIndex < static_cast<int>(numSynthSlices); ++synthSliceIndex)
-        {
-            const unsigned synthSlice = static_cast<unsigned>(synthSliceIndex);
-            const int sourceSlice = static_cast<int>(synthSlice / expandFactor);
-            if (synthSlice % expandFactor == 0)
-            {
-                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
-                    processedZSlices[static_cast<std::size_t>(sourceSlice)];
-            }
-            else
-            {
-                const double t = static_cast<double>(synthSlice % expandFactor) /
-                                 static_cast<double>(expandFactor);
-                interpolatedZSlices[static_cast<std::size_t>(synthSlice)] =
-                    (1.0 - t) * processedZSlices[static_cast<std::size_t>(sourceSlice)] +
-                    t * processedZSlices[static_cast<std::size_t>(sourceSlice + 1)];
-            }
-        }
-
-        if (interpolatedZSlices.size() != numSynthSlices)
-        {
-            throw std::runtime_error(
-                "interpolatedZSlices must have exactly " + std::to_string(numSynthSlices) +
-                " slices, but has " + std::to_string(interpolatedZSlices.size()) + " slices");
-        }
-    }
+    interpolatedZSlices = celluniverse::zinterpolation::resampleLinear(
+        processedZSlices, config.simulation.z_scaling);
 
     printStackStats(log, "post_interpolation", imageFile, interpolatedZSlices);
     clipStack(interpolatedZSlices);

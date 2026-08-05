@@ -4,6 +4,7 @@
 
 #include <vector>
 #include <string>
+#include <cstdint>
 #include <ostream>
 #include <unordered_map>
 #include <limits>
@@ -37,6 +38,32 @@ struct BoundingBox3D
         if (!isValid()) return 0;
         return static_cast<size_t>(nx()) * ny() * nz();
     }
+};
+
+// Explicit latent-brightness moments used by the experimental PSF-forward
+// bbox cost. These values come from ellipsoid parameters, never from image
+// pixels, so changing candidate geometry cannot silently change the prior.
+struct PsfBrightnessMoments
+{
+    double mean = 0.0;
+    double spread = 0.0;
+    bool valid = false;
+};
+
+struct PsfBrightnessCostContext
+{
+    PsfBrightnessMoments candidate;
+    PsfBrightnessMoments prior;
+    double background = 0.0;
+    bool valid = false;
+};
+
+struct BboxCostBreakdown
+{
+    double totalCost = 0.0;
+    double imageCost = 0.0;
+    double brightnessPriorCost = 0.0;
+    size_t evaluatedVoxelCount = 0;
 };
 
 // PCA-bridge daughter proposal. Produced by Frame::discoverPcaBridgeProposal
@@ -86,6 +113,22 @@ struct BridgeSplitProposal
     float signalCenterMidpointDistance = 0.0f;
     float signalCenterAxisAlignment = 0.0f;
     bool signalCenterDisconnectedFarPairRescue = false;
+    // The pair was produced from this parent's current-frame local evidence
+    // after background recovery. Do not replace either seed with a different
+    // global center later in the split attempt.
+    bool currentFrameLocalOnly = false;
+    // A current-frame pair built directly from this parent's thresholded
+    // connected components. Unlike the older background-drop re-ground pair,
+    // it has already passed the component, midpoint, straddle, and axis gates.
+    bool trustedLocalComponentPair = false;
+    // A saturated-sparse current-frame proposal made from one local
+    // component and one reflected signal-center seed. This marker permits
+    // only the separately configured hybrid valley limit; all other split
+    // gates remain authoritative.
+    bool saturatedSparseHybridPair = false;
+    // Optional fixed cost-improvement requirement for a narrowly constrained
+    // proposal. Negative keeps the ordinary global split threshold.
+    float costImprovementThresholdOverride = -1.0f;
     bool cellUniverse3DelayedMissingDaughter = false;
     float parentPersistencePenalty = 0.0f;
     float neighborClaimPenalty = 0.0f;
@@ -163,8 +206,16 @@ public:
     // to the rest of the signal-guided perturbation feature (which is
     // currently unused in our pipeline). Kept for future re-enablement.
     struct SignalCenter {
+        std::uint64_t stableId = 0;
+        // position remains the historical intensity-weighted center.
         cv::Point3f position{0.0f, 0.0f, 0.0f};
+        cv::Point3f geometricPosition{0.0f, 0.0f, 0.0f};
+        cv::Point3f robustPosition{0.0f, 0.0f, 0.0f};
+        cv::Point3f peakPosition{0.0f, 0.0f, 0.0f};
+        cv::Point3f bboxMin{0.0f, 0.0f, 0.0f};
+        cv::Point3f bboxMax{0.0f, 0.0f, 0.0f};
         float brightness = 0.0f;
+        float confidence = 0.0f;
         float sigmaScale = 1.0f;
         int boxes = 0;
         float sizeVoxels = 0.0f;
@@ -209,7 +260,9 @@ public:
                                  float randomPerturbRadiusRatio = 1.0f,
                                  bool pcaRefitWellFilledMove = false,
                                  bool useSignalMapGuidance = true,
-                                 const cv::Point3f *forcedPosition = nullptr);
+                                 const cv::Point3f *forcedPosition = nullptr,
+                                 const std::vector<size_t> *
+                                     psfBrightnessGroupIndices = nullptr);
     double computeOverlapPenalty(float weight) const;
     double computeOverlapForCell(size_t cellIdx, float weight) const;
     bool findAnyCellBodyOverlap(bool includeTrash,
@@ -259,20 +312,36 @@ public:
         const std::vector<cv::Point3f> &extraPoints,
         float pointRadius) const;
 
-    // Asymmetric L2 cost over bbox voxels where mask[v]=1. Uses the same
-    // asymmetric_cost_weight as calculateCost. synthFrame must be the same
-    // size as _realFrame. Inlined voxel loop (no SIMD) is acceptable because
-    // a typical bbox is ~5M voxels (6× smaller than full image) and masked
-    // skipping is irregular.
+    // Bbox image cost over voxels where mask[v]=1. With the experimental
+    // switch off this is the existing asymmetric L2 implementation. With the
+    // switch on it uses PSF-matched symmetric L2 plus the supplied frozen
+    // brightness-prior context. synthFrame must match _realFrame.
     double calculateBboxCost(
         const BoundingBox3D &bbox,
         const std::vector<cv::Mat> &synthFrame,
         const std::vector<uint8_t> &mask,
-        int voronoiCellIdx = -1) const;
+        int voronoiCellIdx = -1,
+        const PsfBrightnessCostContext *brightnessContext = nullptr,
+        BboxCostBreakdown *breakdown = nullptr) const;
+
+    static PsfBrightnessMoments computePsfBrightnessMoments(
+        const std::vector<const Ellipsoid *> &candidateCells);
+    // Capture one candidate-independent brightness prior per frame-entry cell.
+    // Daughter lineage names automatically inherit the nearest frozen parent
+    // prior when they do not yet have an exact entry.
+    void freezePsfBrightnessPriors();
+    // Register a candidate-independent prior for a cell created after the
+    // frame-entry freeze (for example, CellUniverse3 orphan recovery). Never
+    // overwrites an existing frozen prior.
+    bool registerPsfBrightnessPriorIfMissing(const Ellipsoid &cell);
+    PsfBrightnessCostContext makePsfBrightnessCostContext(
+        const std::vector<const Ellipsoid *> &candidateCells,
+        const std::string &priorCellName) const;
 
     // Static-Voronoi cost territory. When enabled, each pixel is assigned
     // to the nearest cell's snap-anchor (or live-center fallback for
-    // cells without a snap). `calculateBboxCost(..., cellIdx)` only sums
+    // cells without a snap in legacy mode; PSF mode uses a full-volume fixed
+    // fallback). `calculateBboxCost(..., cellIdx)` only sums
     // residuals at pixels assigned to cellIdx. Anchors are fixed for the
     // whole frame (SNAP positions, captured once) so the Voronoi boundary
     // does NOT shift when a cell is perturbed — unlike the earlier live-
@@ -360,7 +429,9 @@ public:
         float lumenMaxDynamicDaughterOverlapFraction = 1.0f,
         float lumenSnapshotSeedMaxRefitDrift = -1.0f,
         bool lumenSkipExistingCellBuriedCheck = false,
-        bool lumenSkipNeighborBridgeCheck = false);
+        bool lumenSkipNeighborBridgeCheck = false,
+        bool saturatedSparseHybridValleyOverrideEnabled = false,
+        float saturatedSparseHybridMaxValleyRatio = 1.0f);
 
     // PCA-bridge daughter discovery. Runs the long-axis dark-bridge bin
     // analysis on the current cell and, if a valid bridge is found, returns
@@ -389,6 +460,25 @@ public:
         cv::Point3f &outD1,
         cv::Point3f &outD2,
         int *outKeptPixels = nullptr) const;
+
+    // Current-frame two-cluster grounding for a background-rescued split.
+    // Unlike the ordinary PCA median partition, this starts from an explicit
+    // recovered-body seed and an opposite-side seed, then performs weighted
+    // two-means on the locally owned bright voxels. This is intentionally a
+    // separate API so ordinary pre-pass PCA behavior is unchanged.
+    bool clusterCurrentFrameSplitCenters(
+        size_t cellIndex,
+        const PreviousFrameSnapshot &snapshot,
+        const ClaimSet &otherCellsClaimSets,
+        const cv::Point3f &seedD1,
+        const cv::Point3f &seedD2,
+        float gatherRadiusScale,
+        int iterations,
+        cv::Point3f &outD1,
+        cv::Point3f &outD2,
+        int *outKeptPixels = nullptr,
+        float *outMinClusterWeightFraction = nullptr,
+        float *outVarianceReduction = nullptr) const;
 
     // Read-only PCA check for an externally proposed daughter seed pair.
     // Gathers bright pixels around the pair, Voronoi-filters them using the
@@ -470,7 +560,11 @@ public:
         // appended here instead of std::cout. Used by the parallelized
         // shape-fit caller to accumulate per-cell logs and emit them in
         // deterministic cell-index order after the parallel region.
-        std::ostream *logSink = nullptr);
+        std::ostream *logSink = nullptr,
+        // CU4 may preserve the exact continuation-evidence position as the
+        // component anchor. When omitted, the frozen snap position (or the
+        // pre-fit live center for newborns) is used.
+        const cv::Point3f *componentAnchor = nullptr);
 
     bool refineCellShapeViaEdgeSticks(size_t cellIndex,
                                       std::ostream *logSink = nullptr);
@@ -494,6 +588,10 @@ public:
         _backgroundFrameOffset = 0.0f;
         _backgroundFrameOffsetUpdates.clear();
         _backgroundFrameOffsetUpdates.shrink_to_fit();
+        _foregroundReferenceFrame.clear();
+        _foregroundReferenceFrame.shrink_to_fit();
+        _foregroundReferenceValue = 0.0f;
+        _hasForegroundReferenceValue = false;
         _signalProbability.clear();
         _signalProbability.shrink_to_fit();
         _signalMap.clear();
@@ -522,6 +620,26 @@ public:
     const std::vector<float>& getBackgroundFrameOffsetUpdates() const {
         return _backgroundFrameOffsetUpdates;
     }
+    // Foreground fitting and physical background rendering are distinct
+    // intensity contracts. The physical background above is used to
+    // synthesize/export the scene. When configured, this reference retains
+    // the initializer-confirmed two-region scale for PCA, split, and
+    // signal-support decisions. Legacy inputs fall back to backgroundAt().
+    void setForegroundReferenceColor(float value) {
+        _foregroundReferenceValue = value;
+        _hasForegroundReferenceValue = true;
+    }
+    float foregroundReferenceAt(int z, int y, int x) const;
+    float foregroundReferenceAt(const cv::Point3f &point) const;
+    void setForegroundReferenceFrame(std::vector<cv::Mat> referenceFrame);
+    void clearForegroundReferenceFrame() {
+        _foregroundReferenceFrame.clear();
+        _foregroundReferenceValue = 0.0f;
+        _hasForegroundReferenceValue = false;
+    }
+    bool hasForegroundReferenceFrame() const {
+        return !_foregroundReferenceFrame.empty();
+    }
     // Signal centers for signal-guided perturbation (yp ffc1917). Populated
     // during frame preparation/preload after preprocessing is loaded.
     void setSignalCenters(std::vector<SignalCenter> centers) { _signalCenters = std::move(centers); }
@@ -531,11 +649,11 @@ public:
     void setSignalMap(std::vector<cv::Mat> signalMap) { _signalMap = std::move(signalMap); }
     const std::vector<cv::Mat>& getSignalMap() const { return _signalMap; }
     void setMeanCellBrightness(float mean) { _meanCellBrightness = mean; }
-    // Bbox-cost mode: perturb/split use a per-cell bbox with Voronoi
-    // neighbor exclusion instead of full-image L2. Set at frame start
-    // from ProbabilityConfig.use_bbox_cost; forwarded to per-cell paths.
+    // Bbox-cost mode: perturb/split use a fixed local voxel region instead of
+    // incremental full-image L2. The PSF objective always needs this path
+    // because its convolution halo makes the legacy slice cache invalid.
     void setUseBboxCost(bool enable, float marginScale) {
-        _useBboxCost = enable;
+        _useBboxCost = enable || simulationConfig.psf_brightness_cost_enabled;
         _bboxMarginScale = marginScale;
     }
     bool getUseBboxCost() const { return _useBboxCost; }
@@ -544,9 +662,11 @@ public:
     // Snap-anchored bbox installation. One bbox per cell-name, fixed for
     // the whole frame, centered on the snapshot position. Restores the
     // position anchor lost when a follow-the-cell bbox dropped voxels at
-    // the abandoned snap position (see 2026-04-15 Option A). Cells without
-    // a snap (frame 1, newborn daughters post-split) fall back to the
-    // legacy live pre/post-union bbox.
+    // the abandoned snap position (see 2026-04-15 Option A). Frame-entry
+    // cells without a previous snapshot receive an incoming-geometry fixed
+    // bbox under the PSF objective. Accepted newborn daughters receive their
+    // own fixed bboxes in the split callback; legacy cost keeps the live
+    // pre/post-union fallback.
     void setSnapBbox(const std::string &name, const BoundingBox3D &bbox) {
         _snapBboxes[name] = bbox;
     }
@@ -602,11 +722,18 @@ private:
     std::string imageName;
     std::vector<cv::Mat> _realFrame;
     std::vector<cv::Mat> _synthFrame;
+    // Physical cold/hot field used by synthesis and compact/full export.
     std::vector<cv::Mat> _backgroundFrame;
     // Cumulative deltas applied to the currently installed spatial
     // background. Reset whenever that field is replaced or cleared.
     float _backgroundFrameOffset = 0.0f;
     std::vector<float> _backgroundFrameOffsetUpdates;
+    // Stable two-region intensity reference used only by foreground analysis.
+    // It deliberately does not receive physical background recalibration or
+    // render-only offsets.
+    std::vector<cv::Mat> _foregroundReferenceFrame;
+    float _foregroundReferenceValue = 0.0f;
+    bool _hasForegroundReferenceValue = false;
     // Signal centers (yp ffc1917) — bright clusters in the real image that
     // signal-guided perturbation snaps cells onto.
     std::vector<SignalCenter> _signalCenters;
@@ -631,6 +758,12 @@ private:
     // Universal bbox cost mode — set once per frame via setUseBboxCost().
     bool  _useBboxCost = false;
     float _bboxMarginScale = 3.0f;
+    struct FrozenPsfBrightnessPrior {
+        PsfBrightnessMoments moments;
+        double background = 0.0;
+    };
+    std::unordered_map<std::string, FrozenPsfBrightnessPrior>
+        _psfBrightnessPriors;
     // Mean cell brightness for brightness-proportional overlap scaling.
     // Set once per frame by CellUniverse::optimize. When > 0, perturbCell
     // scales overlap weight by (cellBrightness / mean)².
@@ -640,8 +773,12 @@ private:
     // When present, perturbCell uses the stored bbox as a fixed evaluation
     // window for the whole frame, so voxels at the snap position are always
     // included in the cost sum — drifting away from snap pays an undershoot
-    // cost, anchoring the cell to its real-cell location. Missing entry
-    // (frame 1, newborn daughters) → legacy live pre/post-union bbox.
+    // cost, anchoring the cell to its real-cell location. Frame-entry cells
+    // without previous snapshots receive a fixed incoming-geometry bbox in
+    // CellUniverse::optimize; accepted split daughters receive one in the
+    // split callback. A truly independent mid-frame birth without an entry
+    // still falls back to full-volume PSF, or to the legacy live
+    // pre/post-union bbox when PSF cost is disabled.
     std::unordered_map<std::string, BoundingBox3D> _snapBboxes;
     // Snap positions keyed by cell name — used for the position prior
     // penalty in perturbCell. Populated once per frame by

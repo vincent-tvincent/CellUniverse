@@ -115,24 +115,25 @@ loads `source_frame` from the job input and displays the raw microscopy stack
 after z interpolation with the record's effective
 `z_interpolation_ratio`.
 
-For a raw stack with `N > 1` z slices and integer ratio `r`, CellUniverse
-creates `r * (N - 1) + 1` slices. An output slice whose index is divisible by
-`r` is the corresponding source slice. Otherwise, with
-`source = floor(output / r)` and `t = (output mod r) / r`, it is:
+For a raw stack with `N > 1` z slices and ratio `r >= 1`, CellUniverse creates
+`M = round_to_even((N - 1) * r) + 1` slices. For output index `k`, let
+`position = k * (N - 1) / (M - 1)`, `source = floor(position)`, and
+`t = position - source`. The output is:
 
 ```text
 (1 - t) * raw[source] + t * raw[source + 1]
 ```
 
-The ratio in this record is the effective runtime value.
+The first and final output slices therefore preserve the source endpoints.
+The ratio in this record is the requested runtime value; the exact discrete
+grid scale is `(M - 1) / (N - 1)`.
 `z_interpolation_source` is `config` for a YAML-derived ratio, `initial_csv`
 when supported schema-v2 initializer metadata overrides it, and
 `cell_lumen_profile` for standalone CellLumen profile selection. The recorded
 ratio therefore takes precedence over a default read directly from
-`config.yaml`. The main pipeline records the integer expansion factor actually
-used by `ImageHandler`, even if a legacy YAML expressed that setting as a
-fractional number. Standalone CellLumen records the same positive integer
-interpolation factor used to build its displayed stack; its already-scaled cell
+`config.yaml`. The main pipeline records the finite ratio used by
+`ImageHandler`, including fractional values. Standalone CellLumen records its
+separately selected positive integer preview factor; its already-scaled cell
 coordinates remain explicit in the cell records.
 
 ## Synthetic-frame reconstruction

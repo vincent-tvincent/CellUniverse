@@ -1,0 +1,295 @@
+base_config: traditional_normalized_n2v2.yaml
+
+# Controlled CU4 comparison against traditional_normalized_n2v2.yaml.
+simulation:
+  celluniverse2_enabled: false
+  celluniverse3_enabled: false
+  celluniverse4_enabled: true
+  celluniverse4_component_filter_enabled: true
+  celluniverse4_component_connectivity_radius: 1
+  celluniverse4_component_min_voxels: 20
+  celluniverse4_component_companion_min_fraction: 0.60
+  celluniverse4_component_max_components: 1
+  celluniverse4_pca_component_anchor_radius_scale: 1.50
+  celluniverse4_pca_volume_cap_snr_decoupling_enabled: true
+  celluniverse4_pca_component_low_snr_rescue_enabled: true
+  celluniverse4_pca_component_low_snr_rescue_min_support_fraction: 0.75
+  celluniverse4_pca_component_low_snr_rescue_max_anchor_distance: 1.50
+  celluniverse4_postfit_brightness_volume_reconcile_enabled: true
+  celluniverse4_postfit_brightness_volume_inverse_volume_exponent: 1.0
+  celluniverse4_postfit_brightness_volume_log_deadband: 0.14
+  celluniverse4_postfit_brightness_volume_strength: 0.50
+  celluniverse4_postfit_brightness_volume_min_anchor_contrast: 0.05
+  celluniverse4_postfit_brightness_volume_max_contrast_step_fraction: 0.20
+  celluniverse4_postfit_brightness_volume_group_newborn_siblings: true
+  celluniverse4_postfit_brightness_volume_skip_resume_first_frame: true
+  # Prepared sequences can change their physical hot-region estimate by more
+  # than 0.05 between adjacent frames. Follow the robust current-frame
+  # estimate directly instead of carrying a multi-frame intensity lag.
+  initial_csv_background_intensity_step_limit_enabled: false
+  initial_csv_background_maximum_intensity_step: 0.05
+  # Review only the bright-cell tier calibrated by frame-31 cells 410/411.
+  # Every proposal must capture more of its anchored component and improve the
+  # same image+overlap objective used by fitting.
+  celluniverse4_postfit_bright_cell_size_review_enabled: true
+  celluniverse4_postfit_bright_cell_size_review_min_brightness: 0.30
+  celluniverse4_postfit_bright_cell_size_review_attempts: 3
+  celluniverse4_postfit_bright_cell_size_review_radius_step_fraction: 0.04
+  celluniverse4_postfit_bright_cell_size_review_max_radius_scale: 1.12
+  celluniverse4_postfit_bright_cell_size_review_min_cost_improvement: 0.0
+  celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction: 0.45
+  # Nominally threshold at the fitted cell brightness. A 45% downward
+  # tolerance admits realistic model/image mismatch without the broad halo
+  # admitted by the legacy 45%-of-contrast threshold.
+  celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled: true
+  celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance: 0.45
+  # Never let the review flood-fill through a neighboring modeled cell.
+  celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled: true
+  # Use the owned component's per-axis extent for a bounded shape adjustment,
+  # rather than expanding every radius uniformly.
+  celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled: true
+  celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile: 0.95
+  celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction: 0.50
+  celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius: 1
+  celluniverse4_postfit_bright_cell_size_review_component_min_voxels: 50
+  celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels: 20
+  celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction: 0.01
+  celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale: 2.5
+  celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled: true
+  signal_center_rescue_global_assignment_enabled: true
+  # A confirmed CU4 background drop should only search nearby cells. The
+  # brightness, half-space, occupancy, and assignment gates remain active.
+  signal_center_rescue_max_distance_body_units: 3.0
+  prepare_analyze_one_frame: true
+
+cell:
+  # The ordinary per-axis temporal cap can preserve a falsely flat fit after
+  # the center returns to the correct body. Keep its volume ceiling, but allow
+  # PCA-supported rounder proportions to recover gradually.
+  pcaShapeFitRoundingRescueEnabled: true
+  pcaShapeFitRoundingRescueMinElongationImprovement: 0.05
+  pcaShapeFitRoundingRescueMaxAxisRedistributionFraction: 0.15
+  pcaShapeRatioBoundEnabled: true
+  pcaShapeRatioBoundHardLimitEnabled: true
+  pcaShapeRatioBoundPreserveSplitEvidence: true
+  pcaShapeRatioBoundMinAgeFrames: 0
+  pcaShapeMaxLongMidRatio: 1.60
+  pcaShapeMaxMidShortRatio: 2.75
+  pcaShapeMaxLongShortRatio: 2.00
+
+cell_lumen:
+  enabled: false
+  fusionEnabled: false
+
+prob:
+  # Frame-26 cell 41 improves strongly after shortest-axis daughter refit, but
+  # its separation grows by 1.2975x. Keep the gate enabled and narrowly raise
+  # it above that observed valid case.
+  split_max_daughter_axis_expansion: 1.35
+  # CU4 schedules one probability-equivalent opportunity per parent, so a
+  # marginal false division cannot rely on random non-selection for safety.
+  # Pos0's false frame-1 cell-4 proposal improved by only 596, and the newly
+  # exposed premature frame-11 cell-1 proposal improved by only 1,002. The
+  # weakest validated real division (cell 2 at frame 6) improves by 2,987.
+  split_cost: 2500
+  split_cost_fraction: 0.01
+  # Ten legacy axC candidates precede the image-PCA primary. Keep the generic
+  # selector's hard-cap contract while explicitly budgeting for both families.
+  split_candidates_per_attempt: 11
+  # A visible second axis is proposal evidence, not permission to accept a
+  # reconstruction that became worse. Known Pos0 divisions clear the normal
+  # negative-cost gate, while the premature frame-9 cell-1 proposal did not.
+  split_bridge_cost_rescue_enabled: false
+  celluniverse4_split_candidate_family_reserve_enabled: true
+  celluniverse4_split_candidate_geometry_prefilter_enabled: true
+  celluniverse4_split_use_winner_seed_axis_gate_enabled: true
+  celluniverse4_split_finalist_retry_enabled: true
+  celluniverse4_split_finalist_retry_limit: 4
+  celluniverse4_split_sibling_rod_overlap_gate_enabled: true
+  celluniverse4_split_sibling_rod_min_raw_shape_ratio: 1.80
+  celluniverse4_split_sibling_rod_max_overlap_fraction: 0.07
+  # A committed rod is never acceptable. Before the final shape guard, try a
+  # balanced two-daughter family along its longest axis. If every split loses,
+  # restore the last non-rod state or shrink the long axis below rod criteria.
+  celluniverse4_rod_tip_split_recovery_enabled: true
+  celluniverse4_rod_tip_hard_reject_enabled: true
+  celluniverse4_rod_tip_min_long_short_ratio: 1.80
+  celluniverse4_rod_tip_min_long_mid_ratio: 1.55
+  celluniverse4_rod_tip_max_mid_short_ratio: 1.35
+  celluniverse4_rod_tip_seed_inset_sphere_radius_fraction: 1.00
+  celluniverse4_rod_tip_alt_seed_distance_fraction: 0.75
+  celluniverse4_rod_tip_hard_reject_max_long_mid_ratio: 1.35
+  # If either generated daughter seed lands on modeled background, snap only
+  # that seed to the nearest strong center on its original side of the split
+  # plane. The distance limit is intentionally loose; the half-space is hard.
+  celluniverse4_split_daughter_background_reattach_enabled: true
+  celluniverse4_split_daughter_background_margin: 0.06
+  celluniverse4_split_daughter_background_probe_radius_parent_fraction: 0.25
+  celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction: 4.00
+  celluniverse4_split_daughter_background_reattach_min_center_brightness: 0.20
+  celluniverse4_split_daughter_background_reattach_min_center_boxes: 2
+  celluniverse4_split_daughter_background_reattach_halfspace_tolerance_parent_radius_fraction: 0.05
+  # Reuse the image-grounded aligned-center split proposal in CU4. It still
+  # passes through the same biological, overlap, geometry, and cost gates.
+  signal_center_split_enabled: true
+  # Keep current-frame ownership protection, but make it independently
+  # switchable for controlled ablations.
+  signal_center_neighbor_claim_gate_enabled: true
+  signal_center_future_rescue_enabled: true
+  # Future centers are only proposal seeds. The inherited 1.10-radius lower
+  # bound rejected every cell-51 pair; downstream overlap/geometry/cost gates
+  # remain responsible for accepting or rejecting the resulting daughters.
+  signal_center_future_rescue_min_separation_gate_enabled: false
+  # The future-only search may span a larger motion/division envelope than a
+  # current-frame pair. Keep a finite, independently tunable upper bound.
+  signal_center_future_rescue_max_separation_gate_enabled: true
+  signal_center_future_rescue_max_separation_parent_fraction: 5.00
+  # Future-frame centers can move farther from the current parent than
+  # current-frame centers. Keep this distance guard separate and bounded.
+  signal_center_future_rescue_midpoint_gate_enabled: true
+  signal_center_future_rescue_max_midpoint_parent_fraction: 2.00
+  # A unanimous three-pair ownership rejection is enough to consult the next
+  # frame. Cell 51 at frame 31 has exactly three candidate pairs; the former
+  # default of eight made the future-rescue path unreachable.
+  signal_center_neighbor_owned_future_rescue_scope_gate_enabled: true
+  signal_center_neighbor_owned_future_rescue_min_pairs: 3
+
+candidate_batch:
+  enabled: true
+  shadow_mode: false
+  export_diagnostics: true
+  # Every parent evaluates the complete immutable evidence pool. Conflicts are
+  # resolved by candidate validation/commit, never by removing points first.
+  per_parent_fresh_evidence_pool_enabled: true
+  max_candidates_per_parent: 12
+  max_snapshot_anchors: 1
+  max_exact_chunk_centers: 6
+  expensive_top_k: 6
+  continuation_refine_iterations_per_parent: 6
+  # Refinement stays near the accepted current/future evidence center.  This
+  # prevents a sequence of locally cheaper random moves from abandoning the
+  # selected cell body; disable independently for an ablation.
+  continuation_refine_anchor_distance_gate_enabled: true
+  continuation_refine_max_anchor_distance_min_radius_fraction: 1.0
+  stochastic_candidates_per_parent: 0
+  absolute_improvement_margin: 0.000001
+  fractional_improvement_margin: 0.0
+  continuation_refine_absolute_improvement_margin: 0.000001
+  winner_reevaluation_tolerance: 0.000001
+  deduplication_distance_absolute: 0.25
+  deduplication_distance_min_radius_fraction: 0.05
+  chunk_association_distance_absolute: 0.0
+  chunk_association_distance_min_radius_fraction: 2.5
+  chunk_min_boxes: 1
+  chunk_min_voxels: 0.0
+  chunk_min_brightness: 0.0
+  chunk_min_confidence: 0.0
+  background_drop_reattach_enabled: true
+  background_drop_observed_top_fraction: 0.30
+  background_drop_max_observed_model_contrast_ratio: 0.25
+  background_drop_min_model_contrast: 0.05
+  background_drop_sibling_halfspace_enabled: true
+  # If every compatible center is occupied or otherwise unsafe, preserve the
+  # last trusted model for one frame instead of learning from background.
+  background_drop_hold_if_no_safe_center: true
+  background_drop_skip_candidate_batch_if_reattached: true
+  # Preserve the rescued parent as baseline, but do not suppress an already
+  # validated signal/rod split proposal. Daughter candidates still pass all
+  # split gates and candidate-local background reattachment.
+  background_drop_explicit_split_bypass_hold_enabled: true
+  # Once the parent is rescued, discard stale/future split seeds. Recompute a
+  # candidate only from current-frame centers local to the rescued position.
+  background_drop_current_local_split_only_enabled: true
+  # The global center clustering may collapse a dividing local body to one
+  # center. Rebuild that parent's image evidence after recovery, using one
+  # current live center per neighbor and no stale/future daughter claims.
+  # Accept the resulting centroids only with strong recovered-local support.
+  background_drop_current_local_prepass_fallback_enabled: true
+  background_drop_current_local_prepass_fallback_min_kept_pixels: 800
+  background_drop_current_local_cluster_iterations: 8
+  background_drop_current_local_projected_seed_distance_radius_fraction: 1.60
+  background_drop_current_local_cluster_gather_radius_scale: 3.0
+  background_drop_current_local_cluster_min_weight_fraction: 0.15
+  background_drop_current_local_cluster_min_variance_reduction: 0.12
+  background_drop_current_local_prepass_fallback_max_anchor_distance_radius_fraction: 0.75
+  background_drop_current_local_prepass_fallback_max_midpoint_distance_radius_fraction: 0.75
+  background_drop_current_local_prepass_fallback_min_cost_improvement: 500.0
+  # Split-only current-frame detector. Threshold at the parent's previous
+  # fitted brightness inside a 1.25 x max-radius sphere, then seed daughters
+  # from a geometrically valid pair of 3D connected components.
+  local_component_split_centers_enabled: true
+  local_component_split_sphere_radius_scale: 1.25
+  local_component_split_connectivity_radius: 1
+  local_component_split_min_component_voxels: 20
+  local_component_split_max_midpoint_radius_scale: 0.75
+  local_component_split_min_axis_alignment: 0.80
+  local_component_split_neighbor_ownership_filter_enabled: true
+  local_component_split_neighbor_ownership_scale: 0.60
+  # Saturated, sparse residue is inconclusive rather than evidence of one body.
+  local_component_split_saturated_sparse_fallback_enabled: true
+  local_component_split_saturated_sparse_min_threshold: 0.995
+  local_component_split_saturated_sparse_max_total_voxels: 64
+  # At saturation, one local residue plus one compact high-quality current
+  # signal center can seed a split. This does not change global-center gates.
+  local_component_split_saturated_sparse_hybrid_enabled: true
+  local_component_split_saturated_sparse_hybrid_min_separation_radius_scale: 0.55
+  local_component_split_saturated_sparse_hybrid_max_separation_radius_scale: 1.00
+  local_component_split_saturated_sparse_hybrid_max_midpoint_radius_scale: 0.75
+  local_component_split_saturated_sparse_hybrid_min_signal_boxes: 6
+  local_component_split_saturated_sparse_hybrid_min_signal_brightness: 0.20
+  local_component_split_saturated_sparse_hybrid_min_signal_confidence: 0.70
+  local_component_split_saturated_sparse_hybrid_neighbor_ownership_filter_enabled: true
+  local_component_split_saturated_sparse_hybrid_neighbor_ownership_scale: 0.60
+  # Use the compact signal center as a merged-body centroid and reflect its
+  # local-component offset to seed the opposite daughter.
+  local_component_split_saturated_sparse_hybrid_reflection_scale: 1.00
+  # The recorded early Cell 51 division has two saturated cores without a
+  # dark inter-core valley. Only the marked hybrid proposal may use this
+  # relaxed ceiling; overlap, shape, cost, and ownership gates still apply.
+  local_component_split_saturated_sparse_hybrid_valley_override_enabled: true
+  local_component_split_saturated_sparse_hybrid_max_valley_ratio: 1.00
+  local_component_split_saturated_sparse_hybrid_cost_override_enabled: true
+  local_component_split_saturated_sparse_hybrid_min_cost_improvement: 1500.0
+  chunk_confidence_brightness_weight: 0.55
+  chunk_confidence_size_weight: 0.30
+  chunk_confidence_compactness_weight: 0.15
+  chunk_confidence_size_saturation_boxes: 8.0
+  chunk_confidence_compactness_exponent: 1.0
+  priority_distance_weight: 1.0
+  priority_confidence_weight: 1.0
+  priority_snapshot_bias: -0.25
+  priority_exact_center_bias: -0.50
+  priority_stochastic_bias: 0.50
+  # Future centers improved cheap proposal coverage but repeatedly stole a
+  # present-frame lineage when residual cost preferred the future body (cell
+  # 21 at frame 10). Keep the independently configurable feature off for this
+  # biological tracking profile; split rescue has its own scoped lookahead.
+  lookahead_evidence_enabled: false
+  lookahead_frames: 2
+  lookahead_priority_penalty_per_frame: 0.40
+  # A sibling pair inherits opposite sides of its previous-frame separation
+  # plane. Neither exact-center selection nor refinement may cross that plane.
+  continuation_sibling_halfspace_enabled: true
+  continuation_sibling_halfspace_tolerance_min_radius_fraction: 0.0
+  stochastic_sigma_min_radius_fraction: 0.10
+  stochastic_sigma_max_radius_fraction: 0.50
+  stochastic_sigma_absolute_min: 0.0
+  stochastic_sigma_absolute_max: 1000000.0
+  split_schedule_mode: probability_equivalent_per_parent
+  split_schedule_reference_iterations_per_cell: 50
+  split_schedule_force_probability_threshold: 0.05
+  split_schedule_evidence_first_enabled: true
+  split_schedule_evidence_first_min_separation_short_radius_fraction: 1.50
+  split_schedule_evidence_first_min_kept_pixels: 20
+  split_reject_compensation_enabled: false
+  split_daughter_cooldown_evidence_bypass_enabled: true
+  split_daughter_cooldown_evidence_bypass_min_age_frames: 6
+  split_daughter_cooldown_evidence_bypass_min_separation_short_radius_fraction: 1.50
+  split_daughter_cooldown_evidence_bypass_min_kept_pixels: 20
+  deterministic_seed: 1
+  deterministic_seed_namespace: candidate_batch_v1
+  chunk_evidence_enabled: true
+  include_weighted_center: true
+  include_geometric_center: true
+  include_robust_center: true
+  include_peak_center: true

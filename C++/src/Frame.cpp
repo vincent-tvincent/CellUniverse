@@ -1,4 +1,5 @@
 #include "../includes/Frame.hpp"
+#include "../includes/CellRefitGuards.hpp"
 
 #include <algorithm>
 #include <array>
@@ -87,6 +88,220 @@ struct BrightPixel
     cv::Point3f pos;   // world coordinates (x, y, z in interpolated-z space)
     float weight;      // pixel intensity above background
 };
+
+struct BrightPixelComponentSelection
+{
+    std::vector<int> labels;
+    std::vector<size_t> componentSizes;
+    std::vector<int> selectedLabels;
+    size_t eligiblePixels = 0;
+    int anchorLabel = -1;
+    float anchorDistance = std::numeric_limits<float>::infinity();
+
+    bool selected(int label) const
+    {
+        return label >= 0 &&
+               std::find(selectedLabels.begin(), selectedLabels.end(), label) !=
+                   selectedLabels.end();
+    }
+};
+
+// Sparse 3D connected-component selection for CU4-owned bright support.
+// The closest sufficiently large component is the anchor.  Additional
+// components are retained only when they are comparable in size, which keeps
+// a genuine balanced two-lobe division while excluding a small detached
+// fragment that merely happens to remain inside the broad parent territory.
+static BrightPixelComponentSelection selectAnchoredBrightPixelComponents(
+    const std::vector<BrightPixel> &pixels,
+    float minimumWeightExclusive,
+    const cv::Point3f &anchor,
+    int rows,
+    int cols,
+    int slices,
+    int connectivityRadius,
+    int minimumComponentVoxels,
+    float companionMinimumFraction,
+    int maximumComponents)
+{
+    BrightPixelComponentSelection result;
+    result.labels.assign(pixels.size(), -1);
+    if (pixels.empty() || rows <= 0 || cols <= 0 || slices <= 0) {
+        return result;
+    }
+
+    const int radius = std::clamp(connectivityRadius, 1, 3);
+    const size_t minimumVoxels = static_cast<size_t>(
+        std::max(1, minimumComponentVoxels));
+    const float companionFraction = std::clamp(
+        companionMinimumFraction, 0.0f, 1.0f);
+    const int componentLimit = std::max(1, maximumComponents);
+    const auto flatIndex = [rows, cols](int x, int y, int z) -> size_t {
+        return (static_cast<size_t>(z) * static_cast<size_t>(rows) +
+                static_cast<size_t>(y)) * static_cast<size_t>(cols) +
+               static_cast<size_t>(x);
+    };
+
+    std::unordered_map<size_t, size_t> pixelByVoxel;
+    pixelByVoxel.reserve(pixels.size() * 2 + 1);
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        if (!(pixels[i].weight > minimumWeightExclusive)) continue;
+        const int x = static_cast<int>(std::lround(pixels[i].pos.x));
+        const int y = static_cast<int>(std::lround(pixels[i].pos.y));
+        const int z = static_cast<int>(std::lround(pixels[i].pos.z));
+        if (x < 0 || x >= cols || y < 0 || y >= rows ||
+            z < 0 || z >= slices) {
+            continue;
+        }
+        const auto inserted = pixelByVoxel.emplace(flatIndex(x, y, z), i);
+        if (inserted.second) ++result.eligiblePixels;
+    }
+
+    std::vector<float> componentAnchorDistanceSq;
+    std::vector<size_t> worklist;
+    for (size_t seedIndex = 0; seedIndex < pixels.size(); ++seedIndex) {
+        if (!(pixels[seedIndex].weight > minimumWeightExclusive)) continue;
+        if (result.labels[seedIndex] >= 0) continue;
+        const int seedX = static_cast<int>(std::lround(pixels[seedIndex].pos.x));
+        const int seedY = static_cast<int>(std::lround(pixels[seedIndex].pos.y));
+        const int seedZ = static_cast<int>(std::lround(pixels[seedIndex].pos.z));
+        if (seedX < 0 || seedX >= cols || seedY < 0 || seedY >= rows ||
+            seedZ < 0 || seedZ >= slices) {
+            continue;
+        }
+        const auto seedVoxelIt =
+            pixelByVoxel.find(flatIndex(seedX, seedY, seedZ));
+        if (seedVoxelIt == pixelByVoxel.end() ||
+            seedVoxelIt->second != seedIndex) continue;
+
+        const int label = static_cast<int>(result.componentSizes.size());
+        result.componentSizes.push_back(0);
+        componentAnchorDistanceSq.push_back(
+            std::numeric_limits<float>::infinity());
+        worklist.clear();
+        worklist.push_back(seedIndex);
+        result.labels[seedIndex] = label;
+
+        for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
+            const size_t pixelIndex = worklist[cursor];
+            const BrightPixel &pixel = pixels[pixelIndex];
+            ++result.componentSizes[static_cast<size_t>(label)];
+            const cv::Point3f delta = pixel.pos - anchor;
+            componentAnchorDistanceSq[static_cast<size_t>(label)] = std::min(
+                componentAnchorDistanceSq[static_cast<size_t>(label)],
+                delta.dot(delta));
+
+            const int x = static_cast<int>(std::lround(pixel.pos.x));
+            const int y = static_cast<int>(std::lround(pixel.pos.y));
+            const int z = static_cast<int>(std::lround(pixel.pos.z));
+            for (int dz = -radius; dz <= radius; ++dz) {
+                const int nz = z + dz;
+                if (nz < 0 || nz >= slices) continue;
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    const int ny = y + dy;
+                    if (ny < 0 || ny >= rows) continue;
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        const int nx = x + dx;
+                        if (nx < 0 || nx >= cols) continue;
+                        const auto neighborIt =
+                            pixelByVoxel.find(flatIndex(nx, ny, nz));
+                        if (neighborIt == pixelByVoxel.end()) continue;
+                        const size_t neighborIndex = neighborIt->second;
+                        if (result.labels[neighborIndex] >= 0) continue;
+                        result.labels[neighborIndex] = label;
+                        worklist.push_back(neighborIndex);
+                    }
+                }
+            }
+        }
+    }
+
+    if (result.componentSizes.empty()) return result;
+    const int largestLabel = static_cast<int>(std::distance(
+        result.componentSizes.begin(),
+        std::max_element(result.componentSizes.begin(),
+                         result.componentSizes.end())));
+    const size_t largestSize =
+        result.componentSizes[static_cast<size_t>(largestLabel)];
+    const size_t minimumAnchorSize = std::max(
+        minimumVoxels,
+        static_cast<size_t>(std::ceil(
+            companionFraction * static_cast<float>(largestSize))));
+
+    for (size_t label = 0; label < result.componentSizes.size(); ++label) {
+        if (result.componentSizes[label] < minimumAnchorSize) continue;
+        if (componentAnchorDistanceSq[label] <
+            result.anchorDistance * result.anchorDistance) {
+            result.anchorLabel = static_cast<int>(label);
+            result.anchorDistance =
+                std::sqrt(componentAnchorDistanceSq[label]);
+        }
+    }
+    if (result.anchorLabel < 0 && largestSize >= minimumVoxels) {
+        result.anchorLabel = largestLabel;
+        result.anchorDistance = std::sqrt(
+            componentAnchorDistanceSq[static_cast<size_t>(largestLabel)]);
+    }
+    if (result.anchorLabel < 0) return result;
+
+    result.selectedLabels.push_back(result.anchorLabel);
+    const size_t anchorSize = result.componentSizes[
+        static_cast<size_t>(result.anchorLabel)];
+    std::vector<int> companionLabels;
+    for (size_t label = 0; label < result.componentSizes.size(); ++label) {
+        if (static_cast<int>(label) == result.anchorLabel ||
+            result.componentSizes[label] < minimumVoxels) {
+            continue;
+        }
+        const size_t smaller = std::min(anchorSize, result.componentSizes[label]);
+        const size_t larger = std::max(anchorSize, result.componentSizes[label]);
+        const float balance = larger > 0
+            ? static_cast<float>(smaller) / static_cast<float>(larger)
+            : 0.0f;
+        if (balance >= companionFraction) {
+            companionLabels.push_back(static_cast<int>(label));
+        }
+    }
+    std::sort(companionLabels.begin(), companionLabels.end(),
+              [&](int lhs, int rhs) {
+                  const size_t lhsSize =
+                      result.componentSizes[static_cast<size_t>(lhs)];
+                  const size_t rhsSize =
+                      result.componentSizes[static_cast<size_t>(rhs)];
+                  if (lhsSize != rhsSize) return lhsSize > rhsSize;
+                  const float lhsDistance =
+                      componentAnchorDistanceSq[static_cast<size_t>(lhs)];
+                  const float rhsDistance =
+                      componentAnchorDistanceSq[static_cast<size_t>(rhs)];
+                  if (lhsDistance != rhsDistance) {
+                      return lhsDistance < rhsDistance;
+                  }
+                  return lhs < rhs;
+              });
+    for (const int label : companionLabels) {
+        if (static_cast<int>(result.selectedLabels.size()) >= componentLimit) {
+            break;
+        }
+        result.selectedLabels.push_back(label);
+    }
+    return result;
+}
+
+static std::vector<BrightPixel> retainSelectedBrightPixelComponents(
+    const std::vector<BrightPixel> &pixels,
+    const BrightPixelComponentSelection &selection,
+    float minimumWeightExclusive)
+{
+    std::vector<BrightPixel> retained;
+    retained.reserve(pixels.size());
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        if (pixels[i].weight > minimumWeightExclusive &&
+            selection.selected(selection.labels[i])) {
+            retained.push_back(pixels[i]);
+        }
+    }
+    return retained;
+}
 
 static void accumulateDebugCellPlacement(std::vector<cv::Mat> &stack,
                                          const Ellipsoid &cell,
@@ -790,6 +1005,10 @@ void Frame::loadImageStacks(const std::vector<cv::Mat> &realFrame)
         _backgroundFrameOffset = 0.0f;
         _backgroundFrameOffsetUpdates.clear();
     }
+    if (!_foregroundReferenceFrame.empty() &&
+        _foregroundReferenceFrame.size() != _realFrame.size()) {
+        clearForegroundReferenceFrame();
+    }
     _synthFrame = generateSynthFrame();
     refreshFullCostCache();
 }
@@ -841,6 +1060,169 @@ float Frame::backgroundAt(const cv::Point3f &point) const
         return _backgroundValue;
     }
     return backgroundAt(
+        cvRound(point.z),
+        cvRound(point.y),
+        cvRound(point.x));
+}
+
+PsfBrightnessMoments Frame::computePsfBrightnessMoments(
+    const std::vector<const Ellipsoid *> &candidateCells)
+{
+    PsfBrightnessMoments result;
+    double totalWeight = 0.0;
+    double weightedMean = 0.0;
+    for (const Ellipsoid *cell : candidateCells) {
+        if (cell == nullptr) continue;
+        const double weight = cell->getVolume();
+        const double brightness = static_cast<double>(cell->getBrightness());
+        if (!std::isfinite(weight) || weight <= 0.0 ||
+            !std::isfinite(brightness)) {
+            continue;
+        }
+        totalWeight += weight;
+        weightedMean += weight * brightness;
+    }
+    if (!(totalWeight > 0.0) || !std::isfinite(weightedMean)) {
+        return result;
+    }
+
+    result.mean = weightedMean / totalWeight;
+    double weightedVariance = 0.0;
+    for (const Ellipsoid *cell : candidateCells) {
+        if (cell == nullptr) continue;
+        const double weight = cell->getVolume();
+        const double brightness = static_cast<double>(cell->getBrightness());
+        if (!std::isfinite(weight) || weight <= 0.0 ||
+            !std::isfinite(brightness)) {
+            continue;
+        }
+        const double delta = brightness - result.mean;
+        weightedVariance += weight * delta * delta;
+    }
+    result.spread = std::sqrt(std::max(0.0, weightedVariance / totalWeight));
+    result.valid = std::isfinite(result.mean) && std::isfinite(result.spread);
+    return result;
+}
+
+void Frame::freezePsfBrightnessPriors()
+{
+    _psfBrightnessPriors.clear();
+    _psfBrightnessPriors.reserve(cells.size());
+    for (const auto &cell : cells) {
+        registerPsfBrightnessPriorIfMissing(cell);
+    }
+}
+
+bool Frame::registerPsfBrightnessPriorIfMissing(const Ellipsoid &cell)
+{
+    if (cell.getName().empty() ||
+        _psfBrightnessPriors.find(cell.getName()) !=
+            _psfBrightnessPriors.end()) {
+        return false;
+    }
+    PsfBrightnessMoments moments =
+        computePsfBrightnessMoments({&cell});
+    if (!moments.valid) return false;
+    // The benchmark used zero spread. Keep that value configurable for
+    // real-data tuning while freezing it once for the entire frame.
+    moments.spread = static_cast<double>(
+        simulationConfig.psf_brightness_prior_spread);
+    FrozenPsfBrightnessPrior prior;
+    prior.moments = moments;
+    prior.background = static_cast<double>(backgroundAt(cv::Point3f(
+        cell.getX(), cell.getY(), cell.getZ())));
+    return _psfBrightnessPriors.emplace(cell.getName(), prior).second;
+}
+
+PsfBrightnessCostContext Frame::makePsfBrightnessCostContext(
+    const std::vector<const Ellipsoid *> &candidateCells,
+    const std::string &priorCellName) const
+{
+    PsfBrightnessCostContext context;
+    context.candidate = computePsfBrightnessMoments(candidateCells);
+
+    // CellUniverse lineage names append 0/1 at each split. Prefer an exact
+    // frame-entry prior; for a newborn daughter, repeatedly strip the lineage
+    // suffix until its nearest frozen parent is found.
+    std::string lookupName = priorCellName;
+    auto priorIt = _psfBrightnessPriors.end();
+    while (!lookupName.empty()) {
+        priorIt = _psfBrightnessPriors.find(lookupName);
+        if (priorIt != _psfBrightnessPriors.end()) break;
+        const char suffix = lookupName.back();
+        if (suffix != '0' && suffix != '1') break;
+        lookupName.pop_back();
+    }
+    if (priorIt == _psfBrightnessPriors.end()) {
+        return context;
+    }
+
+    context.prior = priorIt->second.moments;
+    context.background = priorIt->second.background;
+    context.valid = context.candidate.valid && context.prior.valid &&
+                    std::isfinite(context.background);
+    return context;
+}
+
+void Frame::setForegroundReferenceFrame(
+    std::vector<cv::Mat> referenceFrame)
+{
+    if (!referenceFrame.empty() && !_realFrame.empty() &&
+        referenceFrame.size() != _realFrame.size()) {
+        std::cout << "[Foreground Reference Frame] ignored size_mismatch expected="
+                  << _realFrame.size()
+                  << " got=" << referenceFrame.size()
+                  << std::endl;
+        _foregroundReferenceFrame.clear();
+        return;
+    }
+    for (cv::Mat &slice : referenceFrame) {
+        if (slice.empty()) {
+            continue;
+        }
+        if (slice.type() != CV_32F) {
+            slice.convertTo(slice, CV_32F);
+        }
+    }
+    _foregroundReferenceFrame = std::move(referenceFrame);
+}
+
+float Frame::foregroundReferenceAt(int z, int y, int x) const
+{
+    if (z < 0 ||
+        static_cast<size_t>(z) >= _foregroundReferenceFrame.size()) {
+        return _hasForegroundReferenceValue
+            ? _foregroundReferenceValue
+            : backgroundAt(z, y, x);
+    }
+    const cv::Mat &reference =
+        _foregroundReferenceFrame[static_cast<size_t>(z)];
+    if (reference.empty() || reference.type() != CV_32F ||
+        y < 0 || y >= reference.rows ||
+        x < 0 || x >= reference.cols) {
+        return _hasForegroundReferenceValue
+            ? _foregroundReferenceValue
+            : backgroundAt(z, y, x);
+    }
+    const float value = reference.ptr<float>(y)[x];
+    if (std::isfinite(value)) {
+        return value;
+    }
+    return _hasForegroundReferenceValue
+        ? _foregroundReferenceValue
+        : backgroundAt(z, y, x);
+}
+
+float Frame::foregroundReferenceAt(const cv::Point3f &point) const
+{
+    if (!std::isfinite(point.x) ||
+        !std::isfinite(point.y) ||
+        !std::isfinite(point.z)) {
+        return _hasForegroundReferenceValue
+            ? _foregroundReferenceValue
+            : _backgroundValue;
+    }
+    return foregroundReferenceAt(
         cvRound(point.z),
         cvRound(point.y),
         cvRound(point.x));
@@ -1252,7 +1634,9 @@ double Frame::calculateBboxCost(
     const BoundingBox3D &bbox,
     const std::vector<cv::Mat> &synthFrame,
     const std::vector<uint8_t> &mask,
-    int voronoiCellIdx) const
+    int voronoiCellIdx,
+    const PsfBrightnessCostContext *brightnessContext,
+    BboxCostBreakdown *breakdown) const
 {
     if (!bbox.isValid()) return 0.0;
     if (synthFrame.size() != _realFrame.size()) {
@@ -1268,6 +1652,158 @@ double Frame::calculateBboxCost(
                              && !_voronoiMap.empty()
                              && static_cast<int>(_voronoiMap.size()) == static_cast<int>(_realFrame.size())
                              && voronoiCellIdx < static_cast<int>(_voronoiAnchors.size()));
+
+    if (simulationConfig.psf_brightness_cost_enabled) {
+        if (brightnessContext == nullptr || !brightnessContext->valid) {
+            throw std::runtime_error(
+                "PSF brightness bbox cost requires a frozen valid brightness context");
+        }
+
+        const float sigma = simulationConfig.psf_brightness_cost_sigma;
+        // scipy.ndimage.gaussian_filter's default truncate is 4 sigma and its
+        // discrete radius is int(truncate*sigma + 0.5). Use that same support
+        // and nearest-edge behavior so the C++ path mirrors the benchmark.
+        const int radius = sigma > 1e-6f
+            ? std::max(0, static_cast<int>(std::floor(4.0f * sigma + 0.5f)))
+            : 0;
+        const int xStart = std::max(0, bbox.xMin - radius);
+        const int xEnd = std::min(_realFrame[0].cols - 1, bbox.xMax + radius);
+        const int yStart = std::max(0, bbox.yMin - radius);
+        const int yEnd = std::min(_realFrame[0].rows - 1, bbox.yMax + radius);
+        const int zStart = std::max(0, bbox.zMin - radius);
+        const int zEnd = std::min(static_cast<int>(_realFrame.size()) - 1,
+                                  bbox.zMax + radius);
+        const cv::Rect expandedRoi(xStart, yStart,
+                                   xEnd - xStart + 1,
+                                   yEnd - yStart + 1);
+        if (!mask.empty() && mask.size() != bbox.volume()) {
+            throw std::runtime_error(
+                "PSF brightness bbox cost mask size does not match bbox volume");
+        }
+        for (int z = zStart; z <= zEnd; ++z) {
+            if (synthFrame[static_cast<size_t>(z)].type() != CV_32F) {
+                throw std::runtime_error(
+                    "PSF brightness bbox cost requires CV_32F synth slices");
+            }
+        }
+        for (int z = bbox.zMin; z <= bbox.zMax; ++z) {
+            if (_realFrame[static_cast<size_t>(z)].type() != CV_32F) {
+                throw std::runtime_error(
+                    "PSF brightness bbox cost requires CV_32F real slices");
+            }
+        }
+
+        std::vector<cv::Mat> xyBlurred(
+            static_cast<size_t>(zEnd - zStart + 1));
+        forEachSliceIndex(
+            simulationConfig,
+            static_cast<int>(xyBlurred.size()),
+            [&](int localZ) {
+                const cv::Mat &source =
+                    synthFrame[static_cast<size_t>(zStart + localZ)];
+                const cv::Mat sourceRoi = source(expandedRoi);
+                if (radius == 0) {
+                    xyBlurred[static_cast<size_t>(localZ)] = sourceRoi;
+                } else {
+                    const int kernelSize = 2 * radius + 1;
+                    cv::GaussianBlur(
+                        sourceRoi,
+                        xyBlurred[static_cast<size_t>(localZ)],
+                        cv::Size(kernelSize, kernelSize),
+                        sigma,
+                        sigma,
+                        cv::BORDER_REPLICATE);
+                }
+            });
+
+        std::vector<double> zKernel(static_cast<size_t>(2 * radius + 1), 1.0);
+        if (radius > 0) {
+            double kernelSum = 0.0;
+            const double invTwoSigmaSq =
+                1.0 / (2.0 * static_cast<double>(sigma) * sigma);
+            for (int dz = -radius; dz <= radius; ++dz) {
+                const double weight = std::exp(-static_cast<double>(dz * dz) *
+                                               invTwoSigmaSq);
+                zKernel[static_cast<size_t>(dz + radius)] = weight;
+                kernelSum += weight;
+            }
+            for (double &weight : zKernel) weight /= kernelSum;
+        }
+
+        const int nx = bbox.nx();
+        const int ny = bbox.ny();
+        const bool useMask = !mask.empty();
+        double imageCost = 0.0;
+        long long evaluatedVoxels = 0;
+        #pragma omp parallel for reduction(+:imageCost,evaluatedVoxels) schedule(static)
+        for (int z = bbox.zMin; z <= bbox.zMax; ++z) {
+            const cv::Mat &realSlice = _realFrame[static_cast<size_t>(z)];
+            const cv::Mat *vorSlice = useVoronoi ? &_voronoiMap[z] : nullptr;
+            double sliceCost = 0.0;
+            long long sliceVoxels = 0;
+            for (int y = bbox.yMin; y <= bbox.yMax; ++y) {
+                const float *realRow = realSlice.ptr<float>(y);
+                const int *vorRow = useVoronoi ? vorSlice->ptr<int>(y) : nullptr;
+                const int zOff = (z - bbox.zMin) * nx * ny;
+                const int yOff = zOff + (y - bbox.yMin) * nx;
+                for (int x = bbox.xMin; x <= bbox.xMax; ++x) {
+                    if (useMask && !mask[static_cast<size_t>(
+                            yOff + (x - bbox.xMin))]) {
+                        continue;
+                    }
+                    if (useVoronoi && vorRow[x] != voronoiCellIdx) continue;
+
+                    double matched = 0.0;
+                    for (int dz = -radius; dz <= radius; ++dz) {
+                        const int sourceZ = std::clamp(
+                            z + dz, 0, static_cast<int>(_realFrame.size()) - 1);
+                        const cv::Mat &blurred = xyBlurred[
+                            static_cast<size_t>(sourceZ - zStart)];
+                        matched += zKernel[static_cast<size_t>(dz + radius)] *
+                                   static_cast<double>(blurred.ptr<float>(
+                                       y - yStart)[x - xStart]);
+                    }
+                    const double residual = matched -
+                        static_cast<double>(realRow[x]);
+                    sliceCost += residual * residual;
+                    ++sliceVoxels;
+                }
+            }
+            imageCost += sliceCost;
+            evaluatedVoxels += sliceVoxels;
+        }
+
+        const double tolerance = static_cast<double>(
+            simulationConfig.psf_brightness_prior_tolerance);
+        const double contrast = std::max(
+            static_cast<double>(simulationConfig.psf_brightness_contrast_floor),
+            brightnessContext->prior.mean - brightnessContext->background);
+        const auto normalizedDeadbandError = [&](double candidate,
+                                                  double prior) {
+            return std::max(std::abs(candidate - prior) - tolerance, 0.0) /
+                   contrast;
+        };
+        const double meanError = normalizedDeadbandError(
+            brightnessContext->candidate.mean,
+            brightnessContext->prior.mean);
+        const double spreadError = normalizedDeadbandError(
+            brightnessContext->candidate.spread,
+            brightnessContext->prior.spread);
+        const double brightnessCost =
+            static_cast<double>(evaluatedVoxels) *
+            static_cast<double>(simulationConfig.psf_brightness_prior_weight) *
+            (meanError * meanError + spreadError * spreadError);
+        const double total = imageCost + brightnessCost;
+        if (breakdown != nullptr) {
+            breakdown->totalCost = total;
+            breakdown->imageCost = imageCost;
+            breakdown->brightnessPriorCost = brightnessCost;
+            breakdown->evaluatedVoxelCount =
+                static_cast<size_t>(std::max<long long>(0, evaluatedVoxels));
+        }
+        return total;
+    }
+
     const float asymK = simulationConfig.asymmetric_cost_weight;
     // Threshold: only apply asymK when overshoot exceeds this value.
     // Below threshold, boundary rendering artifacts (d ≈ 0.01-0.05) are
@@ -1351,6 +1887,12 @@ double Frame::calculateBboxCost(
             }
             totalCost += sliceCost;
         }
+    }
+    if (breakdown != nullptr) {
+        breakdown->totalCost = totalCost;
+        breakdown->imageCost = totalCost;
+        breakdown->brightnessPriorCost = 0.0;
+        breakdown->evaluatedVoxelCount = 0;
     }
     return totalCost;
 }
@@ -1504,7 +2046,9 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight,
                                     float randomPerturbRadiusRatio,
                                     bool pcaRefitWellFilledMove,
                                     bool useSignalMapGuidance,
-                                    const cv::Point3f *forcedPosition)
+                                    const cv::Point3f *forcedPosition,
+                                    const std::vector<size_t> *
+                                        psfBrightnessGroupIndices)
 {
     if (index >= cells.size()) {
         return {0.0, [](bool) {}};
@@ -1844,9 +2388,10 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight,
     double oldImageCost = 0.0;
     std::vector<double> newCostPerSlice;
 
-    if (_useBboxCost) {
-        // Bbox cost path: measure asymmetric L2 over a fixed 3D bbox, with
-        // Voronoi exclusion of voxels claimed by any other cell.
+    if (_useBboxCost || simulationConfig.psf_brightness_cost_enabled) {
+        // Fixed-region path: legacy mode measures asymmetric L2; the opt-in
+        // mode measures PSF-matched symmetric L2 plus its frozen brightness
+        // prior over the same candidate-independent region.
         //
         // Option A — snap-anchored bbox: if this cell has a snap bbox
         // installed (CellUniverse::optimize populates once per frame from
@@ -1858,14 +2403,25 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight,
         // its real-cell location. Without the anchor, the bbox follows the
         // cell and the abandoned snap voxels drop out of scope entirely.
         //
-        // Cells without a snap (frame 1, daughters just created by a split
-        // this frame) fall back to the legacy live pre/post-union bbox.
+        // Under the PSF objective, a cell without a fixed snap bbox uses the
+        // full volume so the region cannot follow the candidate. Legacy bbox
+        // mode retains its live pre/post-union fallback.
         BoundingBox3D bboxUnion;
         const std::string &cellName = cells[index].getName();
         auto snapIt = _snapBboxes.find(cellName);
         const bool haveSnapBbox = (snapIt != _snapBboxes.end()
                                    && snapIt->second.isValid());
-        if (haveSnapBbox) {
+        const bool useFullFramePsfFallback =
+            simulationConfig.psf_brightness_cost_enabled &&
+            (!_useBboxCost || !haveSnapBbox);
+        if (useFullFramePsfFallback) {
+            bboxUnion.xMin = 0;
+            bboxUnion.xMax = _realFrame[0].cols - 1;
+            bboxUnion.yMin = 0;
+            bboxUnion.yMax = _realFrame[0].rows - 1;
+            bboxUnion.zMin = 0;
+            bboxUnion.zMax = static_cast<int>(_realFrame.size()) - 1;
+        } else if (haveSnapBbox) {
             bboxUnion = snapIt->second;
         } else {
             BoundingBox3D bboxPre = computeCellBbox(index, _bboxMarginScale);
@@ -1909,9 +2465,49 @@ CostCallbackPair Frame::perturbCell(size_t index, float overlapWeight,
         // Voronoi cell index = this cell's position in cells[]. When the
         // Voronoi cost is disabled (empty _voronoiMap) calculateBboxCost
         // ignores voronoiCellIdx and behaves identically to the legacy path.
-        const int vorIdx = static_cast<int>(index);
-        oldImageCost = calculateBboxCost(bboxUnion, _synthFrame, noMask, vorIdx);
-        newImageCost = calculateBboxCost(bboxUnion, newSynthFrame, noMask, vorIdx);
+        const int vorIdx = useFullFramePsfFallback
+            ? -1 : static_cast<int>(index);
+        PsfBrightnessCostContext oldBrightnessContext;
+        PsfBrightnessCostContext newBrightnessContext;
+        if (simulationConfig.psf_brightness_cost_enabled) {
+            std::vector<const Ellipsoid *> oldCandidateCells;
+            std::vector<const Ellipsoid *> newCandidateCells;
+            if (psfBrightnessGroupIndices != nullptr &&
+                !psfBrightnessGroupIndices->empty()) {
+                oldCandidateCells.reserve(psfBrightnessGroupIndices->size());
+                newCandidateCells.reserve(psfBrightnessGroupIndices->size());
+                bool includesTarget = false;
+                for (const size_t groupIndex : *psfBrightnessGroupIndices) {
+                    if (groupIndex >= cells.size()) {
+                        throw std::runtime_error(
+                            "PSF brightness perturb group index is out of range");
+                    }
+                    includesTarget = includesTarget || groupIndex == index;
+                    oldCandidateCells.push_back(
+                        groupIndex == index ? &oldCell : &cells[groupIndex]);
+                    newCandidateCells.push_back(&cells[groupIndex]);
+                }
+                if (!includesTarget) {
+                    throw std::runtime_error(
+                        "PSF brightness perturb group must include the target cell");
+                }
+            } else {
+                oldCandidateCells.push_back(&oldCell);
+                newCandidateCells.push_back(&cells[index]);
+            }
+            oldBrightnessContext = makePsfBrightnessCostContext(
+                oldCandidateCells, cellName);
+            newBrightnessContext = makePsfBrightnessCostContext(
+                newCandidateCells, cellName);
+        }
+        oldImageCost = calculateBboxCost(
+            bboxUnion, _synthFrame, noMask, vorIdx,
+            simulationConfig.psf_brightness_cost_enabled
+                ? &oldBrightnessContext : nullptr);
+        newImageCost = calculateBboxCost(
+            bboxUnion, newSynthFrame, noMask, vorIdx,
+            simulationConfig.psf_brightness_cost_enabled
+                ? &newBrightnessContext : nullptr);
     } else {
         // Legacy full-image path.
         newImageCost = calculateIncrementalCost(newSynthFrame,
@@ -2044,6 +2640,25 @@ static inline double nonSaturatingOverlap(float overlapRatio, float weight)
            static_cast<double>(overlapRatio) *
            static_cast<double>(overlapRatio) /
            static_cast<double>(denom);
+}
+
+static inline double pairOverlapPenalty(const Ellipsoid &first,
+                                        const Ellipsoid &second,
+                                        float weight)
+{
+    const float firstRadius = boundingSphereRadius(first);
+    const float secondRadius = boundingSphereRadius(second);
+    const float dx = first.getX() - second.getX();
+    const float dy = first.getY() - second.getY();
+    const float dz = first.getZ() - second.getZ();
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const float combinedRadius = firstRadius + secondRadius;
+    if (!(combinedRadius > 0.0f) || distance >= combinedRadius) {
+        return 0.0;
+    }
+    const float overlapRatio =
+        (combinedRadius - distance) / combinedRadius;
+    return nonSaturatingOverlap(overlapRatio, weight);
 }
 
 double Frame::computeOverlapPenalty(float weight) const
@@ -2185,10 +2800,11 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
 
                 const float v = row[x];
                 const float backgroundValue =
-                    backgroundProvider.backgroundAt(z, y, x);
+                    backgroundProvider.foregroundReferenceAt(z, y, x);
                 // Brightness cutoff: pixels above their local background plus
-                // a small sensor-noise margin. With no spatial background
-                // installed, backgroundAt() returns the legacy scalar value.
+                // a small sensor-noise margin. Schema-v2 inputs use the
+                // initializer-confirmed foreground reference; legacy inputs
+                // fall back to the physical/scalar background.
                 const float brightnessCutoff =
                     std::max(0.05f, backgroundValue + 0.02f);
                 if (v <= brightnessCutoff) continue;
@@ -2229,6 +2845,181 @@ std::vector<BrightPixel> gatherBrightPixelsVoronoi(
 
     if (stats) stats->voronoiKept = static_cast<int>(kept.size());
     return kept;
+}
+
+struct PcaLocalSupportStats
+{
+    size_t innerOwned = 0;
+    size_t shellOwned = 0;
+    size_t candidateOwned = 0;
+    float signalQuantile = 0.0f;
+    float shellMedian = 0.0f;
+    float shellMad = 0.0f;
+    float noiseLevel = 0.0f;
+    float baseCutoff = 0.0f;
+    bool shellFallback = false;
+};
+
+float sampleQuantile(std::vector<float> &values, float q)
+{
+    if (values.empty()) return 0.0f;
+    const float clampedQ = std::clamp(q, 0.0f, 1.0f);
+    const size_t index = static_cast<size_t>(std::floor(
+        clampedQ * static_cast<float>(values.size() - 1)));
+    std::nth_element(
+        values.begin(),
+        values.begin() + static_cast<std::ptrdiff_t>(index),
+        values.end());
+    return values[index];
+}
+
+// PCA-only support gather for preprocessing pipelines whose prepared image is
+// no longer in the initializer's raw intensity domain. Ownership and geometry
+// stay fixed to the pre-fit ellipsoid. Signal weights are residuals above the
+// current physical two-region background; split/bridge callers continue to use
+// gatherBrightPixelsVoronoi and the stable initializer foreground reference.
+std::vector<BrightPixel> gatherPcaLocalSupport(
+    const std::vector<cv::Mat> &realFrame,
+    const Frame &backgroundProvider,
+    const cv::Point3f &center,
+    float supportRadiusA,
+    float supportRadiusB,
+    float supportRadiusC,
+    float outerRadiusA,
+    float outerRadiusB,
+    float outerRadiusC,
+    const std::array<double, 9> &inverseRotation,
+    float maskScale,
+    const Frame::ClaimSet &otherClaimSets,
+    float signalPercentile,
+    float signalFraction,
+    float minimumMargin,
+    PcaLocalSupportStats &stats)
+{
+    std::vector<BrightPixel> candidates;
+    if (realFrame.empty() || supportRadiusA <= 0.0f ||
+        supportRadiusB <= 0.0f || supportRadiusC <= 0.0f ||
+        outerRadiusA <= 0.0f || outerRadiusB <= 0.0f ||
+        outerRadiusC <= 0.0f || maskScale <= 0.0f) {
+        return candidates;
+    }
+
+    const int rows = realFrame.front().rows;
+    const int cols = realFrame.front().cols;
+    const int slices = static_cast<int>(realFrame.size());
+    const float maxR =
+        maskScale * std::max({outerRadiusA, outerRadiusB, outerRadiusC});
+    const int minX = std::max(0, static_cast<int>(std::floor(center.x - maxR)));
+    const int maxX = std::min(cols - 1, static_cast<int>(std::ceil(center.x + maxR)));
+    const int minY = std::max(0, static_cast<int>(std::floor(center.y - maxR)));
+    const int maxY = std::min(rows - 1, static_cast<int>(std::ceil(center.y + maxR)));
+    const int minZ = std::max(0, static_cast<int>(std::floor(center.z - maxR)));
+    const int maxZ = std::min(slices - 1, static_cast<int>(std::ceil(center.z + maxR)));
+
+    const double invSupportA2 =
+        1.0 / (supportRadiusA * supportRadiusA);
+    const double invSupportB2 =
+        1.0 / (supportRadiusB * supportRadiusB);
+    const double invSupportC2 =
+        1.0 / (supportRadiusC * supportRadiusC);
+    const double invOuterA2 = 1.0 / (outerRadiusA * outerRadiusA);
+    const double invOuterB2 = 1.0 / (outerRadiusB * outerRadiusB);
+    const double invOuterC2 = 1.0 / (outerRadiusC * outerRadiusC);
+    const double maskScaleSq = static_cast<double>(maskScale) * maskScale;
+    const float shellMaxScale = std::min(2.0f, maskScale);
+    const double shellMinSq = 1.5 * 1.5;
+    const double shellMaxSq =
+        static_cast<double>(shellMaxScale) * shellMaxScale;
+
+    std::vector<float> innerResiduals;
+    std::vector<float> shellResiduals;
+
+    const auto distSq = [](const cv::Point3f &a, const cv::Point3f &b) {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    for (int z = minZ; z <= maxZ; ++z) {
+        const cv::Mat &slice = realFrame[static_cast<size_t>(z)];
+        if (slice.empty() || slice.type() != CV_32F) continue;
+        for (int y = minY; y <= maxY; ++y) {
+            const float *row = slice.ptr<float>(y);
+            for (int x = minX; x <= maxX; ++x) {
+                const double dx = static_cast<double>(x) - center.x;
+                const double dy = static_cast<double>(y) - center.y;
+                const double dz = static_cast<double>(z) - center.z;
+                const double lx = inverseRotation[0] * dx +
+                                  inverseRotation[1] * dy +
+                                  inverseRotation[2] * dz;
+                const double ly = inverseRotation[3] * dx +
+                                  inverseRotation[4] * dy +
+                                  inverseRotation[5] * dz;
+                const double lz = inverseRotation[6] * dx +
+                                  inverseRotation[7] * dy +
+                                  inverseRotation[8] * dz;
+                const double outerRhoSq =
+                    lx * lx * invOuterA2 + ly * ly * invOuterB2 +
+                    lz * lz * invOuterC2;
+                if (outerRhoSq > maskScaleSq) continue;
+                const double supportRhoSq =
+                    lx * lx * invSupportA2 + ly * ly * invSupportB2 +
+                    lz * lz * invSupportC2;
+
+                const cv::Point3f point{
+                    static_cast<float>(x),
+                    static_cast<float>(y),
+                    static_cast<float>(z)};
+                const float selfBest = distSq(point, center);
+                float otherBest = std::numeric_limits<float>::infinity();
+                for (const auto &claimSet : otherClaimSets) {
+                    for (const auto &claim : claimSet.second) {
+                        otherBest = std::min(otherBest, distSq(point, claim));
+                    }
+                }
+                if (otherBest < selfBest) continue;
+
+                const float residual = std::max(
+                    0.0f,
+                    row[x] - backgroundProvider.backgroundAt(z, y, x));
+                if (supportRhoSq <= 1.0) {
+                    ++stats.innerOwned;
+                    innerResiduals.push_back(residual);
+                } else if (supportRhoSq > shellMinSq &&
+                           supportRhoSq <= shellMaxSq) {
+                    ++stats.shellOwned;
+                    shellResiduals.push_back(residual);
+                }
+                if (residual > 0.0f) {
+                    candidates.push_back({point, residual});
+                }
+            }
+        }
+    }
+
+    stats.candidateOwned = candidates.size();
+    stats.signalQuantile = sampleQuantile(innerResiduals, signalPercentile);
+    const float minMargin = std::max(0.0f, minimumMargin);
+    if (shellResiduals.size() >= 64) {
+        stats.shellMedian = sampleQuantile(shellResiduals, 0.50f);
+        std::vector<float> deviations;
+        deviations.reserve(shellResiduals.size());
+        for (const float value : shellResiduals) {
+            deviations.push_back(std::abs(value - stats.shellMedian));
+        }
+        stats.shellMad = sampleQuantile(deviations, 0.50f);
+        stats.noiseLevel = std::max(0.0f, stats.shellMedian) +
+                           3.0f * 1.4826f * stats.shellMad;
+    } else {
+        stats.shellFallback = true;
+        stats.noiseLevel = minMargin;
+    }
+    stats.baseCutoff = std::max({
+        minMargin,
+        stats.noiseLevel,
+        std::clamp(signalFraction, 0.0f, 1.0f) * stats.signalQuantile});
+    return candidates;
 }
 
 // PCA on weighted 3D points in the CELL'S LOCAL FRAME. Transforms world-
@@ -2753,7 +3544,9 @@ bool Frame::imageGroundExpectedDaughters(
         otherCellsClaimSets,
         &gstats);
 
-    if (outKeptPixels) *outKeptPixels = gstats.voronoiKept;
+    if (outKeptPixels) {
+        *outKeptPixels = static_cast<int>(pixels.size());
+    }
     if (pixels.size() < 20) return false;
 
     // PCA in cell's local frame using snapshot rotation + radii.
@@ -2767,6 +3560,149 @@ bool Frame::imageGroundExpectedDaughters(
                             &center, &R_T,
                             cell.getARadius(), cell.getBRadius(), cell.getCRadius()))
         return false;
+    return true;
+}
+
+bool Frame::clusterCurrentFrameSplitCenters(
+    size_t cellIndex,
+    const PreviousFrameSnapshot &snapshot,
+    const ClaimSet &otherCellsClaimSets,
+    const cv::Point3f &seedD1,
+    const cv::Point3f &seedD2,
+    float gatherRadiusScale,
+    int iterations,
+    cv::Point3f &outD1,
+    cv::Point3f &outD2,
+    int *outKeptPixels,
+    float *outMinClusterWeightFraction,
+    float *outVarianceReduction) const
+{
+    if (outKeptPixels) *outKeptPixels = 0;
+    if (outMinClusterWeightFraction) *outMinClusterWeightFraction = 0.0f;
+    if (outVarianceReduction) *outVarianceReduction = 0.0f;
+    if (cellIndex >= cells.size() || !snapshot.valid || _realFrame.empty()) {
+        return false;
+    }
+
+    const cv::Point3f seedDelta = seedD2 - seedD1;
+    const float seedSeparation = static_cast<float>(cv::norm(seedDelta));
+    if (!std::isfinite(seedSeparation) || seedSeparation <= 1.0e-3f) {
+        return false;
+    }
+
+    const Ellipsoid &cell = cells[cellIndex];
+    const float parentMaxR = std::max({
+        snapshot.aRadius, snapshot.bRadius, snapshot.cRadius,
+        cell.getARadius(), cell.getBRadius(), cell.getCRadius(), 1.0f});
+    const cv::Point3f gatherCenter = 0.5f * (seedD1 + seedD2);
+    const float gatherRadius = std::max(
+        0.5f * seedSeparation + parentMaxR,
+        std::max(1.0f, gatherRadiusScale) * parentMaxR);
+    const std::vector<cv::Point3f> selfClaims{seedD1, seedD2};
+    GatherStats gatherStats;
+    const auto pixels = gatherBrightPixelsVoronoi(
+        _realFrame, *this, gatherCenter, gatherRadius, selfClaims,
+        otherCellsClaimSets, &gatherStats);
+    if (outKeptPixels) {
+        *outKeptPixels = static_cast<int>(pixels.size());
+    }
+    if (pixels.size() < 20) {
+        return false;
+    }
+
+    cv::Point3f center1 = seedD1;
+    cv::Point3f center2 = seedD2;
+    double clusterWeight1 = 0.0;
+    double clusterWeight2 = 0.0;
+    const int activeIterations = std::max(1, iterations);
+    for (int iter = 0; iter < activeIterations; ++iter) {
+        cv::Point3d sum1(0.0, 0.0, 0.0);
+        cv::Point3d sum2(0.0, 0.0, 0.0);
+        clusterWeight1 = 0.0;
+        clusterWeight2 = 0.0;
+        for (const auto &pixel : pixels) {
+            const cv::Point3f delta1 = pixel.pos - center1;
+            const cv::Point3f delta2 = pixel.pos - center2;
+            const float distance1 = delta1.dot(delta1);
+            const float distance2 = delta2.dot(delta2);
+            const double weight = std::max(1.0e-6f, pixel.weight);
+            if (distance1 <= distance2) {
+                sum1.x += pixel.pos.x * weight;
+                sum1.y += pixel.pos.y * weight;
+                sum1.z += pixel.pos.z * weight;
+                clusterWeight1 += weight;
+            } else {
+                sum2.x += pixel.pos.x * weight;
+                sum2.y += pixel.pos.y * weight;
+                sum2.z += pixel.pos.z * weight;
+                clusterWeight2 += weight;
+            }
+        }
+        if (clusterWeight1 <= 1.0e-6 || clusterWeight2 <= 1.0e-6) {
+            return false;
+        }
+        const cv::Point3f next1(
+            static_cast<float>(sum1.x / clusterWeight1),
+            static_cast<float>(sum1.y / clusterWeight1),
+            static_cast<float>(sum1.z / clusterWeight1));
+        const cv::Point3f next2(
+            static_cast<float>(sum2.x / clusterWeight2),
+            static_cast<float>(sum2.y / clusterWeight2),
+            static_cast<float>(sum2.z / clusterWeight2));
+        const float motion = static_cast<float>(
+            cv::norm(next1 - center1) + cv::norm(next2 - center2));
+        center1 = next1;
+        center2 = next2;
+        if (motion < 0.05f) {
+            break;
+        }
+    }
+
+    const double totalWeight = clusterWeight1 + clusterWeight2;
+    if (totalWeight <= 1.0e-6) {
+        return false;
+    }
+    const float minClusterWeightFraction = static_cast<float>(
+        std::min(clusterWeight1, clusterWeight2) / totalWeight);
+
+    cv::Point3f overallMean(0.0f, 0.0f, 0.0f);
+    for (const auto &pixel : pixels) {
+        const float weight = std::max(1.0e-6f, pixel.weight);
+        overallMean += pixel.pos * weight;
+    }
+    overallMean *= static_cast<float>(1.0 / totalWeight);
+    double oneClusterSse = 0.0;
+    double twoClusterSse = 0.0;
+    for (const auto &pixel : pixels) {
+        const double weight = std::max(1.0e-6f, pixel.weight);
+        const cv::Point3f overallDelta = pixel.pos - overallMean;
+        oneClusterSse += weight * overallDelta.dot(overallDelta);
+        const cv::Point3f delta1 = pixel.pos - center1;
+        const cv::Point3f delta2 = pixel.pos - center2;
+        twoClusterSse += weight *
+            std::min(delta1.dot(delta1), delta2.dot(delta2));
+    }
+    const float varianceReduction = oneClusterSse > 1.0e-6
+        ? static_cast<float>(std::clamp(
+              1.0 - twoClusterSse / oneClusterSse, 0.0, 1.0))
+        : 0.0f;
+
+    const float directSeedDistance = static_cast<float>(
+        cv::norm(center1 - seedD1) + cv::norm(center2 - seedD2));
+    const float swappedSeedDistance = static_cast<float>(
+        cv::norm(center2 - seedD1) + cv::norm(center1 - seedD2));
+    if (swappedSeedDistance < directSeedDistance) {
+        std::swap(center1, center2);
+    }
+
+    outD1 = center1;
+    outD2 = center2;
+    if (outMinClusterWeightFraction) {
+        *outMinClusterWeightFraction = minClusterWeightFraction;
+    }
+    if (outVarianceReduction) {
+        *outVarianceReduction = varianceReduction;
+    }
     return true;
 }
 
@@ -2976,28 +3912,65 @@ bool Frame::calibrateCellPositionViaCentroid(
     cp.z = centroid.z;
     Ellipsoid candidate(cp);
 
-    const double savedCost = _currentCost;
+    const double savedCacheCost = _currentCost;
     const std::vector<cv::Mat> savedSynth = _synthFrame;
     const std::vector<double> savedPerSlice = _currentCostPerSlice;
 
-    // Install candidate and compute incremental cost
+    // Install candidate and compare it with the live cell under the active
+    // objective. The PSF convolution invalidates the incremental slice cache,
+    // so its frame-1 no-snap path evaluates a fixed full-volume region.
     cells[cellIndex] = candidate;
     int affMin = -1, affMax = -1;
     Ellipsoid savedMutable = savedCell;
     Ellipsoid candidateMutable = candidate;
     auto newSynth = generateSynthFrameFast(savedMutable, candidateMutable, &affMin, &affMax);
     std::vector<double> newPerSlice;
-    const double newCost = calculateIncrementalCost(newSynth, affMin, affMax, newPerSlice);
+    double oldCost = savedCacheCost;
+    double newCost = 0.0;
+    if (simulationConfig.psf_brightness_cost_enabled) {
+        BoundingBox3D comparisonBbox;
+        const auto snapIt = _snapBboxes.find(savedCell.getName());
+        const bool haveSnapBbox = snapIt != _snapBboxes.end() &&
+                                  snapIt->second.isValid();
+        if (haveSnapBbox) {
+            comparisonBbox = snapIt->second;
+        } else {
+            comparisonBbox.xMin = 0;
+            comparisonBbox.xMax = _realFrame[0].cols - 1;
+            comparisonBbox.yMin = 0;
+            comparisonBbox.yMax = _realFrame[0].rows - 1;
+            comparisonBbox.zMin = 0;
+            comparisonBbox.zMax = static_cast<int>(_realFrame.size()) - 1;
+        }
+        const std::vector<uint8_t> noMask;
+        const int voronoiCellIdx = haveSnapBbox
+            ? static_cast<int>(cellIndex) : -1;
+        const PsfBrightnessCostContext oldBrightnessContext =
+            makePsfBrightnessCostContext({&savedCell}, savedCell.getName());
+        const PsfBrightnessCostContext newBrightnessContext =
+            makePsfBrightnessCostContext({&candidate}, savedCell.getName());
+        oldCost = calculateBboxCost(
+            comparisonBbox, savedSynth, noMask, voronoiCellIdx,
+            &oldBrightnessContext);
+        newCost = calculateBboxCost(
+            comparisonBbox, newSynth, noMask, voronoiCellIdx,
+            &newBrightnessContext);
+    } else {
+        newCost = calculateIncrementalCost(
+            newSynth, affMin, affMax, newPerSlice);
+    }
 
-    if (newCost < savedCost) {
+    if (newCost < oldCost) {
         _synthFrame = newSynth;
-        _currentCost = newCost;
-        _currentCostPerSlice = newPerSlice;
+        if (!simulationConfig.psf_brightness_cost_enabled) {
+            _currentCost = newCost;
+            _currentCostPerSlice = newPerSlice;
+        }
         std::cout << "  [Centroid Calibration] cell=" << savedCell.getName()
                   << " ACCEPTED centroid=(" << centroid.x << "," << centroid.y << "," << centroid.z << ")"
                   << " currentPos=(" << currentPos.x << "," << currentPos.y << "," << currentPos.z << ")"
                   << " dist=" << moveDist
-                  << " costDelta=" << (newCost - savedCost)
+                  << " costDelta=" << (newCost - oldCost)
                   << " kept=" << gstats.voronoiKept
                   << std::endl;
         return true;
@@ -3007,13 +3980,13 @@ bool Frame::calibrateCellPositionViaCentroid(
     // snapshot; we preserve whatever state was live at entry).
     cells[cellIndex] = savedCell;
     _synthFrame = savedSynth;
-    _currentCost = savedCost;
+    _currentCost = savedCacheCost;
     _currentCostPerSlice = savedPerSlice;
     std::cout << "  [Centroid Calibration] cell=" << savedCell.getName()
               << " REJECTED centroid=(" << centroid.x << "," << centroid.y << "," << centroid.z << ")"
               << " currentPos=(" << currentPos.x << "," << currentPos.y << "," << currentPos.z << ")"
               << " dist=" << moveDist
-              << " costDelta=" << (newCost - savedCost)
+              << " costDelta=" << (newCost - oldCost)
               << " kept=" << gstats.voronoiKept
               << std::endl;
     return false;
@@ -3323,11 +4296,25 @@ bool Frame::calibrateCellShapeViaPca(
     float maskA,
     float maskB,
     float maskC,
-    std::ostream *logSink)
+    std::ostream *logSink,
+    const cv::Point3f *componentAnchor)
 {
     if (cellIndex >= cells.size()) return false;
     if (maxIters <= 0) return false;
     Ellipsoid &cell = cells[cellIndex];
+
+    cv::Point3f fixedComponentAnchor(
+        cell.getX(), cell.getY(), cell.getZ());
+    const auto snapAnchorIt = _snapPositions.find(cell.getName());
+    if (snapAnchorIt != _snapPositions.end()) {
+        fixedComponentAnchor = snapAnchorIt->second;
+    }
+    if (componentAnchor != nullptr &&
+        std::isfinite(componentAnchor->x) &&
+        std::isfinite(componentAnchor->y) &&
+        std::isfinite(componentAnchor->z)) {
+        fixedComponentAnchor = *componentAnchor;
+    }
 
     // Route per-iter logs to the optional sink (per-thread accumulator)
     // when provided, else to std::cout. Lets the parallelized caller emit
@@ -3344,11 +4331,24 @@ bool Frame::calibrateCellShapeViaPca(
     const float effMaskA = (maskA > 0.0f) ? maskA : cell.getARadius();
     const float effMaskB = (maskB > 0.0f) ? maskB : cell.getBRadius();
     const float effMaskC = (maskC > 0.0f) ? maskC : cell.getCRadius();
+    // Local-support ownership and its volume limit must use the same frozen
+    // birth/snapshot geometry as the gather mask. Using the already-expanded
+    // live radii here made each capped fit enlarge the next frame's admissible
+    // support, producing a deterministic radius-ratcheting feedback loop.
+    // When no frozen mask was supplied, effMask* already falls back to live.
+    const float supportRefA = effMaskA;
+    const float supportRefB = effMaskB;
+    const float supportRefC = effMaskC;
+    const float outerSupportA = std::max(effMaskA, supportRefA);
+    const float outerSupportB = std::max(effMaskB, supportRefB);
+    const float outerSupportC = std::max(effMaskC, supportRefC);
     const float maskMaxR = std::max({effMaskA, effMaskB, effMaskC});
     const float sphereR = maskScale * maskMaxR;
     const double invA2Fixed = 1.0 / (maskScale * effMaskA * maskScale * effMaskA);
     const double invB2Fixed = 1.0 / (maskScale * effMaskB * maskScale * effMaskB);
     const double invC2Fixed = 1.0 / (maskScale * effMaskC * maskScale * effMaskC);
+    std::array<double, 9> fixedSupportInverseRotation;
+    cell.generateInverseRotationMatrix(fixedSupportInverseRotation);
 
     bool anyUpdate = false;
 
@@ -3361,11 +4361,14 @@ bool Frame::calibrateCellShapeViaPca(
     // are mostly invariant: `_realFrame`, the installed background,
     // `sphereR`, and `otherCellsClaimSets` never change; only `center`
     // can change, and only when `updatePosition=true`. Cache the raw pixel
-    // set keyed on `center`; re-gather only when the centroid moves.
+    // set keyed on `center`; legacy support re-gathers when the centroid
+    // moves. Prepared-domain support is intentionally frozen after its first
+    // gather so one fit cannot change its own evidence.
     cv::Point3f cachedCenter{std::numeric_limits<float>::quiet_NaN(),
                              std::numeric_limits<float>::quiet_NaN(),
                              std::numeric_limits<float>::quiet_NaN()};
     std::vector<BrightPixel> cachedRaw;
+    bool localSupportGathered = false;
     int cachedHits = 0;
     int cachedMisses = 0;
 
@@ -3381,6 +4384,96 @@ bool Frame::calibrateCellShapeViaPca(
     const float  coreHi      = std::max(coreLo + 1e-6f,
                                         Ellipsoid::cellConfig.pcaShapeCoreFractionHigh);
     const float  radInflBright = std::max(1.0f, Ellipsoid::cellConfig.pcaShapeRadiusInflationBright);
+    const bool   localSupport =
+        Ellipsoid::cellConfig.pcaShapeLocalSupportEnabled;
+    const float  localPeakPercentile = std::clamp(
+        Ellipsoid::cellConfig.pcaShapeLocalSupportPeakPercentile,
+        0.50f, 1.0f);
+    const float  localSupportFraction = std::clamp(
+        Ellipsoid::cellConfig.pcaShapeLocalSupportFraction,
+        0.0f, 1.0f);
+    const float  localSupportMinMargin = std::max(
+        0.0f, Ellipsoid::cellConfig.pcaShapeLocalSupportMinMargin);
+    const float  localSupportMaxVolumeFactor = std::max(
+        0.0f, Ellipsoid::cellConfig.pcaShapeLocalSupportMaxVolumeFactor);
+    const float  localSupportMinVolumeFraction = std::clamp(
+        Ellipsoid::cellConfig.pcaShapeLocalSupportMinVolumeFraction,
+        0.0f, 1.0f);
+    const float  localSupportLowSnrCutoffFraction = std::clamp(
+        Ellipsoid::cellConfig.pcaShapeLocalSupportLowSnrCutoffFraction,
+        0.0f, 1.0f);
+    const bool componentFilterEnabled =
+        simulationConfig.celluniverse4_enabled &&
+        simulationConfig.celluniverse4_component_filter_enabled;
+    const bool volumeCapSnrDecouplingEnabled =
+        simulationConfig.celluniverse4_enabled &&
+        simulationConfig
+            .celluniverse4_pca_volume_cap_snr_decoupling_enabled;
+    const bool componentLowSnrRescueEnabled =
+        simulationConfig.celluniverse4_enabled &&
+        componentFilterEnabled &&
+        simulationConfig
+            .celluniverse4_pca_component_low_snr_rescue_enabled;
+    const float componentLowSnrRescueMinimumSupportFraction =
+        simulationConfig
+            .celluniverse4_pca_component_low_snr_rescue_min_support_fraction;
+    const float componentLowSnrRescueMaximumAnchorDistance =
+        simulationConfig
+            .celluniverse4_pca_component_low_snr_rescue_max_anchor_distance;
+    const int componentConnectivityRadius =
+        simulationConfig.celluniverse4_component_connectivity_radius;
+    const int componentMinimumVoxels =
+        simulationConfig.celluniverse4_component_min_voxels;
+    const float componentCompanionMinimumFraction =
+        simulationConfig.celluniverse4_component_companion_min_fraction;
+    const int componentMaximumComponents =
+        simulationConfig.celluniverse4_component_max_components;
+    const float componentAnchorRadiusScale =
+        simulationConfig.celluniverse4_pca_component_anchor_radius_scale;
+    const auto trimComponentSupportToAnchor =
+        [&](std::vector<BrightPixel> &samples) {
+            const size_t inputSize = samples.size();
+            if (!componentFilterEnabled || componentAnchorRadiusScale <= 0.0f) {
+                return inputSize;
+            }
+            const double scaledA = std::max(
+                1.0e-6,
+                static_cast<double>(componentAnchorRadiusScale * supportRefA));
+            const double scaledB = std::max(
+                1.0e-6,
+                static_cast<double>(componentAnchorRadiusScale * supportRefB));
+            const double scaledC = std::max(
+                1.0e-6,
+                static_cast<double>(componentAnchorRadiusScale * supportRefC));
+            const double invA2 = 1.0 / (scaledA * scaledA);
+            const double invB2 = 1.0 / (scaledB * scaledB);
+            const double invC2 = 1.0 / (scaledC * scaledC);
+            samples.erase(
+                std::remove_if(
+                    samples.begin(), samples.end(),
+                    [&](const BrightPixel &sample) {
+                        const double dx = sample.pos.x - fixedComponentAnchor.x;
+                        const double dy = sample.pos.y - fixedComponentAnchor.y;
+                        const double dz = sample.pos.z - fixedComponentAnchor.z;
+                        const double lx =
+                            fixedSupportInverseRotation[0] * dx +
+                            fixedSupportInverseRotation[1] * dy +
+                            fixedSupportInverseRotation[2] * dz;
+                        const double ly =
+                            fixedSupportInverseRotation[3] * dx +
+                            fixedSupportInverseRotation[4] * dy +
+                            fixedSupportInverseRotation[5] * dz;
+                        const double lz =
+                            fixedSupportInverseRotation[6] * dx +
+                            fixedSupportInverseRotation[7] * dy +
+                            fixedSupportInverseRotation[8] * dz;
+                        return lx * lx * invA2 + ly * ly * invB2 +
+                                   lz * lz * invC2 >
+                               1.0;
+                    }),
+                samples.end());
+            return samples.size();
+        };
     float cellWeightExponent = expDim;
     // Per-cell radius inflation multiplier. 1.0 for uniform/dim cells
     // (PCA variance formula is analytically exact for them); ramps up to
@@ -3388,6 +4481,38 @@ bool Frame::calibrateCellShapeViaPca(
     // extends beyond the 97% containment radius. Driven by the same
     // pCore metric as adaptive exponent.
     float cellRadiusInflation = 1.0f;
+
+    const auto updateAdaptiveShapeWeights =
+        [&](const std::vector<BrightPixel> &samples) {
+            if (!adaptiveExp || samples.empty()) return;
+
+            // Relative pCore: fraction of pixels whose weight exceeds 1.5x
+            // the cell's own mean. When local support is enabled, callers
+            // pass only the retained prepared-domain support so noise does
+            // not distort the exponent or radius inflation.
+            float meanW = 0.0f;
+            for (const auto &bp : samples) meanW += bp.weight;
+            meanW /= static_cast<float>(samples.size());
+
+            int coreCount = 0;
+            const float relativeThreshold = 1.5f * meanW;
+            for (const auto &bp : samples) {
+                if (bp.weight > relativeThreshold) ++coreCount;
+            }
+            const float pCore = static_cast<float>(coreCount) /
+                                static_cast<float>(samples.size());
+            const float t = std::clamp(
+                (pCore - coreLo) / (coreHi - coreLo), 0.0f, 1.0f);
+            cellWeightExponent = expDim + t * (expBright - expDim);
+            cellRadiusInflation = 1.0f + t * (radInflBright - 1.0f);
+            log << "  [PCA Shape Exp] cell=" << cell.getName()
+                << " pCore=" << pCore
+                << " meanW=" << meanW
+                << " relThresh=" << relativeThreshold
+                << " exp=" << cellWeightExponent
+                << " radInfl=" << cellRadiusInflation
+                << std::endl;
+        };
 
     for (int iter = 0; iter < maxIters; ++iter) {
         const cv::Point3f center(cell.getX(), cell.getY(), cell.getZ());
@@ -3397,64 +4522,217 @@ bool Frame::calibrateCellShapeViaPca(
         const float maxR = std::max({curA, curB, curC});
         if (maxR <= 1e-3f) break;
 
-        // Cache hit when center hasn't moved since last gather. With
-        // updatePosition=false (recommended), this hits on every iter
-        // after the first → 14× speedup on the gather phase.
-        const bool cacheHit = (cachedRaw.size() > 0)
-            && (std::abs(center.x - cachedCenter.x) < 1e-4f)
-            && (std::abs(center.y - cachedCenter.y) < 1e-4f)
-            && (std::abs(center.z - cachedCenter.z) < 1e-4f);
+        // Legacy cache hits when the center has not moved since the last
+        // gather. With updatePosition=false, this hits on every iteration
+        // after the first.
+        // Prepared-domain support is a single pre-fit observation.  Reuse it
+        // even when PCA updates the centroid; otherwise the moving center can
+        // rescan a different shell and walk the fit toward neighboring signal.
+        // An empty support is still a completed gather and must not be retried.
+        // Legacy support keeps its historical center-keyed cache behavior.
+        const bool cacheHit = localSupport
+            ? localSupportGathered
+            : ((cachedRaw.size() > 0)
+               && (std::abs(center.x - cachedCenter.x) < 1e-4f)
+               && (std::abs(center.y - cachedCenter.y) < 1e-4f)
+               && (std::abs(center.z - cachedCenter.z) < 1e-4f));
         if (!cacheHit) {
-            std::vector<cv::Point3f> selfClaim{center};
-            GatherStats gstats;
-            cachedRaw = gatherBrightPixelsVoronoi(
-                _realFrame, *this, center, sphereR,
-                selfClaim, otherCellsClaimSets, &gstats);
+            if (localSupport) {
+                PcaLocalSupportStats supportStats;
+                cachedRaw = gatherPcaLocalSupport(
+                    _realFrame,
+                    *this,
+                    center,
+                    supportRefA,
+                    supportRefB,
+                    supportRefC,
+                    outerSupportA,
+                    outerSupportB,
+                    outerSupportC,
+                    fixedSupportInverseRotation,
+                    maskScale,
+                    otherCellsClaimSets,
+                    localPeakPercentile,
+                    localSupportFraction,
+                    localSupportMinMargin,
+                    supportStats);
+
+                const size_t componentInputPixels = cachedRaw.size();
+                size_t anchorTrimKept = componentInputPixels;
+                BrightPixelComponentSelection componentSelection;
+                if (componentFilterEnabled) {
+                    // A thin above-threshold bridge can make a distant trash
+                    // lobe part of the same connected component.  First trim
+                    // to a generous frozen ellipsoid around the selected CU4
+                    // center, then label components.  Split evidence does not
+                    // use this trim and therefore retains the complete parent.
+                    anchorTrimKept =
+                        trimComponentSupportToAnchor(cachedRaw);
+                    // Select components on the lower physical/noise cutoff
+                    // before computing the high-support volume cutoff. This
+                    // prevents detached debris from consuming the parent's
+                    // admissible support budget.
+                    componentSelection = selectAnchoredBrightPixelComponents(
+                        cachedRaw,
+                        supportStats.baseCutoff,
+                        fixedComponentAnchor,
+                        _realFrame.front().rows,
+                        _realFrame.front().cols,
+                        static_cast<int>(_realFrame.size()),
+                        componentConnectivityRadius,
+                        componentMinimumVoxels,
+                        componentCompanionMinimumFraction,
+                        componentMaximumComponents);
+                    cachedRaw = retainSelectedBrightPixelComponents(
+                        cachedRaw,
+                        componentSelection,
+                        supportStats.baseCutoff);
+                }
+
+                const size_t volumeLimit = static_cast<size_t>(std::ceil(
+                    localSupportMaxVolumeFactor *
+                    static_cast<float>(supportStats.innerOwned)));
+                float volumeCutoff = 0.0f;
+                if (volumeLimit > 0 && cachedRaw.size() > volumeLimit) {
+                    std::vector<float> residuals;
+                    residuals.reserve(cachedRaw.size());
+                    for (const auto &bp : cachedRaw) {
+                        residuals.push_back(bp.weight);
+                    }
+                    const size_t cutoffIndex = volumeLimit - 1;
+                    std::nth_element(
+                        residuals.begin(),
+                        residuals.begin() +
+                            static_cast<std::ptrdiff_t>(cutoffIndex),
+                        residuals.end(),
+                        std::greater<float>());
+                    volumeCutoff = residuals[cutoffIndex];
+                }
+                const float supportCutoff = std::max(
+                    supportStats.baseCutoff, volumeCutoff);
+                const float snrCutoff = cell_refit_guards::pcaLowSnrCutoff(
+                    componentFilterEnabled,
+                    volumeCapSnrDecouplingEnabled,
+                    supportStats.baseCutoff,
+                    supportCutoff);
+                cachedRaw.erase(
+                    std::remove_if(
+                        cachedRaw.begin(), cachedRaw.end(),
+                        [supportCutoff](const BrightPixel &bp) {
+                            return bp.weight <= supportCutoff;
+                        }),
+                    cachedRaw.end());
+
+                const size_t minimumSupport = std::max(
+                    static_cast<size_t>(std::max(0, minPixels)),
+                    static_cast<size_t>(std::ceil(
+                        localSupportMinVolumeFraction *
+                        static_cast<float>(supportStats.innerOwned))));
+                const bool insufficientSnrBasis =
+                    supportStats.innerOwned < 64 ||
+                    supportStats.signalQuantile <= 0.0f;
+                const bool lowSnr =
+                    insufficientSnrBasis ||
+                    snrCutoff >=
+                        localSupportLowSnrCutoffFraction *
+                            supportStats.signalQuantile;
+                const bool tooFew = cachedRaw.size() < minimumSupport;
+                const bool componentLowSnrRescue =
+                    cell_refit_guards::rescueLowSnrWithAnchoredComponent(
+                        componentLowSnrRescueEnabled,
+                        lowSnr && !insufficientSnrBasis,
+                        cachedRaw.size(),
+                        minimumSupport,
+                        supportStats.innerOwned,
+                        componentSelection.selectedLabels.size(),
+                        componentSelection.anchorDistance,
+                        componentLowSnrRescueMinimumSupportFraction,
+                        componentLowSnrRescueMaximumAnchorDistance);
+                const bool effectiveLowSnr = lowSnr && !componentLowSnrRescue;
+                const char *action = componentLowSnrRescue
+                    ? "fit_component_low_snr_rescue"
+                    : (effectiveLowSnr
+                    ? "skip_low_snr"
+                    : (tooFew ? "skip_too_few" : "fit"));
+
+                log << "  [PCA Shape Support] cell=" << cell.getName()
+                    << " B=" << backgroundAt(center)
+                    << " F=" << foregroundReferenceAt(center)
+                    << " S=" << supportStats.signalQuantile
+                    << " shellMedian=" << supportStats.shellMedian
+                    << " shellMad=" << supportStats.shellMad
+                    << " noise=" << supportStats.noiseLevel
+                    << " d0=" << supportStats.baseCutoff
+                    << " dVol=" << volumeCutoff
+                    << " cutoff=" << supportCutoff
+                    << " snrCutoff=" << snrCutoff
+                    << " volumeCapSnrDecoupled="
+                    << (volumeCapSnrDecouplingEnabled ? 1 : 0)
+                    << " innerOwned=" << supportStats.innerOwned
+                    << " shellOwned=" << supportStats.shellOwned
+                    << " candidateOwned=" << supportStats.candidateOwned
+                    << " componentInput=" << componentInputPixels
+                    << " anchorRadiusScale="
+                    << componentAnchorRadiusScale
+                    << " anchorTrimKept=" << anchorTrimKept
+                    << " componentEligible="
+                    << (componentFilterEnabled
+                            ? componentSelection.eligiblePixels
+                            : componentInputPixels)
+                    << " components="
+                    << (componentFilterEnabled
+                            ? componentSelection.componentSizes.size()
+                            : 0)
+                    << " anchorComponent="
+                    << (componentFilterEnabled
+                            ? componentSelection.anchorLabel
+                            : -1)
+                    << " selectedComponents="
+                    << (componentFilterEnabled
+                            ? componentSelection.selectedLabels.size()
+                            : 0)
+                    << " anchorDistance="
+                    << (componentFilterEnabled
+                            ? componentSelection.anchorDistance
+                            : 0.0f)
+                    << " anchorSize="
+                    << (componentFilterEnabled &&
+                                componentSelection.anchorLabel >= 0
+                            ? componentSelection.componentSizes[
+                                  static_cast<size_t>(
+                                      componentSelection.anchorLabel)]
+                            : 0)
+                    << " kept=" << cachedRaw.size()
+                    << " minSupport=" << minimumSupport
+                    << " supportFrac="
+                    << (supportStats.innerOwned > 0
+                            ? static_cast<float>(cachedRaw.size()) /
+                                  static_cast<float>(supportStats.innerOwned)
+                            : 0.0f)
+                    << " componentLowSnrRescue="
+                    << (componentLowSnrRescue ? 1 : 0)
+                    << " shellFallback=" << supportStats.shellFallback
+                    << " action=" << action
+                    << std::endl;
+
+                if (effectiveLowSnr || tooFew) {
+                    cachedRaw.clear();
+                } else {
+                    updateAdaptiveShapeWeights(cachedRaw);
+                }
+                localSupportGathered = true;
+            } else {
+                std::vector<cv::Point3f> selfClaim{center};
+                GatherStats gstats;
+                cachedRaw = gatherBrightPixelsVoronoi(
+                    _realFrame, *this, center, sphereR,
+                    selfClaim, otherCellsClaimSets, &gstats);
+                if (!componentFilterEnabled) {
+                    updateAdaptiveShapeWeights(cachedRaw);
+                }
+            }
             cachedCenter = center;
             ++cachedMisses;
-
-            // Adaptive exponent: measure core-dominance on the freshly
-            // gathered raw pixels. Dim cells stay at expDim; bright cells
-            // ramp down toward expBright to give halo a fairer vote in
-            // the weighted moments.
-            if (adaptiveExp && !cachedRaw.empty()) {
-                // Relative pCore: fraction of pixels whose weight exceeds
-                // 1.5× the cell's own mean weight. Scale-invariant — a
-                // peaked cell (bright core, dim halo) has many pixels
-                // above 1.5×mean; a uniform cell has few. Doesn't depend
-                // on absolute brightness scale or preprocessing pipeline.
-                //
-                // Replaces the previous absolute-threshold metric
-                // (pcaShapeCoreBrightnessThreshold) which failed for this
-                // dataset: dim cells got HIGH pCore (many pixels barely
-                // above threshold) while bright cells got LOW pCore
-                // (pixels spread across a wide range). The relative
-                // metric correctly classifies both.
-                float meanW = 0.0f;
-                for (const auto &bp : cachedRaw) meanW += bp.weight;
-                meanW /= static_cast<float>(cachedRaw.size());
-
-                int coreCount = 0;
-                const float relativeThreshold = 1.5f * meanW;
-                for (const auto &bp : cachedRaw) {
-                    if (bp.weight > relativeThreshold) ++coreCount;
-                }
-                const float pCore = static_cast<float>(coreCount) /
-                                    static_cast<float>(cachedRaw.size());
-                const float t = std::clamp(
-                    (pCore - coreLo) / (coreHi - coreLo), 0.0f, 1.0f);
-                cellWeightExponent = expDim + t * (expBright - expDim);
-                // Same pCore ramp drives radius inflation: 1.0 for uniform
-                // (t=0), radInflBright for peaked (t=1).
-                cellRadiusInflation = 1.0f + t * (radInflBright - 1.0f);
-                log << "  [PCA Shape Exp] cell=" << cell.getName()
-                    << " pCore=" << pCore
-                    << " meanW=" << meanW
-                    << " relThresh=" << relativeThreshold
-                    << " exp=" << cellWeightExponent
-                    << " radInfl=" << cellRadiusInflation
-                    << std::endl;
-            }
         } else {
             ++cachedHits;
         }
@@ -3472,15 +4750,65 @@ bool Frame::calibrateCellShapeViaPca(
 
         std::vector<BrightPixel> pixels;
         pixels.reserve(raw.size());
-        for (const auto &bp : raw) {
-            const double dx = bp.pos.x - center.x;
-            const double dy = bp.pos.y - center.y;
-            const double dz = bp.pos.z - center.z;
-            const double lx = R_T[0] * dx + R_T[1] * dy + R_T[2] * dz;
-            const double ly = R_T[3] * dx + R_T[4] * dy + R_T[5] * dz;
-            const double lz = R_T[6] * dx + R_T[7] * dy + R_T[8] * dz;
-            const double val = lx * lx * invA2 + ly * ly * invB2 + lz * lz * invC2;
-            if (val <= 1.0) pixels.push_back(bp);
+        if (localSupport) {
+            // gatherPcaLocalSupport already applied the fixed pre-fit mask.
+            // Keeping this support fixed prevents rotation/radius feedback
+            // from admitting progressively more halo between iterations.
+            pixels = raw;
+        } else {
+            for (const auto &bp : raw) {
+                const double dx = bp.pos.x - center.x;
+                const double dy = bp.pos.y - center.y;
+                const double dz = bp.pos.z - center.z;
+                const double lx = R_T[0] * dx + R_T[1] * dy + R_T[2] * dz;
+                const double ly = R_T[3] * dx + R_T[4] * dy + R_T[5] * dz;
+                const double lz = R_T[6] * dx + R_T[7] * dy + R_T[8] * dz;
+                const double val =
+                    lx * lx * invA2 + ly * ly * invB2 + lz * lz * invC2;
+                if (val <= 1.0) pixels.push_back(bp);
+            }
+        }
+
+        if (componentFilterEnabled && !localSupport) {
+            const size_t componentInputPixels = pixels.size();
+            const size_t anchorTrimKept =
+                trimComponentSupportToAnchor(pixels);
+            const BrightPixelComponentSelection selection =
+                selectAnchoredBrightPixelComponents(
+                    pixels,
+                    -std::numeric_limits<float>::infinity(),
+                    fixedComponentAnchor,
+                    _realFrame.front().rows,
+                    _realFrame.front().cols,
+                    static_cast<int>(_realFrame.size()),
+                    componentConnectivityRadius,
+                    componentMinimumVoxels,
+                    componentCompanionMinimumFraction,
+                    componentMaximumComponents);
+            pixels = retainSelectedBrightPixelComponents(
+                pixels,
+                selection,
+                -std::numeric_limits<float>::infinity());
+            log << "  [CU4 Component Support] stage=pca_legacy"
+                << " cell=" << cell.getName()
+                << " iter=" << iter
+                << " input=" << componentInputPixels
+                << " anchorRadiusScale=" << componentAnchorRadiusScale
+                << " anchorTrimKept=" << anchorTrimKept
+                << " eligible=" << selection.eligiblePixels
+                << " components=" << selection.componentSizes.size()
+                << " anchorComponent=" << selection.anchorLabel
+                << " selectedComponents="
+                << selection.selectedLabels.size()
+                << " anchorDistance=" << selection.anchorDistance
+                << " anchorSize="
+                << (selection.anchorLabel >= 0
+                        ? selection.componentSizes[
+                              static_cast<size_t>(selection.anchorLabel)]
+                        : 0)
+                << " kept=" << pixels.size()
+                << std::endl;
+            updateAdaptiveShapeWeights(pixels);
         }
 
         if (static_cast<int>(pixels.size()) < minPixels) {
@@ -4332,7 +5660,9 @@ CostCallbackPair Frame::trySplitCellPhased(
     float lumenMaxDynamicDaughterOverlapFraction,
     float lumenSnapshotSeedMaxRefitDrift,
     bool lumenSkipExistingCellBuriedCheck,
-    bool lumenSkipNeighborBridgeCheck)
+    bool lumenSkipNeighborBridgeCheck,
+    bool saturatedSparseHybridValleyOverrideEnabled,
+    float saturatedSparseHybridMaxValleyRatio)
 {
     const auto noop = [](bool) {};
     if (cellIndex >= cells.size()) return {0.0, noop};
@@ -4460,17 +5790,23 @@ CostCallbackPair Frame::trySplitCellPhased(
         ? snapshot.bRadius : liveParent.getBRadius();
     const float srcMinor = snapshotValid ? snapshot.cRadius : liveParent.getCRadius();
 
-    // Build the snapshot-state parent: position, radii, rotation, and
-    // brightness all come from the snapshot (falling back to live values
-    // when snapshot is missing a field).
+    // Build the snapshot-state parent. Under the PSF/brightness objective,
+    // compare geometry with the current frozen latent brightness: historical
+    // snapshots are captured before the end-frame brightness EMA and would
+    // otherwise add a stale-brightness penalty unrelated to geometry.
     Ellipsoid snapshotParent = liveParent;
     if (snapshotValid) {
+        const float comparisonBrightness =
+            simulationConfig.psf_brightness_cost_enabled
+                ? liveParent.getBrightness()
+                : (snapshot.brightness > 0.0f
+                       ? snapshot.brightness
+                       : liveParent.getBrightness());
         EllipsoidParams snapParams(parentName,
                                   snapshot.position.x, snapshot.position.y, snapshot.position.z,
                                   srcMajor, srcMinor,
                                   snapshot.thetaX, snapshot.thetaY, snapshot.thetaZ,
-                                  snapshot.brightness > 0.0f ? snapshot.brightness
-                                                             : liveParent.getBrightness());
+                                  comparisonBrightness);
         snapParams.bRadius = srcB;
         snapshotParent = Ellipsoid(snapParams);
 
@@ -4512,8 +5848,18 @@ CostCallbackPair Frame::trySplitCellPhased(
             cmpBbox.zMin = std::min(liveBbox.zMin, snapBbox.zMin);
             cmpBbox.zMax = std::max(liveBbox.zMax, snapBbox.zMax);
             const std::vector<uint8_t> noMask;
-            liveCostForComparison = calculateBboxCost(cmpBbox, _synthFrame, noMask);
-            snapCostForComparison = calculateBboxCost(cmpBbox, swappedSynth, noMask);
+            const PsfBrightnessCostContext liveBrightnessContext =
+                makePsfBrightnessCostContext({&liveParent}, parentName);
+            const PsfBrightnessCostContext snapBrightnessContext =
+                makePsfBrightnessCostContext({&snapshotParent}, parentName);
+            liveCostForComparison = calculateBboxCost(
+                cmpBbox, _synthFrame, noMask, -1,
+                simulationConfig.psf_brightness_cost_enabled
+                    ? &liveBrightnessContext : nullptr);
+            snapCostForComparison = calculateBboxCost(
+                cmpBbox, swappedSynth, noMask, -1,
+                simulationConfig.psf_brightness_cost_enabled
+                    ? &snapBrightnessContext : nullptr);
         } else {
             liveCostForComparison = _currentCost;
             swappedImageCost = calculateIncrementalCost(swappedSynth,
@@ -4709,7 +6055,7 @@ CostCallbackPair Frame::trySplitCellPhased(
               << " inSphere=" << gstats.inSphere
               << " aboveBright=" << gstats.aboveBrightness
               << " voronoiRejected=" << gstats.voronoiRejected
-              << " kept=" << gstats.voronoiKept
+              << " kept=" << pixels.size()
               << std::endl;
 
     if (pixels.size() < 20) {
@@ -4898,6 +6244,8 @@ CostCallbackPair Frame::trySplitCellPhased(
     }
 
     std::vector<Candidate> candidates;
+    std::vector<Candidate> reservedAxisPrimaryCandidates;
+    reservedAxisPrimaryCandidates.reserve(nDirs);
     for (size_t di = 0; di < nDirs; ++di) {
         const auto &dir0 = primaryDirs[di];
         const std::string &axLabel = primaryNames[di];
@@ -4928,8 +6276,6 @@ CostCallbackPair Frame::trySplitCellPhased(
             const float sep = mp.separation;
             const float half = 0.5f * sep;
             const std::string baseLabel = mp.label;
-
-            // Primary candidate for this (midpoint, direction) pair.
             cv::Point3f d1(midpoint.x - half * dir0.x,
                            midpoint.y - half * dir0.y,
                            midpoint.z - half * dir0.z);
@@ -4937,7 +6283,9 @@ CostCallbackPair Frame::trySplitCellPhased(
                            midpoint.y + half * dir0.y,
                            midpoint.z + half * dir0.z);
             candidates.push_back({d1, d2, baseLabel + "_primary"});
-
+            if (reservedAxisPrimaryCandidates.size() == di) {
+                reservedAxisPrimaryCandidates.push_back(candidates.back());
+            }
             // Rotation variants around an axis perpendicular to dir0.
             for (float sign : {-1.0f, 1.0f}) {
                 const float angle = sign * rotDeltaRad;
@@ -5362,7 +6710,211 @@ CostCallbackPair Frame::trySplitCellPhased(
 
     const int Kmax = std::max(1, probConfig.split_candidates_per_attempt);
     if (static_cast<int>(candidates.size()) > Kmax) {
-        candidates.resize(Kmax);
+        std::vector<Candidate> selected(
+            candidates.begin(), candidates.begin() + Kmax);
+        size_t reservedReplaced = 0;
+        if (simulationConfig.celluniverse4_enabled &&
+            probConfig.celluniverse4_split_candidate_family_reserve_enabled &&
+            !bridgeProposalOnly && !lumenProposalOnly) {
+            const auto isReservedPrimary =
+                [&](const Candidate &candidate) {
+                    return std::any_of(
+                        reservedAxisPrimaryCandidates.begin(),
+                        reservedAxisPrimaryCandidates.end(),
+                        [&](const Candidate &reserved) {
+                            return candidate.label == reserved.label;
+                        });
+                };
+            for (const Candidate &reserved : reservedAxisPrimaryCandidates) {
+                const bool alreadySelected = std::any_of(
+                    selected.begin(), selected.end(),
+                    [&](const Candidate &candidate) {
+                        return candidate.label == reserved.label;
+                    });
+                if (!alreadySelected) {
+                    // split_candidates_per_attempt is a hard cap. Preserve
+                    // injected bridge/lumen proposals and any already-reserved
+                    // primary, then replace the lowest-priority remaining
+                    // variant instead of silently growing the batch.
+                    const auto replacement = std::find_if(
+                        selected.rbegin(), selected.rend(),
+                        [&](const Candidate &candidate) {
+                            return !isReservedPrimary(candidate) &&
+                                   candidate.label.rfind("bridge_", 0) != 0 &&
+                                   candidate.label != "cell_lumen_primary";
+                        });
+                    if (replacement == selected.rend()) {
+                        break;
+                    }
+                    *replacement = reserved;
+                    ++reservedReplaced;
+                }
+            }
+            std::cout << "  [Split Candidate Family Reserve] " << parentName
+                      << " configuredK=" << Kmax
+                      << " reservedReplaced=" << reservedReplaced
+                      << " effectiveK=" << selected.size()
+                      << std::endl;
+        }
+        candidates = std::move(selected);
+    }
+
+    // CU4 candidate-local background rescue. A candidate is still only a
+    // proposal here: if one daughter seed samples the modeled background,
+    // move that seed to the nearest strong center on its original side of
+    // the candidate's perpendicular bisector. The plane is frozen from the
+    // unadjusted pair, so a rescued daughter can never cross onto the other
+    // daughter's side. Every downstream geometry, overlap, support, image,
+    // and commit gate remains unchanged.
+    const bool preserveCurrentFrameLocalSeeds =
+        bridgeProposalOnly && bridgeProposal != nullptr &&
+        bridgeProposal->currentFrameLocalOnly;
+    if (preserveCurrentFrameLocalSeeds) {
+        std::cout
+            << "  [CellUniverse4 Split Daughter Background Reattach Summary] "
+            << parentName
+            << " candidates=" << candidates.size()
+            << " reattached=0 action=preserve_current_frame_local_seeds"
+            << std::endl;
+    }
+    if (!preserveCurrentFrameLocalSeeds &&
+        simulationConfig.celluniverse4_enabled &&
+        probConfig
+            .celluniverse4_split_daughter_background_reattach_enabled &&
+        !_realFrame.empty() && !getSignalCenters().empty()) {
+        const float parentMaxRadius = std::max({
+            srcMajor, srcB, srcMinor, parent.getARadius(),
+            parent.getBRadius(), parent.getCRadius()});
+        const float maximumDistance = std::max(
+            0.0f,
+            probConfig
+                .celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction) *
+            std::max(1.0f, parentMaxRadius);
+        const float backgroundMargin = std::max(
+            0.0f,
+            probConfig.celluniverse4_split_daughter_background_margin);
+        const float minimumCenterBrightness = std::max(
+            0.0f,
+            probConfig
+                .celluniverse4_split_daughter_background_reattach_min_center_brightness);
+        const int minimumCenterBoxes = std::max(
+            0,
+            probConfig
+                .celluniverse4_split_daughter_background_reattach_min_center_boxes);
+        const float halfspaceTolerance = std::max(
+            0.0f,
+            probConfig
+                .celluniverse4_split_daughter_background_reattach_halfspace_tolerance_parent_radius_fraction) *
+            std::max(1.0f, parentMaxRadius);
+        int reattachedCandidateDaughters = 0;
+
+        for (size_t candidateIndex = 0;
+             candidateIndex < candidates.size();
+             ++candidateIndex) {
+            Candidate &candidate = candidates[candidateIndex];
+            const cv::Point3f originalD1 = candidate.d1Pos;
+            const cv::Point3f originalD2 = candidate.d2Pos;
+            const cv::Point3f axisVector = originalD2 - originalD1;
+            const float separation =
+                static_cast<float>(cv::norm(axisVector));
+            if (separation <= 1.0e-3f) continue;
+            const cv::Point3f axis = axisVector * (1.0f / separation);
+            const cv::Point3f midpoint = 0.5f * (originalD1 + originalD2);
+
+            auto reattachOneDaughter =
+                [&](cv::Point3f &position,
+                    float expectedSide,
+                    const char *daughterLabel) {
+                    const float probeRadius = std::max(
+                        2.0f,
+                        std::max(
+                            0.0f,
+                            probConfig
+                                .celluniverse4_split_daughter_background_probe_radius_parent_fraction) *
+                            std::min({srcMajor, srcB, srcMinor}));
+                    Ellipsoid probe = parent;
+                    probe.setPosition(position.x, position.y, position.z);
+                    probe.setRadii(probeRadius, probeRadius, probeRadius);
+                    const auto oldStats =
+                        probe.measureBrightnessStats(_realFrame);
+                    const float localBackground =
+                        foregroundReferenceAt(position);
+                    if (oldStats.first > localBackground + backgroundMargin) {
+                        return;
+                    }
+
+                    size_t bestCenterIndex = 0;
+                    float bestDistance =
+                        std::numeric_limits<float>::infinity();
+                    bool found = false;
+                    const auto &centers = getSignalCenters();
+                    for (size_t centerIndex = 0;
+                         centerIndex < centers.size();
+                         ++centerIndex) {
+                        const Frame::SignalCenter &center =
+                            centers[centerIndex];
+                        if (center.brightness < minimumCenterBrightness ||
+                            center.boxes < minimumCenterBoxes) {
+                            continue;
+                        }
+                        const float signedSide =
+                            (center.position - midpoint).dot(axis);
+                        if (expectedSide * signedSide < -halfspaceTolerance) {
+                            continue;
+                        }
+                        const float distance = static_cast<float>(
+                            cv::norm(center.position - position));
+                        if (distance > maximumDistance ||
+                            distance >= bestDistance) {
+                            continue;
+                        }
+                        bestCenterIndex = centerIndex;
+                        bestDistance = distance;
+                        found = true;
+                    }
+                    if (!found) return;
+
+                    const cv::Point3f oldPosition = position;
+                    const Frame::SignalCenter &bestCenter =
+                        centers[bestCenterIndex];
+                    position = bestCenter.position;
+                    ++reattachedCandidateDaughters;
+                    std::cout
+                        << "  [CellUniverse4 Split Daughter Background Reattach] "
+                        << parentName
+                        << " candidate=" << candidateIndex
+                        << " label=" << candidate.label
+                        << " daughter=" << daughterLabel
+                        << " probeRadius=" << probeRadius
+                        << " mean=" << oldStats.first
+                        << " background=" << localBackground
+                        << " margin=" << backgroundMargin
+                        << " from=(" << oldPosition.x << ","
+                        << oldPosition.y << "," << oldPosition.z << ")"
+                        << " to=(" << position.x << "," << position.y
+                        << "," << position.z << ")"
+                        << " distance=" << bestDistance
+                        << " maxDistance=" << maximumDistance
+                        << " centerBrightness=" << bestCenter.brightness
+                        << " centerBoxes=" << bestCenter.boxes
+                        << " side="
+                        << (bestCenter.position - midpoint).dot(axis)
+                        << " expectedSide=" << expectedSide
+                        << std::endl;
+                };
+
+            reattachOneDaughter(candidate.d1Pos, -1.0f, "0");
+            reattachOneDaughter(candidate.d2Pos, 1.0f, "1");
+        }
+        std::cout
+            << "  [CellUniverse4 Split Daughter Background Reattach Summary] "
+            << parentName
+            << " candidates=" << candidates.size()
+            << " reattached=" << reattachedCandidateDaughters
+            << " maxDistanceParentRadiusFraction="
+            << probConfig
+                   .celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction
+            << std::endl;
     }
 
     // --- 4. Evaluate each candidate via a short burn-in ---
@@ -5409,16 +6961,55 @@ CostCallbackPair Frame::trySplitCellPhased(
     // baseline, cancels in all comparisons. Dropping the mask keeps
     // cost accounting honest about abandoned voxels.
     const std::vector<uint8_t> noSplitMask;
-    auto evalImageCost = [&](const std::vector<cv::Mat> &synth) -> double {
-        if (_useBboxCost) return calculateBboxCost(splitBbox, synth, noSplitMask);
-        return _currentCost;  // legacy path: cached after refreshFullCostCache
+    struct SplitCostEval {
+        double composite = 0.0;
+        double image = 0.0;
+        double brightness = 0.0;
+    };
+    auto evalDaughterCost = [&](const std::vector<cv::Mat> &synth) {
+        SplitCostEval result;
+        if (_useBboxCost) {
+            const PsfBrightnessCostContext daughterBrightnessContext =
+                makePsfBrightnessCostContext(
+                    {&cells[cells.size() - 2], &cells[cells.size() - 1]},
+                    parentName);
+            BboxCostBreakdown breakdown;
+            result.composite = calculateBboxCost(
+                splitBbox, synth, noSplitMask, -1,
+                simulationConfig.psf_brightness_cost_enabled
+                    ? &daughterBrightnessContext : nullptr,
+                &breakdown);
+            result.image = breakdown.imageCost;
+            result.brightness = breakdown.brightnessPriorCost;
+            return result;
+        }
+        // Legacy path: cached after refreshFullCostCache.
+        result.composite = _currentCost;
+        result.image = _currentCost;
+        return result;
     };
 
-    const double baselineImageCost = _useBboxCost
-        ? calculateBboxCost(splitBbox, _synthFrame, noSplitMask)
-        : _currentCost;
+    const PsfBrightnessCostContext baselineBrightnessContext =
+        makePsfBrightnessCostContext({&cells[cellIndex]}, parentName);
+    SplitCostEval baselineCost;
+    if (_useBboxCost) {
+        BboxCostBreakdown breakdown;
+        baselineCost.composite = calculateBboxCost(
+            splitBbox, _synthFrame, noSplitMask, -1,
+            simulationConfig.psf_brightness_cost_enabled
+                ? &baselineBrightnessContext : nullptr,
+            &breakdown);
+        baselineCost.image = breakdown.imageCost;
+        baselineCost.brightness = breakdown.brightnessPriorCost;
+    } else {
+        baselineCost.composite = _currentCost;
+        baselineCost.image = _currentCost;
+    }
+    const double baselineCompositeCost = baselineCost.composite;
+    const double baselineImageCost = baselineCost.image;
+    const double baselineBrightnessCost = baselineCost.brightness;
     const double baselineOverlap = computeOverlapPenalty(probConfig.overlap_penalty_weight);
-    const double baselineTotal = baselineImageCost + baselineOverlap;
+    const double baselineTotal = baselineCompositeCost + baselineOverlap;
     // Non-const: moved into callback copies at the end of the function
     // (std::move on const silently falls back to copy).
     std::vector<cv::Mat> savedSynth = _synthFrame;
@@ -5434,7 +7025,7 @@ CostCallbackPair Frame::trySplitCellPhased(
         parentSignalForCandidateGate =
             std::max(0.0f,
                      parentCandidateBrightness.first -
-                         backgroundAt(parentCandidatePosition));
+                         foregroundReferenceAt(parentCandidatePosition));
     }
     int savedNonTrashCellCount = 0;
     for (const auto &cell : savedCells) {
@@ -5448,10 +7039,56 @@ CostCallbackPair Frame::trySplitCellPhased(
     std::vector<cv::Mat> bestSynth;
     std::vector<double> bestPerSlice;
     double bestImageCost = 0.0;
+    double bestBrightnessCost = 0.0;
+    double bestCompositeCost = 0.0;
     cv::Point3f bestSeedD1{0, 0, 0};
     cv::Point3f bestSeedD2{0, 0, 0};
     std::string bestLabel;
     bool bestFutureSupportedRodTipPrimary = false;
+
+    struct SplitFinalistState {
+        int idx = -1;
+        double total = std::numeric_limits<double>::infinity();
+        double selectionScore = std::numeric_limits<double>::infinity();
+        std::vector<Ellipsoid> cells;
+        std::vector<cv::Mat> synth;
+        std::vector<double> perSlice;
+        double imageCost = 0.0;
+        double brightnessCost = 0.0;
+        double compositeCost = 0.0;
+        cv::Point3f seedD1{0, 0, 0};
+        cv::Point3f seedD2{0, 0, 0};
+        std::string label;
+        bool futureSupportedRodTipPrimary = false;
+    };
+    const bool useCellUniverse4FinalistRetry =
+        simulationConfig.celluniverse4_enabled &&
+        probConfig.celluniverse4_split_finalist_retry_enabled;
+    const size_t cellUniverse4FinalistLimit = static_cast<size_t>(
+        std::clamp(probConfig.celluniverse4_split_finalist_retry_limit,
+                   1,
+                   16));
+    std::vector<SplitFinalistState> cellUniverse4Finalists;
+    if (useCellUniverse4FinalistRetry) {
+        cellUniverse4Finalists.reserve(cellUniverse4FinalistLimit);
+    }
+    size_t nextCellUniverse4Finalist = 1;
+    auto installCellUniverse4Finalist = [&](SplitFinalistState &&finalist) {
+        bestIdx = finalist.idx;
+        bestTotal = finalist.total;
+        bestSelectionScore = finalist.selectionScore;
+        bestCells = std::move(finalist.cells);
+        bestSynth = std::move(finalist.synth);
+        bestPerSlice = std::move(finalist.perSlice);
+        bestImageCost = finalist.imageCost;
+        bestBrightnessCost = finalist.brightnessCost;
+        bestCompositeCost = finalist.compositeCost;
+        bestSeedD1 = finalist.seedD1;
+        bestSeedD2 = finalist.seedD2;
+        bestLabel = std::move(finalist.label);
+        bestFutureSupportedRodTipPrimary =
+            finalist.futureSupportedRodTipPrimary;
+    };
 
     int burnIters = std::max(0, probConfig.split_candidate_burn_in_iterations);
     if (lumenProposal != nullptr && lumenBurnInIterations >= 0) {
@@ -5462,6 +7099,8 @@ CostCallbackPair Frame::trySplitCellPhased(
     }
     std::cout << "  [Split Baseline] " << parentName
               << " imageCost=" << baselineImageCost
+              << " brightnessCost=" << baselineBrightnessCost
+              << " compositeCost=" << baselineCompositeCost
               << " overlap=" << baselineOverlap
               << " total=" << baselineTotal
               << " threshold=" << -probConfig.split_cost
@@ -5491,6 +7130,9 @@ CostCallbackPair Frame::trySplitCellPhased(
     Ellipsoid::cellConfig.x.sigma = savedPerturbX.sigma * posScale;
     Ellipsoid::cellConfig.y.sigma = savedPerturbY.sigma * posScale;
     Ellipsoid::cellConfig.z.sigma = savedPerturbZ.sigma * posScale;
+    const PerturbParams splitPerturbX = Ellipsoid::cellConfig.x;
+    const PerturbParams splitPerturbY = Ellipsoid::cellConfig.y;
+    const PerturbParams splitPerturbZ = Ellipsoid::cellConfig.z;
 
     std::cout << "  [Split Sigmas] " << parentName
               << " posScale=" << posScale
@@ -5569,6 +7211,7 @@ CostCallbackPair Frame::trySplitCellPhased(
         cells.push_back(child2);
         const size_t d1Idx = cells.size() - 2;
         const size_t d2Idx = cells.size() - 1;
+        const std::vector<size_t> daughterBrightnessGroup = {d1Idx, d2Idx};
 
         // Render the synth with the new cell configuration (parent
         // removed, daughters added). Under bbox cost, only re-render
@@ -5627,7 +7270,9 @@ CostCallbackPair Frame::trySplitCellPhased(
                                               /*useSignalGuidance=*/false,
                                               /*randomPerturbRadiusRatio=*/1.0f,
                                               /*pcaRefitWellFilledMove=*/false,
-                                              /*useSignalMapGuidance=*/false);
+                                              /*useSignalMapGuidance=*/false,
+                                              /*forcedPosition=*/nullptr,
+                                              &daughterBrightnessGroup);
             const bool accept = cp.first < 0.0;
             if (splitPerturbDebugPlacements != nullptr) {
                 accumulateDebugCellPlacement(*splitPerturbDebugPlacements,
@@ -5644,9 +7289,12 @@ CostCallbackPair Frame::trySplitCellPhased(
         // Under bbox flag, _currentCost is stale (perturbCell's bbox path
         // doesn't update it). Use the cached bbox+mask to score the
         // candidate's post-burn-in synth on the same voxel set as baseline.
-        const double candImageCost = evalImageCost(_synthFrame);
+        const SplitCostEval candCost = evalDaughterCost(_synthFrame);
+        const double candImageCost = candCost.image;
+        const double candBrightnessCost = candCost.brightness;
+        const double candCompositeCost = candCost.composite;
         const double candOverlap = computeOverlapPenalty(probConfig.overlap_penalty_weight);
-        const double candTotal = candImageCost + candOverlap;
+        const double candTotal = candCompositeCost + candOverlap;
 
         const Ellipsoid &candD1 = cells[d1Idx];
         const Ellipsoid &candD2 = cells[d2Idx];
@@ -5786,7 +7434,10 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " final2=(" << candD2.getX() << "," << candD2.getY() << "," << candD2.getZ() << ")"
                   << " drift2=" << candDrift2
                   << " total=" << candTotal
-                  << " (image=" << candImageCost << " overlap=" << candOverlap << ")"
+                  << " (image=" << candImageCost
+                  << " brightness=" << candBrightnessCost
+                  << " composite=" << candCompositeCost
+                  << " overlap=" << candOverlap << ")"
                   << std::endl;
         if (bridgeTunnelAsymmetricCandidatePass ||
             bridgeTunnelOutsideFutureCandidatePass) {
@@ -5893,9 +7544,9 @@ CostCallbackPair Frame::trySplitCellPhased(
             bridgeProposal->signalCenterScore >= 0.0f &&
             (futureBackedBridgeRescue || futureSupportedPcaBridgeDimBypass);
         const float signalCenterCurrentBackground = std::max(
-            backgroundAt(cv::Point3f(
+            foregroundReferenceAt(cv::Point3f(
                 candD1.getX(), candD1.getY(), candD1.getZ())),
-            backgroundAt(cv::Point3f(
+            foregroundReferenceAt(cv::Point3f(
                 candD2.getX(), candD2.getY(), candD2.getZ())));
         const float signalCenterCurrentDensityFloor =
             signalCenterCurrentBackground +
@@ -6010,10 +7661,22 @@ CostCallbackPair Frame::trySplitCellPhased(
                 if (maxE > 1e-6f) candValleyFromBright = gB / maxE;
             }
         }
-        const float valleyLimit =
+        const float ordinaryValleyLimit =
             (candIsCellLumenPrior && lumenPrefilterMaxValleyRatio >= 0.0f)
                 ? lumenPrefilterMaxValleyRatio
                 : probConfig.bio_bridge_max_valley_ratio;
+        const bool saturatedSparseHybridPair =
+            candIsPcaBridgeOnly && bridgeProposal != nullptr &&
+            bridgeProposal->saturatedSparseHybridPair;
+        const bool saturatedSparseHybridValleyOverride =
+            saturatedSparseHybridPair &&
+            saturatedSparseHybridValleyOverrideEnabled;
+        const float valleyLimit =
+            cell_refit_guards::saturatedSparseHybridValleyLimit(
+                saturatedSparseHybridPair,
+                saturatedSparseHybridValleyOverrideEnabled,
+                ordinaryValleyLimit,
+                saturatedSparseHybridMaxValleyRatio);
         const bool bypassPcaBridgeValley =
             candIsPcaBridgeOnly && !probConfig.pca_bridge_require_valley;
         const bool lumenPrefilterValleyIsSoft =
@@ -6024,7 +7687,97 @@ CostCallbackPair Frame::trySplitCellPhased(
                                           cellUniverse3WindowMapDimBypass) &&
                                          (bypassPcaBridgeValley ||
                                           lumenPrefilterValleyIsSoft ||
-                                          candValleyFromBright < valleyLimit);
+                                          cell_refit_guards::
+                                              passesSaturatedSparseHybridValleyPrefilter(
+                                                  candValleyFromBright,
+                                                  saturatedSparseHybridPair,
+                                                  saturatedSparseHybridValleyOverrideEnabled,
+                                                  ordinaryValleyLimit,
+                                                  saturatedSparseHybridMaxValleyRatio));
+        if (saturatedSparseHybridValleyOverride) {
+            std::cout << "  [CU4 Saturated Sparse Hybrid Valley] "
+                      << parentName
+                      << " stage=prefilter"
+                      << " observed=" << candValleyFromBright
+                      << " ordinaryLimit=" << ordinaryValleyLimit
+                      << " activeLimit=" << valleyLimit
+                      << " action="
+                      << (candValleyFromBright <= valleyLimit
+                              ? "allow" : "reject")
+                      << std::endl;
+        }
+
+        // CU4 ranks several independently seeded split hypotheses.  Apply
+        // the seed-drift and direction checks that are meaningful before
+        // choosing the single finalist; otherwise an invalid lowest-cost
+        // candidate can prevent a valid runner-up from ever being refined.
+        // Axis expansion remains a post-refit-only gate because daughter PCA
+        // deliberately changes that span (the known frame-6 cell-2 split is
+        // corrected during this refit).
+        bool cellUniverse4CandidateGeometryPass = true;
+        if (simulationConfig.celluniverse4_enabled &&
+            probConfig.celluniverse4_split_candidate_geometry_prefilter_enabled &&
+            !bridgeProposalOnly && !lumenProposalOnly) {
+            const cv::Point3f candSeedAxis = cand.d2Pos - cand.d1Pos;
+            const cv::Point3f candFinalAxis =
+                cv::Point3f(candD2.getX(), candD2.getY(), candD2.getZ()) -
+                cv::Point3f(candD1.getX(), candD1.getY(), candD1.getZ());
+            const float candSeedAxisLen =
+                static_cast<float>(cv::norm(candSeedAxis));
+            const float candFinalAxisLen =
+                static_cast<float>(cv::norm(candFinalAxis));
+            const float parentMaxRadius =
+                std::max(1.0f, std::max({srcMajor, srcB, srcMinor}));
+            const float driftFraction =
+                probConfig.split_max_daughter_seed_drift_fraction;
+            const float maxAllowedDrift = driftFraction > 0.0f
+                ? driftFraction * parentMaxRadius
+                : std::numeric_limits<float>::infinity();
+            const bool driftTooLarge =
+                probConfig.split_geometry_gate_enabled &&
+                driftFraction > 0.0f &&
+                std::max(candDrift1, candDrift2) > maxAllowedDrift;
+            const float expansionLimit =
+                probConfig.split_max_daughter_axis_expansion;
+            float seedAxisAngle = 0.0f;
+            if (candSeedAxisLen > 1e-3f && candFinalAxisLen > 1e-3f) {
+                const double dot = std::abs(
+                    static_cast<double>(candSeedAxis.dot(candFinalAxis)) /
+                    (static_cast<double>(candSeedAxisLen) * candFinalAxisLen));
+                seedAxisAngle = static_cast<float>(
+                    std::acos(std::clamp(dot, 0.0, 1.0)) * 180.0 / M_PI);
+            }
+            const float maxAxisAngle = std::clamp(
+                probConfig.split_separation_axis_max_angle_degrees,
+                0.0f, 90.0f);
+            const bool separationMisaligned =
+                probConfig.split_separation_axis_alignment_gate_enabled &&
+                seedAxisAngle > maxAxisAngle;
+            cellUniverse4CandidateGeometryPass =
+                !driftTooLarge && !separationMisaligned;
+            if (!cellUniverse4CandidateGeometryPass) {
+                std::cout << "  [Split Cand Geometry Gate] " << parentName
+                          << " idx=" << ci
+                          << " label=" << cand.label
+                          << " drift1=" << candDrift1
+                          << " drift2=" << candDrift2
+                          << " maxAllowedDrift=" << maxAllowedDrift
+                          << " seedAxisLen=" << candSeedAxisLen
+                          << " finalAxisLen=" << candFinalAxisLen
+                          << " axisExpansion="
+                          << (candSeedAxisLen > 1e-3f
+                                  ? candFinalAxisLen / candSeedAxisLen
+                                  : 0.0f)
+                          << " axisExpansionLimit=" << expansionLimit
+                          << " seedAxisAngle=" << seedAxisAngle
+                          << " maxAxisAngle=" << maxAxisAngle
+                          << " reason="
+                          << (driftTooLarge ? "daughter_seed_drift"
+                              : "daughter_separation_axis_misaligned")
+                          << " action=reject_candidate"
+                          << std::endl;
+            }
+        }
 
         if (!candPassesPreFilter) {
             std::cout << "  [Split Cand PreFilter] " << parentName
@@ -6035,6 +7788,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << " signalCenterFloor="
                       << signalCenterCurrentDensityFloor
                       << " valley=" << candValleyFromBright
+                      << (saturatedSparseHybridValleyOverride
+                              ? " SATURATED_SPARSE_HYBRID_VALLEY_OVERRIDE" : "")
                       << (bothDaughtersBright ? "" : " EDGE_DIM")
                       << (cellUniverse3SignalCenterFutureCandidate
                               ? " SIGNAL_CENTER_FUTURE" : "")
@@ -6214,11 +7969,48 @@ CostCallbackPair Frame::trySplitCellPhased(
         const double candSelectionScore =
             candTotal - futureRodTipPrimarySelectionBonus;
 
-        if (candPassesPreFilter &&
+        const bool candidateEligible =
+            candPassesPreFilter &&
+            cellUniverse4CandidateGeometryPass &&
             cellUniverse3WindowMapCandidatePass &&
             cellUniverse3CleanSignalCandidatePass &&
             bridgeTunnelCandidatePass &&
-            !futureRodTipPrimaryCollapsedCandidate &&
+            !futureRodTipPrimaryCollapsedCandidate;
+        if (candidateEligible && useCellUniverse4FinalistRetry) {
+            SplitFinalistState finalist;
+            finalist.idx = static_cast<int>(ci);
+            finalist.total = candTotal;
+            finalist.selectionScore = candSelectionScore;
+            finalist.cells = cells;
+            finalist.synth = _synthFrame;
+            finalist.perSlice = _currentCostPerSlice;
+            finalist.imageCost = candImageCost;
+            finalist.brightnessCost = candBrightnessCost;
+            finalist.compositeCost = candCompositeCost;
+            finalist.seedD1 = cand.d1Pos;
+            finalist.seedD2 = cand.d2Pos;
+            finalist.label = cand.label;
+            finalist.futureSupportedRodTipPrimary =
+                futureSupportedRodTipPrimaryCandidate;
+            const auto insertAt = std::lower_bound(
+                cellUniverse4Finalists.begin(),
+                cellUniverse4Finalists.end(),
+                finalist,
+                [](const SplitFinalistState &lhs,
+                   const SplitFinalistState &rhs) {
+                    if (lhs.selectionScore != rhs.selectionScore) {
+                        return lhs.selectionScore < rhs.selectionScore;
+                    }
+                    return lhs.idx < rhs.idx;
+                });
+            cellUniverse4Finalists.insert(insertAt, std::move(finalist));
+            if (cellUniverse4Finalists.size() >
+                cellUniverse4FinalistLimit) {
+                cellUniverse4Finalists.pop_back();
+            }
+        }
+
+        if (candidateEligible &&
             candSelectionScore < bestSelectionScore) {
             bestTotal = candTotal;
             bestSelectionScore = candSelectionScore;
@@ -6230,6 +8022,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             bestSynth = std::move(_synthFrame);
             bestPerSlice = std::move(_currentCostPerSlice);
             bestImageCost = candImageCost;
+            bestBrightnessCost = candBrightnessCost;
+            bestCompositeCost = candCompositeCost;
             bestSeedD1 = cand.d1Pos;
             bestSeedD2 = cand.d2Pos;
             bestLabel = cand.label;
@@ -6252,7 +8046,43 @@ CostCallbackPair Frame::trySplitCellPhased(
         return {0.0, noop};
     }
 
-    // Log which candidate won the burn-in competition.
+    auto advanceCellUniverse4Finalist = [&](const char *reason) -> bool {
+        if (!useCellUniverse4FinalistRetry ||
+            nextCellUniverse4Finalist >= cellUniverse4Finalists.size()) {
+            return false;
+        }
+        const int failedIdx = bestIdx;
+        const std::string failedLabel = bestLabel;
+        const double failedTotal = bestTotal;
+        const size_t retryOrdinal = nextCellUniverse4Finalist;
+        SplitFinalistState retryFinalist = std::move(
+            cellUniverse4Finalists[nextCellUniverse4Finalist++]);
+        std::cout << "[Split Finalist Retry] " << parentName
+                  << " failedIdx=" << failedIdx
+                  << " failedLabel=" << failedLabel
+                  << " failedTotal=" << failedTotal
+                  << " reason=" << reason
+                  << " retryOrdinal=" << retryOrdinal
+                  << " retryIdx=" << retryFinalist.idx
+                  << " retryLabel=" << retryFinalist.label
+                  << " retryPreTotal=" << retryFinalist.total
+                  << " retained=" << cellUniverse4Finalists.size()
+                  << std::endl;
+        installCellUniverse4Finalist(std::move(retryFinalist));
+        cells = savedCells;
+        _synthFrame = savedSynth;
+        _currentCost = savedCost;
+        _currentCostPerSlice = savedPerSlice;
+        Ellipsoid::cellConfig.x = splitPerturbX;
+        Ellipsoid::cellConfig.y = splitPerturbY;
+        Ellipsoid::cellConfig.z = splitPerturbZ;
+        return true;
+    };
+
+celluniverse4_retry_split_finalist:
+    // Log which candidate won the burn-in competition. This point is also
+    // re-entered for a bounded CU4 runner-up after a finalist fails only the
+    // post-refit geometry gate.
     const double preCostDiff = bestTotal - baselineTotal;
     std::cout << "  [Split Winner] " << parentName
               << " bestIdx=" << bestIdx << "/" << candidates.size()
@@ -6279,30 +8109,38 @@ CostCallbackPair Frame::trySplitCellPhased(
         refineIters = 0;
     }
     const int daughterRefitIters = std::max(0, probConfig.split_daughter_refit_iterations);
+    float rawDaughterShapeD1 = std::numeric_limits<float>::quiet_NaN();
+    float rawDaughterShapeD2 = std::numeric_limits<float>::quiet_NaN();
+    bool rawDaughterShapeD1Valid = false;
+    bool rawDaughterShapeD2Valid = false;
     if (refineIters > 0 || daughterRefitIters > 0) {
         // Reinstall the winning candidate's state.
         cells = bestCells;
         _synthFrame = bestSynth;
         _currentCostPerSlice = bestPerSlice;
-        _currentCost = bestImageCost;
+        _currentCost = bestCompositeCost;
 
         const size_t d1IdxRefine = cells.size() - 2;
         const size_t d2IdxRefine = cells.size() - 1;
+        const std::vector<size_t> daughterBrightnessGroup = {
+            d1IdxRefine, d2IdxRefine};
         const cv::Point3f preRefineD1(cells[d1IdxRefine].getX(),
                                         cells[d1IdxRefine].getY(),
                                         cells[d1IdxRefine].getZ());
         const cv::Point3f preRefineD2(cells[d2IdxRefine].getX(),
                                         cells[d2IdxRefine].getY(),
                                         cells[d2IdxRefine].getZ());
-        // Pre-refine baseline: bestImageCost was set from candidate's
-        // post-burn-in cost (bbox or full per flag), reinstalled into
-        // _currentCost above for the legacy path.
-        const double preRefineTotal = bestImageCost +
+        // Pre-refine baseline uses the replacement composite cost for the
+        // optimizer while retaining the pure image term for image-specific
+        // split gates and diagnostics.
+        const double preRefineTotal = bestCompositeCost +
             computeOverlapPenalty(probConfig.overlap_penalty_weight);
         std::vector<Ellipsoid> preRefineBestCells = cells;
         std::vector<cv::Mat> preRefineBestSynth = _synthFrame;
         std::vector<double> preRefineBestPerSlice = _currentCostPerSlice;
         const double preRefineBestImageCost = bestImageCost;
+        const double preRefineBestBrightnessCost = bestBrightnessCost;
+        const double preRefineBestCompositeCost = bestCompositeCost;
 
         int refineAccepts = 0;
         for (int it = 0; it < refineIters; ++it) {
@@ -6312,7 +8150,9 @@ CostCallbackPair Frame::trySplitCellPhased(
                                               /*useSignalGuidance=*/false,
                                               /*randomPerturbRadiusRatio=*/1.0f,
                                               /*pcaRefitWellFilledMove=*/false,
-                                              /*useSignalMapGuidance=*/false);
+                                              /*useSignalMapGuidance=*/false,
+                                              /*forcedPosition=*/nullptr,
+                                              &daughterBrightnessGroup);
             const bool accept = cp.first < 0.0;
             if (splitPerturbDebugPlacements != nullptr) {
                 accumulateDebugCellPlacement(*splitPerturbDebugPlacements,
@@ -6895,14 +8735,15 @@ CostCallbackPair Frame::trySplitCellPhased(
                     cells[d1IdxRefine].measureBrightnessStats(_realFrame);
                 const auto d2BrightnessStats =
                     cells[d2IdxRefine].measureBrightnessStats(_realFrame);
-                const float parentBackground = backgroundAt(cv::Point3f(
+                const float parentBackground =
+                    foregroundReferenceAt(cv::Point3f(
                     parent.getX(), parent.getY(), parent.getZ()));
                 const float localBackground = std::max(
-                    backgroundAt(cv::Point3f(
+                    foregroundReferenceAt(cv::Point3f(
                         cells[d1IdxRefine].getX(),
                         cells[d1IdxRefine].getY(),
                         cells[d1IdxRefine].getZ())),
-                    backgroundAt(cv::Point3f(
+                    foregroundReferenceAt(cv::Point3f(
                         cells[d2IdxRefine].getX(),
                         cells[d2IdxRefine].getY(),
                         cells[d2IdxRefine].getZ())));
@@ -7089,7 +8930,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                                                 static_cast<float>(z));
                             if (!cell.isPointInsideEllipsoid(p, 1.0f)) continue;
                             const float w = std::max(
-                                0.0f, row[x] - backgroundAt(z, y, x));
+                                0.0f,
+                                row[x] - foregroundReferenceAt(z, y, x));
                             if (w <= 0.0f) continue;
                             triggerWeightSum += static_cast<double>(w);
                             triggerWeightSqSum += static_cast<double>(w) * w;
@@ -7261,7 +9103,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                                     continue;
                                 }
                                 const float w = std::max(
-                                    0.0f, row[x] - backgroundAt(z, y, x));
+                                    0.0f,
+                                    row[x] - foregroundReferenceAt(z, y, x));
                                 if (w <= 0.0f) continue;
                                 weightSum += static_cast<double>(w);
                                 sumX += static_cast<double>(x) * w;
@@ -7349,6 +9192,25 @@ CostCallbackPair Frame::trySplitCellPhased(
                     movedAny = true;
                 }
                 return movedAny;
+            };
+
+            auto recordRawDaughterShape = [&](size_t idx) {
+                const float rawA = cells[idx].getARadius();
+                const float rawB = cells[idx].getBRadius();
+                const float rawC = cells[idx].getCRadius();
+                const float rawMin = std::min({rawA, rawB, rawC});
+                const float rawMax = std::max({rawA, rawB, rawC});
+                const bool valid = std::isfinite(rawMin) &&
+                                   std::isfinite(rawMax) && rawMin > 1.0e-6f;
+                const float shape = valid ? rawMax / rawMin
+                                          : std::numeric_limits<float>::quiet_NaN();
+                if (idx == d1IdxRefine) {
+                    rawDaughterShapeD1 = shape;
+                    rawDaughterShapeD1Valid = valid;
+                } else if (idx == d2IdxRefine) {
+                    rawDaughterShapeD2 = shape;
+                    rawDaughterShapeD2Valid = valid;
+                }
             };
 
             auto refitOne = [&](size_t idx, const char *label) {
@@ -7674,6 +9536,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                     /*updatePosition=*/!effectiveSplitDaughterRefitPositionLock,
                     Ellipsoid::cellConfig.pcaShapeMaxPosShiftFraction,
                     dBuiltA, dBuiltB, dBuiltC);
+                recordRawDaughterShape(idx);
                 const float fitA = std::clamp(cells[idx].getARadius(), floorA, ceilA);
                 const float fitB = std::clamp(cells[idx].getBRadius(), floorB, ceilB);
                 const float fitC = std::clamp(cells[idx].getCRadius(), floorC, ceilC);
@@ -7716,6 +9579,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                         /*updatePosition=*/!effectiveSplitDaughterRefitPositionLock,
                         Ellipsoid::cellConfig.pcaShapeMaxPosShiftFraction,
                         dBuiltA, dBuiltB, dBuiltC);
+                    recordRawDaughterShape(idx);
                     const float extraFitA =
                         std::clamp(cells[idx].getARadius(), floorA, ceilA);
                     const float extraFitB =
@@ -8079,8 +9943,12 @@ CostCallbackPair Frame::trySplitCellPhased(
 
         // Re-capture refined state as new best. Capture diagnostic data
         // BEFORE moving cells (use-after-move is UB).
-        bestImageCost = evalImageCost(_synthFrame);
-        bestTotal = bestImageCost + computeOverlapPenalty(probConfig.overlap_penalty_weight);
+        const SplitCostEval refinedCost = evalDaughterCost(_synthFrame);
+        bestImageCost = refinedCost.image;
+        bestBrightnessCost = refinedCost.brightness;
+        bestCompositeCost = refinedCost.composite;
+        bestTotal = bestCompositeCost +
+            computeOverlapPenalty(probConfig.overlap_penalty_weight);
 
         const cv::Point3f postRefineD1(cells[d1IdxRefine].getX(),
                                          cells[d1IdxRefine].getY(),
@@ -8140,6 +10008,8 @@ CostCallbackPair Frame::trySplitCellPhased(
         if (cleanFutureRefitFallbackCandidate &&
             refitWorsenedCandidate &&
             preRefineImprovesBaseline) {
+            rawDaughterShapeD1Valid = false;
+            rawDaughterShapeD2Valid = false;
             std::cout << "  [Split Refit Fallback] " << parentName
                       << " reason=refit_worsened_clean_future_split"
                       << " label=" << bestLabel
@@ -8159,6 +10029,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                       << bridgeProposal->parentShapeElongation
                       << std::endl;
             bestImageCost = preRefineBestImageCost;
+            bestBrightnessCost = preRefineBestBrightnessCost;
+            bestCompositeCost = preRefineBestCompositeCost;
             bestTotal = preRefineTotal;
             bestCells = std::move(preRefineBestCells);
             bestSynth = std::move(preRefineBestSynth);
@@ -8699,6 +10571,55 @@ CostCallbackPair Frame::trySplitCellPhased(
         }
     }
 
+    if (probConfig.split_separation_axis_alignment_gate_enabled) {
+        cv::Point3f parentSplitAxis;
+        float parentSplitRadius = 0.0f;
+        parent.worldSplitAxis(parentSplitAxis, parentSplitRadius);
+        cv::Point3f referenceAxis = parentSplitAxis;
+        const char *referenceAxisSource = "parent_short_axis";
+        if (simulationConfig.celluniverse4_enabled &&
+            probConfig.celluniverse4_split_use_winner_seed_axis_gate_enabled) {
+            const cv::Point3f winnerSeedAxis = bestSeedD2 - bestSeedD1;
+            if (cv::norm(winnerSeedAxis) > 1e-9) {
+                referenceAxis = winnerSeedAxis;
+                referenceAxisSource = "winner_seed_axis";
+            }
+        }
+        const cv::Point3f daughterSeparation = bestD2Pos - bestD1Pos;
+        const double referenceAxisNorm = cv::norm(referenceAxis);
+        const double separationNorm = cv::norm(daughterSeparation);
+        float separationAxisAngle = 0.0f;
+        if (referenceAxisNorm > 1e-9 && separationNorm > 1e-9) {
+            const double dot = std::abs(
+                (static_cast<double>(referenceAxis.x) * daughterSeparation.x +
+                 static_cast<double>(referenceAxis.y) * daughterSeparation.y +
+                 static_cast<double>(referenceAxis.z) * daughterSeparation.z) /
+                (referenceAxisNorm * separationNorm));
+            separationAxisAngle = static_cast<float>(
+                std::acos(std::clamp(dot, 0.0, 1.0)) * 180.0 / M_PI);
+        }
+        const float maxSeparationAxisAngle = std::clamp(
+            probConfig.split_separation_axis_max_angle_degrees, 0.0f, 90.0f);
+        if (separationAxisAngle > maxSeparationAxisAngle) {
+            if (advanceCellUniverse4Finalist(
+                    "daughter_separation_axis_misaligned")) {
+                goto celluniverse4_retry_split_finalist;
+            }
+            std::cout << "[Split Reject bio] " << parentName
+                      << " reason=daughter_separation_axis_misaligned"
+                      << " angle=" << separationAxisAngle
+                      << " maxAngle=" << maxSeparationAxisAngle
+                      << " referenceAxisSource=" << referenceAxisSource
+                      << " parentSplitRadius=" << parentSplitRadius
+                      << " finalAxisLen=" << finalAxisLen
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << std::endl;
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+    }
+
     if (probConfig.split_geometry_gate_enabled) {
         const float parentMaxRadius = std::max({srcMajor, srcB, srcMinor});
         const float driftFraction = probConfig.split_max_daughter_seed_drift_fraction;
@@ -8714,6 +10635,10 @@ CostCallbackPair Frame::trySplitCellPhased(
             finalAxisLen > seedAxisLen * axisExpansionLimit;
 
         if (driftTooLarge || axisExpandedTooMuch) {
+            if (advanceCellUniverse4Finalist(
+                    "daughter_geometry_drift")) {
+                goto celluniverse4_retry_split_finalist;
+            }
             std::cout << "[Split Reject bio] " << parentName
                       << " reason=daughter_geometry_drift"
                       << " drift1=" << drift1
@@ -9117,7 +11042,10 @@ CostCallbackPair Frame::trySplitCellPhased(
         }
     }
 
-    if (probConfig.split_daughter_overlap_gate_enabled) {
+    if (probConfig.split_daughter_overlap_gate_enabled ||
+        (simulationConfig.celluniverse4_enabled &&
+         probConfig
+             .celluniverse4_split_sibling_rod_overlap_gate_enabled)) {
         const float baseMaxDaughterOverlap = std::clamp(
             (useCellLumenGateParams && lumenMaxDaughterOverlapFraction >= 0.0f)
                 ? lumenMaxDaughterOverlapFraction
@@ -9140,7 +11068,45 @@ CostCallbackPair Frame::trySplitCellPhased(
             _realFrame, bestD2, bestD1, daughterOverlapScale, daughterOverlapScale);
         const float daughterOverlap = std::max(d1InD2Overlap, d2InD1Overlap);
 
-        if (daughterOverlap > maxDaughterOverlap) {
+        const bool rejectCu4SiblingRodOverlap =
+            simulationConfig.celluniverse4_enabled &&
+            probConfig
+                .celluniverse4_split_sibling_rod_overlap_gate_enabled &&
+            rawDaughterShapeD1Valid && rawDaughterShapeD2Valid &&
+            cell_refit_guards::rejectSiblingRodOverlap(
+                rawDaughterShapeD1,
+                rawDaughterShapeD2,
+                daughterOverlap,
+                probConfig
+                    .celluniverse4_split_sibling_rod_min_raw_shape_ratio,
+                probConfig
+                    .celluniverse4_split_sibling_rod_max_overlap_fraction);
+        if (rejectCu4SiblingRodOverlap) {
+            std::cout << "[Split Reject CellUniverse4 sibling rod overlap] "
+                      << parentName
+                      << " rawShapeD1=" << rawDaughterShapeD1
+                      << " rawShapeD2=" << rawDaughterShapeD2
+                      << " minRawShape="
+                      << probConfig
+                             .celluniverse4_split_sibling_rod_min_raw_shape_ratio
+                      << " overlapD1InD2=" << d1InD2Overlap
+                      << " overlapD2InD1=" << d2InD1Overlap
+                      << " overlap=" << daughterOverlap
+                      << " maxOverlap="
+                      << probConfig
+                             .celluniverse4_split_sibling_rod_max_overlap_fraction
+                      << " bestIdx=" << bestIdx
+                      << " bestLabel=" << bestLabel
+                      << std::endl;
+            if (advanceCellUniverse4Finalist("daughter_sibling_rod_overlap")) {
+                goto celluniverse4_retry_split_finalist;
+            }
+            restoreLiveParent();
+            return {0.0, noop};
+        }
+
+        if (probConfig.split_daughter_overlap_gate_enabled &&
+            daughterOverlap > maxDaughterOverlap) {
             const float pcaBridgeSoftOverlapMax = std::clamp(
                 probConfig.pca_bridge_soft_daughter_overlap_max, 0.0f, 1.0f);
             const float pcaBridgeFutureOverlapMax = std::clamp(
@@ -9664,10 +11630,35 @@ CostCallbackPair Frame::trySplitCellPhased(
             // metric punished legitimate asymmetric division because the
             // dimmer daughter's edge ≈ gap inflated its ratio. The new
             // metric ignores that side correctly.
-            const float valleyLimit =
+            const float ordinaryValleyLimit =
                 (useCellLumenGateParams && lumenBridgeMaxValleyRatio >= 0.0f)
                     ? lumenBridgeMaxValleyRatio
                     : probConfig.bio_bridge_max_valley_ratio;
+            const bool saturatedSparseHybridPair =
+                bridgeProposalOnly && bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->saturatedSparseHybridPair;
+            const bool saturatedSparseHybridValleyOverride =
+                saturatedSparseHybridPair &&
+                saturatedSparseHybridValleyOverrideEnabled;
+            const float valleyLimit =
+                cell_refit_guards::saturatedSparseHybridValleyLimit(
+                    saturatedSparseHybridPair,
+                    saturatedSparseHybridValleyOverrideEnabled,
+                    ordinaryValleyLimit,
+                    saturatedSparseHybridMaxValleyRatio);
+            if (saturatedSparseHybridValleyOverride) {
+                std::cout << "[CU4 Saturated Sparse Hybrid Valley] "
+                          << parentName
+                          << " stage=final"
+                          << " observed=" << valleyFromBright
+                          << " ordinaryLimit=" << ordinaryValleyLimit
+                          << " activeLimit=" << valleyLimit
+                          << " action="
+                          << (valleyFromBright <= valleyLimit
+                                  ? "allow" : "reject")
+                          << std::endl;
+            }
             const bool bridgeFlat = valleyFromBright > valleyLimit;
             const bool denseFlatFutureRescue =
                 bridgeProposalOnly &&
@@ -9758,6 +11749,8 @@ CostCallbackPair Frame::trySplitCellPhased(
                           << " reason=dense_flat_bridge"
                           << " valleyFromBright=" << valleyFromBright
                           << " valleyLimit=" << valleyLimit
+                          << (saturatedSparseHybridValleyOverride
+                                  ? " valleyOverride=saturated_sparse_hybrid" : "")
                           << " gapDensity=" << gapDensity
                           << " gapBright=" << gapBright
                           << " edge1Bright=" << edge1Bright
@@ -10658,12 +12651,12 @@ CostCallbackPair Frame::trySplitCellPhased(
         const auto parentBrightnessStats = parent.measureBrightnessStats(_realFrame);
         const auto d1BrightnessStats = bestD1.measureBrightnessStats(_realFrame);
         const auto d2BrightnessStats = bestD2.measureBrightnessStats(_realFrame);
-        const float parentBackground = backgroundAt(cv::Point3f(
+        const float parentBackground = foregroundReferenceAt(cv::Point3f(
             parent.getX(), parent.getY(), parent.getZ()));
         const float localBackground = std::max(
-            backgroundAt(cv::Point3f(
+            foregroundReferenceAt(cv::Point3f(
                 bestD1.getX(), bestD1.getY(), bestD1.getZ())),
-            backgroundAt(cv::Point3f(
+            foregroundReferenceAt(cv::Point3f(
                 bestD2.getX(), bestD2.getY(), bestD2.getZ())));
         const float parentSignal =
             std::max(0.0f,
@@ -11572,9 +13565,32 @@ CostCallbackPair Frame::trySplitCellPhased(
     // at the top of this function), or full-image L2 otherwise.
     // Both baseline and candidate were measured on the same voxel set,
     // so this is an apples-to-apples comparison.
-    const double costDiff = bestTotal - baselineTotal;
+    double ignoredSiblingPairOverlapCost = 0.0;
+    if (probConfig.split_acceptance_ignore_sibling_pair_overlap_cost &&
+        bestCells.size() >= 2) {
+        ignoredSiblingPairOverlapCost = pairOverlapPenalty(
+            bestCells[bestCells.size() - 2],
+            bestCells[bestCells.size() - 1],
+            probConfig.overlap_penalty_weight);
+    }
+    const double acceptanceBestTotal =
+        bestTotal - ignoredSiblingPairOverlapCost;
+    const double costDiff = acceptanceBestTotal - baselineTotal;
     const double imageCostDiff = bestImageCost - baselineImageCost;
-    const double overlapCostDiff = (bestTotal - bestImageCost) - (baselineTotal - baselineImageCost);
+    const double brightnessCostDiff =
+        bestBrightnessCost - baselineBrightnessCost;
+    const double overlapCostDiff =
+        (acceptanceBestTotal - bestCompositeCost) -
+        (baselineTotal - baselineCompositeCost);
+    if (probConfig.split_acceptance_ignore_sibling_pair_overlap_cost) {
+        std::cout << "[Split Acceptance Sibling Overlap Cost] "
+                  << parentName
+                  << " ignored=" << ignoredSiblingPairOverlapCost
+                  << " rawBestTotal=" << bestTotal
+                  << " acceptanceBestTotal=" << acceptanceBestTotal
+                  << " action=ignore_sibling_pair_only"
+                  << std::endl;
+    }
 
     // Adaptive split cost threshold: the larger of:
     // (1) the fixed split_cost from config
@@ -11583,12 +13599,21 @@ CostCallbackPair Frame::trySplitCellPhased(
     // from passing the fixed threshold while requiring the same fractional
     // improvement from bright/large cells.
     const bool useCellLumenCostGate = useCellLumenGateParams;
+    const bool useProposalCostOverride =
+        !useCellLumenCostGate && bridgeProposal != nullptr &&
+        bridgeProposal->currentFrameLocalOnly &&
+        bridgeProposal->costImprovementThresholdOverride >= 0.0f;
     const double activeSplitCost = useCellLumenCostGate
-                                       ? static_cast<double>(std::max(0.0f, lumenSplitCost))
-                                       : static_cast<double>(probConfig.split_cost);
+        ? static_cast<double>(std::max(0.0f, lumenSplitCost))
+        : (useProposalCostOverride
+               ? static_cast<double>(
+                     bridgeProposal->costImprovementThresholdOverride)
+               : static_cast<double>(probConfig.split_cost));
     const double activeSplitCostFraction = useCellLumenCostGate
-                                               ? static_cast<double>(std::max(0.0f, lumenSplitCostFraction))
-                                               : static_cast<double>(probConfig.split_cost_fraction);
+        ? static_cast<double>(std::max(0.0f, lumenSplitCostFraction))
+        : (useProposalCostOverride
+               ? 0.0
+               : static_cast<double>(probConfig.split_cost_fraction));
     const double adaptiveThreshold = std::max(
         activeSplitCost,
         activeSplitCostFraction * baselineImageCost);
@@ -11642,6 +13667,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " finalAxisLen=" << finalAxisLen
                   << " totalDiff=" << costDiff
                   << " imageDiff=" << imageCostDiff
+                  << " brightnessDiff=" << brightnessCostDiff
                   << " overlapDiff=" << overlapCostDiff
                   << " weakImageGainLimit=" << parentAnchorWeakImageGain
                   << " d1=(" << bestD1Pos.x << "," << bestD1Pos.y << "," << bestD1Pos.z << ")"
@@ -11675,6 +13701,7 @@ CostCallbackPair Frame::trySplitCellPhased(
                   << " finalAxisLen=" << finalAxisLen
                   << " totalDiff=" << costDiff
                   << " imageDiff=" << imageCostDiff
+                  << " brightnessDiff=" << brightnessCostDiff
                   << " overlapDiff=" << overlapCostDiff
                   << " overlapFraction="
                   << (baselineImageCost > 1e-9
@@ -14885,12 +16912,13 @@ CostCallbackPair Frame::trySplitCellPhased(
                              bestCells = std::move(bestCells),
                              bestSynth = std::move(bestSynth),
                              bestPerSlice = std::move(bestPerSlice),
-                             bestImageCost,
+                             bestCompositeCost,
                              savedCellsCopy = std::move(savedCellsCopy),
                              savedSynthCopy = std::move(savedSynthCopy),
                              savedPerSliceCopy = std::move(savedPerSliceCopy),
                              savedCostCopy,
                              parentName, costDiff = acceptedCostDiff,
+                             imageCostDiff, brightnessCostDiff,
                              acceptedD1Pos, acceptedD2Pos,
                              acceptedD1R, acceptedD2R, acceptedSeed1, acceptedSeed2,
                              acceptedDrift1, acceptedDrift2, acceptedLabel,
@@ -14916,7 +16944,7 @@ CostCallbackPair Frame::trySplitCellPhased(
             this->cells = std::move(bestCells);
             this->_synthFrame = std::move(bestSynth);
             this->_currentCostPerSlice = std::move(bestPerSlice);
-            this->_currentCost = bestImageCost;
+            this->_currentCost = bestCompositeCost;
             // Install snap anchors at the accepted daughter positions.
             // Use the daughter max-radius × bbox_margin_scale for the bbox.
             const float d0MaxR = std::max({acceptedD1R.x, acceptedD1R.y, acceptedD1R.z});
@@ -14935,6 +16963,8 @@ CostCallbackPair Frame::trySplitCellPhased(
             }
             std::cout << "[Split Accepted] " << parentName
                       << " costDiff=" << costDiff
+                      << " imageDiff=" << imageCostDiff
+                      << " brightnessDiff=" << brightnessCostDiff
                       << " bestLabel=" << acceptedLabel
                       << " seed1=(" << acceptedSeed1.x << "," << acceptedSeed1.y << "," << acceptedSeed1.z << ")"
                       << " d1=(" << acceptedD1Pos.x << "," << acceptedD1Pos.y << "," << acceptedD1Pos.z << ")"

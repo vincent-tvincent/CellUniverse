@@ -335,6 +335,78 @@ public:
     int random_iterations_per_cell = -1;
     bool celluniverse2_enabled = false;
     bool celluniverse3_enabled = false;
+    // CellUniverse 4.0 keeps the traditional preprocessing, background,
+    // split validation, and final PCA stages, but replaces the sequential
+    // continuation search with an immutable candidate batch.
+    bool celluniverse4_enabled = false;
+    // CU4-only final-PCA support policy.  Keep only bright support connected
+    // to the selected continuation evidence, and optionally trim that support
+    // to a frozen, anchor-centred ellipsoid before component labelling.  Split
+    // placement deliberately keeps the legacy complete support so this shape
+    // cleanup cannot advance or suppress a biological division.
+    bool celluniverse4_component_filter_enabled = false;
+    int celluniverse4_component_connectivity_radius = 1;
+    int celluniverse4_component_min_voxels = 20;
+    float celluniverse4_component_companion_min_fraction = 0.60f;
+    int celluniverse4_component_max_components = 2;
+    // 0 disables the anchor-relative trim.  Values >= 1 retain support inside
+    // this multiple of the frozen incoming ellipsoid around the selected CU4
+    // center.  This rejects a distant lobe joined by a thin noisy bridge while
+    // still allowing ordinary within-cell motion and halo.
+    float celluniverse4_pca_component_anchor_radius_scale = 0.0f;
+    // When CU4 has retained an anchored connected component, a percentile
+    // cutoff used only to cap its volume must not be reinterpreted as noise.
+    // The physical/noise cutoff remains the SNR decision input.
+    bool celluniverse4_pca_volume_cap_snr_decoupling_enabled = false;
+    // A coherent anchored component can remain fit-worthy even when a noisy
+    // shell makes the conservative local-SNR ratio fail.  This CU4-only
+    // rescue requires both substantial retained support and a component that
+    // reaches the frozen cell anchor; compiled defaults remain disabled.
+    bool celluniverse4_pca_component_low_snr_rescue_enabled = false;
+    float celluniverse4_pca_component_low_snr_rescue_min_support_fraction = 0.75f;
+    float celluniverse4_pca_component_low_snr_rescue_max_anchor_distance = 1.50f;
+    // CU4-only post-fit photometric regularizer.  It relates foreground
+    // contrast to exact rasterized support rather than analytic volume: when
+    // support grows, contrast is expected to fall (and vice versa), subject
+    // to a log-space error margin and a bounded correction step.  Compiled
+    // defaults stay off so traditional, CU3, and CellLumen are unchanged.
+    bool celluniverse4_postfit_brightness_volume_reconcile_enabled = false;
+    float celluniverse4_postfit_brightness_volume_inverse_volume_exponent = 1.0f;
+    float celluniverse4_postfit_brightness_volume_log_deadband = 0.14f;
+    float celluniverse4_postfit_brightness_volume_strength = 0.50f;
+    float celluniverse4_postfit_brightness_volume_min_anchor_contrast = 0.05f;
+    // Zero means no step clamp; positive values bound the relative contrast
+    // correction applied in one frame.
+    float celluniverse4_postfit_brightness_volume_max_contrast_step_fraction = 0.20f;
+    bool celluniverse4_postfit_brightness_volume_group_newborn_siblings = true;
+    bool celluniverse4_postfit_brightness_volume_skip_resume_first_frame = true;
+    // Optional bounded geometry review after all ordinary CU4 placement and
+    // shape fitting. It considers only bright cells, grows radii uniformly,
+    // and accepts a proposal only when image cost and anchored bright-
+    // component capture both improve.
+    bool celluniverse4_postfit_bright_cell_size_review_enabled = false;
+    float celluniverse4_postfit_bright_cell_size_review_min_brightness = 0.53f;
+    int celluniverse4_postfit_bright_cell_size_review_attempts = 3;
+    float celluniverse4_postfit_bright_cell_size_review_radius_step_fraction = 0.04f;
+    float celluniverse4_postfit_bright_cell_size_review_max_radius_scale = 1.15f;
+    float celluniverse4_postfit_bright_cell_size_review_min_cost_improvement = 0.0f;
+    float celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction = 0.45f;
+    // Use the fitted cell brightness as the component threshold, allowing a
+    // small relative tolerance below it for real-image/model mismatch.
+    bool celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled = false;
+    float celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance = 0.10f;
+    // Stop flood fill as soon as it reaches another fitted cell's surface.
+    bool celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled = false;
+    // Grow axes independently toward the component's local-coordinate extent.
+    bool celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled = false;
+    float celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile = 0.95f;
+    float celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction = 0.50f;
+    int celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius = 1;
+    int celluniverse4_postfit_bright_cell_size_review_component_min_voxels = 50;
+    int celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels = 20;
+    float celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction = 0.01f;
+    float celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale = 2.5f;
+    bool celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled = true;
     int celluniverse3_window_radius = 3;
     int celluniverse3_window_overlap_radius = 2;
     float celluniverse3_window_background_percentile = 95.0f;
@@ -491,6 +563,14 @@ public:
     float contrast_penalty_weight = 1.0f;
     float contrast_eps = 1e-6f;
     bool frame_intensity_normalization_enabled = true;
+    // The initial.csv two-region tracker uses a distinct switch so zero keeps
+    // its literal meaning (freeze) instead of ambiguously meaning unlimited.
+    bool initial_csv_background_intensity_step_limit_enabled = true;
+    float initial_csv_background_maximum_intensity_step = 0.05f;
+    // Optional experimental ordering for N2V2 input:
+    // raw TIFF -> frame percentile normalization -> N2V2.
+    // Disabled by default to preserve the established raw-TIFF -> N2V2 path.
+    bool frame_intensity_normalization_before_n2v2_enabled = false;
     bool frame_intensity_percentile_exclude_zeros = false;
     float frame_intensity_scale_low_percentile = 0.01f;
     float frame_intensity_scale_high_percentile = 0.995f;
@@ -662,6 +742,22 @@ public:
     // full asymK applies. Eliminates double-boundary bias where two
     // daughters' boundary artifacts cost more than one parent's.
     float asymmetric_cost_threshold = 0.03f;
+
+    // Experimental replacement for the production bbox residual. When
+    // enabled, the synthetic bbox is first matched to the microscope PSF with
+    // a frozen isotropic Gaussian, then scored with symmetric L2. An
+    // independent brightness prior prevents a geometrically wrong candidate
+    // from winning merely by becoming dimmer. The prior is captured once at
+    // frame entry; it is never estimated from the candidate being scored.
+    //
+    // The PSF/brightness objective is the production default. Set the switch
+    // explicitly false to reproduce the legacy asymmetric-L2 path.
+    bool psf_brightness_cost_enabled = true;
+    float psf_brightness_cost_sigma = 1.0f;
+    float psf_brightness_prior_weight = 0.1f;
+    float psf_brightness_prior_tolerance = 0.005f;
+    float psf_brightness_prior_spread = 0.0f;
+    float psf_brightness_contrast_floor = 0.05f;
 
     // Static-Voronoi cost territory (2026-04-21). When true, each pixel in
     // a cell's bbox contributes to that cell's image cost only if the pixel
@@ -896,6 +992,149 @@ public:
         if (node["random_iterations_per_cell"]) random_iterations_per_cell = node["random_iterations_per_cell"].as<int>();
         if (node["celluniverse2_enabled"]) celluniverse2_enabled = node["celluniverse2_enabled"].as<bool>();
         if (node["celluniverse3_enabled"]) celluniverse3_enabled = node["celluniverse3_enabled"].as<bool>();
+        if (node["celluniverse4_enabled"]) celluniverse4_enabled = node["celluniverse4_enabled"].as<bool>();
+        if (node["celluniverse4_component_filter_enabled"]) celluniverse4_component_filter_enabled = node["celluniverse4_component_filter_enabled"].as<bool>();
+        if (node["celluniverse4_component_connectivity_radius"]) celluniverse4_component_connectivity_radius = node["celluniverse4_component_connectivity_radius"].as<int>();
+        if (node["celluniverse4_component_min_voxels"]) celluniverse4_component_min_voxels = node["celluniverse4_component_min_voxels"].as<int>();
+        if (node["celluniverse4_component_companion_min_fraction"]) celluniverse4_component_companion_min_fraction = node["celluniverse4_component_companion_min_fraction"].as<float>();
+        if (node["celluniverse4_component_max_components"]) celluniverse4_component_max_components = node["celluniverse4_component_max_components"].as<int>();
+        if (node["celluniverse4_pca_component_anchor_radius_scale"]) celluniverse4_pca_component_anchor_radius_scale = node["celluniverse4_pca_component_anchor_radius_scale"].as<float>();
+        if (node["celluniverse4_pca_volume_cap_snr_decoupling_enabled"]) celluniverse4_pca_volume_cap_snr_decoupling_enabled = node["celluniverse4_pca_volume_cap_snr_decoupling_enabled"].as<bool>();
+        if (node["celluniverse4_pca_component_low_snr_rescue_enabled"]) celluniverse4_pca_component_low_snr_rescue_enabled = node["celluniverse4_pca_component_low_snr_rescue_enabled"].as<bool>();
+        if (node["celluniverse4_pca_component_low_snr_rescue_min_support_fraction"]) celluniverse4_pca_component_low_snr_rescue_min_support_fraction = node["celluniverse4_pca_component_low_snr_rescue_min_support_fraction"].as<float>();
+        if (node["celluniverse4_pca_component_low_snr_rescue_max_anchor_distance"]) celluniverse4_pca_component_low_snr_rescue_max_anchor_distance = node["celluniverse4_pca_component_low_snr_rescue_max_anchor_distance"].as<float>();
+        if (node["celluniverse4_postfit_brightness_volume_reconcile_enabled"]) celluniverse4_postfit_brightness_volume_reconcile_enabled = node["celluniverse4_postfit_brightness_volume_reconcile_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_brightness_volume_inverse_volume_exponent"]) celluniverse4_postfit_brightness_volume_inverse_volume_exponent = node["celluniverse4_postfit_brightness_volume_inverse_volume_exponent"].as<float>();
+        if (node["celluniverse4_postfit_brightness_volume_log_deadband"]) celluniverse4_postfit_brightness_volume_log_deadband = node["celluniverse4_postfit_brightness_volume_log_deadband"].as<float>();
+        if (node["celluniverse4_postfit_brightness_volume_strength"]) celluniverse4_postfit_brightness_volume_strength = node["celluniverse4_postfit_brightness_volume_strength"].as<float>();
+        if (node["celluniverse4_postfit_brightness_volume_min_anchor_contrast"]) celluniverse4_postfit_brightness_volume_min_anchor_contrast = node["celluniverse4_postfit_brightness_volume_min_anchor_contrast"].as<float>();
+        if (node["celluniverse4_postfit_brightness_volume_max_contrast_step_fraction"]) celluniverse4_postfit_brightness_volume_max_contrast_step_fraction = node["celluniverse4_postfit_brightness_volume_max_contrast_step_fraction"].as<float>();
+        if (node["celluniverse4_postfit_brightness_volume_group_newborn_siblings"]) celluniverse4_postfit_brightness_volume_group_newborn_siblings = node["celluniverse4_postfit_brightness_volume_group_newborn_siblings"].as<bool>();
+        if (node["celluniverse4_postfit_brightness_volume_skip_resume_first_frame"]) celluniverse4_postfit_brightness_volume_skip_resume_first_frame = node["celluniverse4_postfit_brightness_volume_skip_resume_first_frame"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_enabled"]) celluniverse4_postfit_bright_cell_size_review_enabled = node["celluniverse4_postfit_bright_cell_size_review_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_min_brightness"]) celluniverse4_postfit_bright_cell_size_review_min_brightness = node["celluniverse4_postfit_bright_cell_size_review_min_brightness"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_attempts"]) celluniverse4_postfit_bright_cell_size_review_attempts = node["celluniverse4_postfit_bright_cell_size_review_attempts"].as<int>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_radius_step_fraction"]) celluniverse4_postfit_bright_cell_size_review_radius_step_fraction = node["celluniverse4_postfit_bright_cell_size_review_radius_step_fraction"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_max_radius_scale"]) celluniverse4_postfit_bright_cell_size_review_max_radius_scale = node["celluniverse4_postfit_bright_cell_size_review_max_radius_scale"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_min_cost_improvement"]) celluniverse4_postfit_bright_cell_size_review_min_cost_improvement = node["celluniverse4_postfit_bright_cell_size_review_min_cost_improvement"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction"]) celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction = node["celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled"]) celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled = node["celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance"]) celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance = node["celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled"]) celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled = node["celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled"]) celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled = node["celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile"]) celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile = node["celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction"]) celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction = node["celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius"]) celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius = node["celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius"].as<int>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_component_min_voxels"]) celluniverse4_postfit_bright_cell_size_review_component_min_voxels = node["celluniverse4_postfit_bright_cell_size_review_component_min_voxels"].as<int>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels"]) celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels = node["celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels"].as<int>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction"]) celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction = node["celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale"]) celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale = node["celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale"].as<float>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled"]) celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled = node["celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled"].as<bool>();
+        if (celluniverse4_component_connectivity_radius < 1 ||
+            celluniverse4_component_connectivity_radius > 3) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_component_connectivity_radius must be in [1, 3]");
+        }
+        if (celluniverse4_component_min_voxels < 1) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_component_min_voxels must be positive");
+        }
+        if (!std::isfinite(celluniverse4_component_companion_min_fraction) ||
+            celluniverse4_component_companion_min_fraction < 0.0f ||
+            celluniverse4_component_companion_min_fraction > 1.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_component_companion_min_fraction must be in [0, 1]");
+        }
+        if (celluniverse4_component_max_components < 1) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_component_max_components must be positive");
+        }
+        if (!std::isfinite(celluniverse4_pca_component_anchor_radius_scale) ||
+            (celluniverse4_pca_component_anchor_radius_scale > 0.0f &&
+             celluniverse4_pca_component_anchor_radius_scale < 1.0f)) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_pca_component_anchor_radius_scale must be 0 or at least 1");
+        }
+        if (!std::isfinite(
+                celluniverse4_pca_component_low_snr_rescue_min_support_fraction) ||
+            celluniverse4_pca_component_low_snr_rescue_min_support_fraction < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_pca_component_low_snr_rescue_min_support_fraction must be finite and nonnegative");
+        }
+        if (!std::isfinite(
+                celluniverse4_pca_component_low_snr_rescue_max_anchor_distance) ||
+            celluniverse4_pca_component_low_snr_rescue_max_anchor_distance < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_pca_component_low_snr_rescue_max_anchor_distance must be finite and nonnegative");
+        }
+        if (!std::isfinite(celluniverse4_postfit_brightness_volume_inverse_volume_exponent) ||
+            celluniverse4_postfit_brightness_volume_inverse_volume_exponent < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_brightness_volume_inverse_volume_exponent must be finite and nonnegative");
+        }
+        if (!std::isfinite(celluniverse4_postfit_brightness_volume_log_deadband) ||
+            celluniverse4_postfit_brightness_volume_log_deadband < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_brightness_volume_log_deadband must be finite and nonnegative");
+        }
+        if (!std::isfinite(celluniverse4_postfit_brightness_volume_strength) ||
+            celluniverse4_postfit_brightness_volume_strength < 0.0f ||
+            celluniverse4_postfit_brightness_volume_strength > 1.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_brightness_volume_strength must be in [0, 1]");
+        }
+        if (!std::isfinite(celluniverse4_postfit_brightness_volume_min_anchor_contrast) ||
+            celluniverse4_postfit_brightness_volume_min_anchor_contrast < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_brightness_volume_min_anchor_contrast must be finite and nonnegative");
+        }
+        if (!std::isfinite(celluniverse4_postfit_brightness_volume_max_contrast_step_fraction) ||
+            celluniverse4_postfit_brightness_volume_max_contrast_step_fraction < 0.0f ||
+            celluniverse4_postfit_brightness_volume_max_contrast_step_fraction > 1.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_brightness_volume_max_contrast_step_fraction must be in [0, 1]");
+        }
+        if (!std::isfinite(celluniverse4_postfit_bright_cell_size_review_min_brightness) ||
+            celluniverse4_postfit_bright_cell_size_review_min_brightness < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_bright_cell_size_review_min_brightness must be finite and nonnegative");
+        }
+        if (celluniverse4_postfit_bright_cell_size_review_attempts < 1) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_postfit_bright_cell_size_review_attempts must be positive");
+        }
+        if (!std::isfinite(celluniverse4_postfit_bright_cell_size_review_radius_step_fraction) ||
+            celluniverse4_postfit_bright_cell_size_review_radius_step_fraction <= 0.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_max_radius_scale) ||
+            celluniverse4_postfit_bright_cell_size_review_max_radius_scale <= 1.0f) {
+            throw std::invalid_argument(
+                "simulation bright-cell size review radius step must be positive and maximum radius scale must exceed 1");
+        }
+        if (!std::isfinite(celluniverse4_postfit_bright_cell_size_review_min_cost_improvement) ||
+            celluniverse4_postfit_bright_cell_size_review_min_cost_improvement < 0.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction) ||
+            celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction < 0.0f ||
+            celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction > 1.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance) ||
+            celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance < 0.0f ||
+            celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance >= 1.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile) ||
+            celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile <= 0.0f ||
+            celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile > 1.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction) ||
+            celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction <= 0.0f ||
+            celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction > 1.0f ||
+            celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius < 1 ||
+            celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius > 3 ||
+            celluniverse4_postfit_bright_cell_size_review_component_min_voxels < 1 ||
+            celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels < 0 ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction) ||
+            celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction < 0.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale) ||
+            celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale <= 0.0f) {
+            throw std::invalid_argument(
+                "simulation bright-cell size review component and cost parameters are invalid");
+        }
         if (node["celluniverse3_window_radius"]) celluniverse3_window_radius = node["celluniverse3_window_radius"].as<int>();
         if (node["celluniverse3_window_overlap_radius"]) celluniverse3_window_overlap_radius = node["celluniverse3_window_overlap_radius"].as<int>();
         if (node["celluniverse3_window_background_percentile"]) celluniverse3_window_background_percentile = node["celluniverse3_window_background_percentile"].as<float>();
@@ -1047,6 +1286,14 @@ public:
         if (node["contrast_penalty_weight"]) contrast_penalty_weight = node["contrast_penalty_weight"].as<float>();
         if (node["contrast_eps"]) contrast_eps = node["contrast_eps"].as<float>();
         if (node["frame_intensity_normalization_enabled"]) frame_intensity_normalization_enabled = node["frame_intensity_normalization_enabled"].as<bool>();
+        if (node["initial_csv_background_intensity_step_limit_enabled"]) initial_csv_background_intensity_step_limit_enabled = node["initial_csv_background_intensity_step_limit_enabled"].as<bool>();
+        if (node["initial_csv_background_maximum_intensity_step"]) initial_csv_background_maximum_intensity_step = node["initial_csv_background_maximum_intensity_step"].as<float>();
+        if (!std::isfinite(initial_csv_background_maximum_intensity_step) ||
+            initial_csv_background_maximum_intensity_step < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.initial_csv_background_maximum_intensity_step must be finite and nonnegative");
+        }
+        if (node["frame_intensity_normalization_before_n2v2_enabled"]) frame_intensity_normalization_before_n2v2_enabled = node["frame_intensity_normalization_before_n2v2_enabled"].as<bool>();
         if (node["frame_intensity_percentile_exclude_zeros"]) frame_intensity_percentile_exclude_zeros = node["frame_intensity_percentile_exclude_zeros"].as<bool>();
         if (node["frame_intensity_scale_low_percentile"]) frame_intensity_scale_low_percentile = node["frame_intensity_scale_low_percentile"].as<float>();
         if (node["frame_intensity_scale_high_percentile"]) frame_intensity_scale_high_percentile = node["frame_intensity_scale_high_percentile"].as<float>();
@@ -1193,6 +1440,12 @@ public:
         if (node["signal_map_guide_strength"]) signal_map_guide_strength = node["signal_map_guide_strength"].as<float>();
         if (node["asymmetric_cost_weight"]) asymmetric_cost_weight = node["asymmetric_cost_weight"].as<float>();
         if (node["asymmetric_cost_threshold"]) asymmetric_cost_threshold = node["asymmetric_cost_threshold"].as<float>();
+        if (node["psf_brightness_cost_enabled"]) psf_brightness_cost_enabled = node["psf_brightness_cost_enabled"].as<bool>();
+        if (node["psf_brightness_cost_sigma"]) psf_brightness_cost_sigma = node["psf_brightness_cost_sigma"].as<float>();
+        if (node["psf_brightness_prior_weight"]) psf_brightness_prior_weight = node["psf_brightness_prior_weight"].as<float>();
+        if (node["psf_brightness_prior_tolerance"]) psf_brightness_prior_tolerance = node["psf_brightness_prior_tolerance"].as<float>();
+        if (node["psf_brightness_prior_spread"]) psf_brightness_prior_spread = node["psf_brightness_prior_spread"].as<float>();
+        if (node["psf_brightness_contrast_floor"]) psf_brightness_contrast_floor = node["psf_brightness_contrast_floor"].as<float>();
         if (node["voronoi_cost_enabled"]) voronoi_cost_enabled = node["voronoi_cost_enabled"].as<bool>();
         if (node["voronoi_bleed_penalty_enabled"]) voronoi_bleed_penalty_enabled = node["voronoi_bleed_penalty_enabled"].as<bool>();
         if (node["voronoi_bleed_penalty_weight"]) voronoi_bleed_penalty_weight = node["voronoi_bleed_penalty_weight"].as<float>();
@@ -1216,6 +1469,30 @@ public:
             initial_z_space != "raw" &&
             initial_z_space != "scaled") {
             throw std::invalid_argument("simulation.initial_z_space must be one of: auto, raw, scaled");
+        }
+        auto requireFiniteNonnegative = [](float value, const char *name) {
+            if (!std::isfinite(value) || value < 0.0f) {
+                throw std::invalid_argument(
+                    std::string("simulation.") + name +
+                    " must be finite and nonnegative");
+            }
+        };
+        requireFiniteNonnegative(psf_brightness_cost_sigma,
+                                 "psf_brightness_cost_sigma");
+        if (psf_brightness_cost_sigma > 16.0f) {
+            throw std::invalid_argument(
+                "simulation.psf_brightness_cost_sigma must be at most 16");
+        }
+        requireFiniteNonnegative(psf_brightness_prior_weight,
+                                 "psf_brightness_prior_weight");
+        requireFiniteNonnegative(psf_brightness_prior_tolerance,
+                                 "psf_brightness_prior_tolerance");
+        requireFiniteNonnegative(psf_brightness_prior_spread,
+                                 "psf_brightness_prior_spread");
+        if (!std::isfinite(psf_brightness_contrast_floor) ||
+            psf_brightness_contrast_floor <= 0.0f) {
+            throw std::invalid_argument(
+                "simulation.psf_brightness_contrast_floor must be finite and positive");
         }
         validatePreprocessingConfig();
         light_preprocess_gamma = std::max(0.01f, light_preprocess_gamma);
@@ -1390,6 +1667,44 @@ public:
         std::cout << "random_iterations_per_cell: " << random_iterations_per_cell << '\n';
         std::cout << "celluniverse2_enabled: " << celluniverse2_enabled << '\n';
         std::cout << "celluniverse3_enabled: " << celluniverse3_enabled << '\n';
+        std::cout << "celluniverse4_enabled: " << celluniverse4_enabled << '\n';
+        std::cout << "celluniverse4_component_filter_enabled: " << celluniverse4_component_filter_enabled << '\n';
+        std::cout << "celluniverse4_component_connectivity_radius: " << celluniverse4_component_connectivity_radius << '\n';
+        std::cout << "celluniverse4_component_min_voxels: " << celluniverse4_component_min_voxels << '\n';
+        std::cout << "celluniverse4_component_companion_min_fraction: " << celluniverse4_component_companion_min_fraction << '\n';
+        std::cout << "celluniverse4_component_max_components: " << celluniverse4_component_max_components << '\n';
+        std::cout << "celluniverse4_pca_component_anchor_radius_scale: " << celluniverse4_pca_component_anchor_radius_scale << '\n';
+        std::cout << "celluniverse4_pca_volume_cap_snr_decoupling_enabled: " << celluniverse4_pca_volume_cap_snr_decoupling_enabled << '\n';
+        std::cout << "celluniverse4_pca_component_low_snr_rescue_enabled: " << celluniverse4_pca_component_low_snr_rescue_enabled << '\n';
+        std::cout << "celluniverse4_pca_component_low_snr_rescue_min_support_fraction: " << celluniverse4_pca_component_low_snr_rescue_min_support_fraction << '\n';
+        std::cout << "celluniverse4_pca_component_low_snr_rescue_max_anchor_distance: " << celluniverse4_pca_component_low_snr_rescue_max_anchor_distance << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_reconcile_enabled: " << celluniverse4_postfit_brightness_volume_reconcile_enabled << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_inverse_volume_exponent: " << celluniverse4_postfit_brightness_volume_inverse_volume_exponent << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_log_deadband: " << celluniverse4_postfit_brightness_volume_log_deadband << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_strength: " << celluniverse4_postfit_brightness_volume_strength << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_min_anchor_contrast: " << celluniverse4_postfit_brightness_volume_min_anchor_contrast << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_max_contrast_step_fraction: " << celluniverse4_postfit_brightness_volume_max_contrast_step_fraction << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_group_newborn_siblings: " << celluniverse4_postfit_brightness_volume_group_newborn_siblings << '\n';
+        std::cout << "celluniverse4_postfit_brightness_volume_skip_resume_first_frame: " << celluniverse4_postfit_brightness_volume_skip_resume_first_frame << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_enabled: " << celluniverse4_postfit_bright_cell_size_review_enabled << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_min_brightness: " << celluniverse4_postfit_bright_cell_size_review_min_brightness << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_attempts: " << celluniverse4_postfit_bright_cell_size_review_attempts << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_radius_step_fraction: " << celluniverse4_postfit_bright_cell_size_review_radius_step_fraction << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_max_radius_scale: " << celluniverse4_postfit_bright_cell_size_review_max_radius_scale << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_min_cost_improvement: " << celluniverse4_postfit_bright_cell_size_review_min_cost_improvement << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction: " << celluniverse4_postfit_bright_cell_size_review_component_contrast_fraction << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled: " << celluniverse4_postfit_bright_cell_size_review_use_cell_brightness_threshold_enabled << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance: " << celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled: " << celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled: " << celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile: " << celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction: " << celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius: " << celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_component_min_voxels: " << celluniverse4_postfit_bright_cell_size_review_component_min_voxels << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels: " << celluniverse4_postfit_bright_cell_size_review_component_min_gain_voxels << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction: " << celluniverse4_postfit_bright_cell_size_review_component_min_gain_fraction << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale: " << celluniverse4_postfit_bright_cell_size_review_bbox_margin_scale << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled: " << celluniverse4_postfit_bright_cell_size_review_coupled_brightness_enabled << '\n';
         std::cout << "celluniverse3_window_radius: " << celluniverse3_window_radius << '\n';
         std::cout << "celluniverse3_window_overlap_radius: " << celluniverse3_window_overlap_radius << '\n';
         std::cout << "celluniverse3_window_background_percentile: " << celluniverse3_window_background_percentile << '\n';
@@ -1539,6 +1854,9 @@ public:
         std::cout << "contrast_penalty_weight: " << contrast_penalty_weight << '\n';
         std::cout << "contrast_eps: " << contrast_eps << '\n';
         std::cout << "frame_intensity_normalization_enabled: " << frame_intensity_normalization_enabled << '\n';
+        std::cout << "initial_csv_background_intensity_step_limit_enabled: " << initial_csv_background_intensity_step_limit_enabled << '\n';
+        std::cout << "initial_csv_background_maximum_intensity_step: " << initial_csv_background_maximum_intensity_step << '\n';
+        std::cout << "frame_intensity_normalization_before_n2v2_enabled: " << frame_intensity_normalization_before_n2v2_enabled << '\n';
         std::cout << "frame_intensity_percentile_exclude_zeros: " << frame_intensity_percentile_exclude_zeros << '\n';
         std::cout << "frame_intensity_scale_low_percentile: " << frame_intensity_scale_low_percentile << '\n';
         std::cout << "frame_intensity_scale_high_percentile: " << frame_intensity_scale_high_percentile << '\n';
@@ -1676,6 +1994,14 @@ public:
         std::cout << "signal_map_perturb_guidance_enabled: " << signal_map_perturb_guidance_enabled << '\n';
         std::cout << "signal_map_cell_radius_scale: " << signal_map_cell_radius_scale << '\n';
         std::cout << "signal_map_direction_probability_boost: " << signal_map_direction_probability_boost << '\n';
+        std::cout << "asymmetric_cost_weight: " << asymmetric_cost_weight << '\n';
+        std::cout << "asymmetric_cost_threshold: " << asymmetric_cost_threshold << '\n';
+        std::cout << "psf_brightness_cost_enabled: " << psf_brightness_cost_enabled << '\n';
+        std::cout << "psf_brightness_cost_sigma: " << psf_brightness_cost_sigma << '\n';
+        std::cout << "psf_brightness_prior_weight: " << psf_brightness_prior_weight << '\n';
+        std::cout << "psf_brightness_prior_tolerance: " << psf_brightness_prior_tolerance << '\n';
+        std::cout << "psf_brightness_prior_spread: " << psf_brightness_prior_spread << '\n';
+        std::cout << "psf_brightness_contrast_floor: " << psf_brightness_contrast_floor << '\n';
         std::cout << "parallel_threads: " << parallel_threads << '\n';
         std::cout << "parallel_min_slices: " << parallel_min_slices << '\n';
         std::cout << "initial_z_space: " << initial_z_space << '\n';
@@ -1869,11 +2195,54 @@ public:
     float split_daughter_axis_parallel_angle_degrees = 12.0f;
     float split_daughter_axis_interaction_penalty_fraction = 0.35f;
     bool split_bio_ignore_trash_neighbors_enabled = false;
+    // Optional hard post-refit gate on the actual daughter-center separation
+    // direction. This is distinct from split_axis_alignment_*, which compares
+    // the daughters' fitted shape axes against the parent shape axis.
+    bool split_separation_axis_alignment_gate_enabled = false;
+    float split_separation_axis_max_angle_degrees = 30.0f;
+    // CellUniverse 4 split search must preserve representation from every
+    // approved axis family when the global candidate budget is small.  The
+    // remaining switches make the existing hard geometry limits participate
+    // in finalist selection, measure the final separation against the winning
+    // proposal axis instead of a stale parent axis, and try the next bounded
+    // finalist if the optional final refit violates those limits. They are
+    // consulted only when simulation.celluniverse4_enabled is true.
+    bool celluniverse4_split_candidate_family_reserve_enabled = true;
+    bool celluniverse4_split_candidate_geometry_prefilter_enabled = true;
+    bool celluniverse4_split_use_winner_seed_axis_gate_enabled = true;
+    bool celluniverse4_split_finalist_retry_enabled = true;
+    int celluniverse4_split_finalist_retry_limit = 4;
+    // Reject a CU4 finalist only when both unclamped daughter PCA fits are
+    // rod-like and their exact rasterized ellipsoids overlap deeply.  The
+    // conjunction preserves ordinary anisotropic biological divisions.
+    bool celluniverse4_split_sibling_rod_overlap_gate_enabled = false;
+    float celluniverse4_split_sibling_rod_min_raw_shape_ratio = 1.80f;
+    float celluniverse4_split_sibling_rod_max_overlap_fraction = 0.07f;
+    // Common newborn-daughter split cooldown for every pipeline. Negative
+    // keeps the historical behavior; mode-specific cooldowns can still add a
+    // stricter floor.
+    int split_daughter_resplit_cooldown_frames = -1;
+    // A split already performs a dedicated sibling-aware refit. Preserve that
+    // birth geometry through the rest of the frame, then shrink only the
+    // larger sibling if the ellipsoid-volume ratio is still excessive.
+    bool split_birth_sibling_volume_guard_enabled = true;
+    float split_birth_sibling_volume_ratio_max = 1.25f;
+    // Zero preserves birth-frame-only behavior. Positive values keep the
+    // sibling-ratio guard active for this many frames after division.
+    int split_sibling_volume_guard_recent_frames = 0;
+    // Optional accepted-birth-volume envelope for recent daughters. Both
+    // factors must be positive and max >= min to enable it.
+    float split_recent_daughter_volume_min_birth_factor = 0.0f;
+    float split_recent_daughter_volume_max_birth_factor = 0.0f;
     bool split_axis_alignment_gate_enabled = true;
     float split_axis_alignment_sphere_angle_degrees = 120.0f;
     float split_axis_alignment_elongation_shrink = 0.75f;
     float split_axis_alignment_min_angle_degrees = 20.0f;
     bool split_daughter_overlap_gate_enabled = true;
+    // Keep sibling overlap in candidate search/refinement so daughters are
+    // still encouraged to separate, but optionally omit only that one pair
+    // from the final accept/reject cost. Overlap with existing cells remains.
+    bool split_acceptance_ignore_sibling_pair_overlap_cost = false;
     float split_max_daughter_overlap_fraction = 0.20f;
     float split_daughter_overlap_scale = 1.0f;
 
@@ -2278,6 +2647,26 @@ public:
     float signal_center_neighbor_parent_core_escape_scale = 0.80f;
     float signal_center_neighbor_closer_margin_abs = 8.0f;
     float signal_center_neighbor_closer_margin_scale = 0.20f;
+    bool signal_center_neighbor_claim_gate_enabled = true;
+    // CU4-only recovery for a fit that has already stretched into the
+    // characteristic rod-tip failure shape. The proposal stage seeds two
+    // daughters symmetrically along the current longest axis; the hard guard
+    // prevents an unsplit rod from being exported when every proposal fails.
+    bool celluniverse4_rod_tip_split_recovery_enabled = false;
+    bool celluniverse4_rod_tip_hard_reject_enabled = false;
+    float celluniverse4_rod_tip_min_long_short_ratio = 1.80f;
+    float celluniverse4_rod_tip_min_long_mid_ratio = 1.55f;
+    float celluniverse4_rod_tip_max_mid_short_ratio = 1.35f;
+    float celluniverse4_rod_tip_seed_inset_sphere_radius_fraction = 1.00f;
+    float celluniverse4_rod_tip_alt_seed_distance_fraction = 0.75f;
+    float celluniverse4_rod_tip_hard_reject_max_long_mid_ratio = 1.35f;
+    bool celluniverse4_split_daughter_background_reattach_enabled = false;
+    float celluniverse4_split_daughter_background_margin = 0.06f;
+    float celluniverse4_split_daughter_background_probe_radius_parent_fraction = 0.25f;
+    float celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction = 3.00f;
+    float celluniverse4_split_daughter_background_reattach_min_center_brightness = 0.20f;
+    int celluniverse4_split_daughter_background_reattach_min_center_boxes = 50;
+    float celluniverse4_split_daughter_background_reattach_halfspace_tolerance_parent_radius_fraction = 0.05f;
     float signal_center_neighbor_claim_radius_abs = 10.0f;
     float signal_center_neighbor_claim_radius_scale = 0.75f;
     float signal_center_centered_rescue_max_sep_scale = 2.75f;
@@ -3365,8 +3754,15 @@ public:
     float signal_center_split_min_separation_radius_scale = 0.55f;
     float signal_center_split_max_separation_radius_scale = 2.2f;
     float signal_center_split_max_midpoint_radius_scale = 1.25f;
+    bool signal_center_future_rescue_enabled = true;
+    bool signal_center_future_rescue_min_separation_gate_enabled = true;
     float signal_center_future_rescue_min_separation_parent_fraction = 1.10f;
+    bool signal_center_future_rescue_max_separation_gate_enabled = true;
+    float signal_center_future_rescue_max_separation_parent_fraction = 2.20f;
+    bool signal_center_future_rescue_midpoint_gate_enabled = true;
+    float signal_center_future_rescue_max_midpoint_parent_fraction = 1.25f;
     float signal_center_split_min_axis_alignment = 0.0f;
+    bool signal_center_neighbor_owned_future_rescue_scope_gate_enabled = true;
     int signal_center_neighbor_owned_future_rescue_min_pairs = 8;
     float signal_center_neighbor_owned_future_rescue_min_fraction = 0.80f;
     float signal_center_neighbor_owned_future_rescue_axis_fraction = 0.60f;
@@ -3437,11 +3833,28 @@ public:
         if (node["split_daughter_axis_parallel_angle_degrees"]) split_daughter_axis_parallel_angle_degrees = node["split_daughter_axis_parallel_angle_degrees"].as<float>();
         if (node["split_daughter_axis_interaction_penalty_fraction"]) split_daughter_axis_interaction_penalty_fraction = node["split_daughter_axis_interaction_penalty_fraction"].as<float>();
         if (node["split_bio_ignore_trash_neighbors_enabled"]) split_bio_ignore_trash_neighbors_enabled = node["split_bio_ignore_trash_neighbors_enabled"].as<bool>();
+        if (node["split_separation_axis_alignment_gate_enabled"]) split_separation_axis_alignment_gate_enabled = node["split_separation_axis_alignment_gate_enabled"].as<bool>();
+        if (node["split_separation_axis_max_angle_degrees"]) split_separation_axis_max_angle_degrees = node["split_separation_axis_max_angle_degrees"].as<float>();
+        if (node["celluniverse4_split_candidate_family_reserve_enabled"]) celluniverse4_split_candidate_family_reserve_enabled = node["celluniverse4_split_candidate_family_reserve_enabled"].as<bool>();
+        if (node["celluniverse4_split_candidate_geometry_prefilter_enabled"]) celluniverse4_split_candidate_geometry_prefilter_enabled = node["celluniverse4_split_candidate_geometry_prefilter_enabled"].as<bool>();
+        if (node["celluniverse4_split_use_winner_seed_axis_gate_enabled"]) celluniverse4_split_use_winner_seed_axis_gate_enabled = node["celluniverse4_split_use_winner_seed_axis_gate_enabled"].as<bool>();
+        if (node["celluniverse4_split_finalist_retry_enabled"]) celluniverse4_split_finalist_retry_enabled = node["celluniverse4_split_finalist_retry_enabled"].as<bool>();
+        if (node["celluniverse4_split_finalist_retry_limit"]) celluniverse4_split_finalist_retry_limit = node["celluniverse4_split_finalist_retry_limit"].as<int>();
+        if (node["celluniverse4_split_sibling_rod_overlap_gate_enabled"]) celluniverse4_split_sibling_rod_overlap_gate_enabled = node["celluniverse4_split_sibling_rod_overlap_gate_enabled"].as<bool>();
+        if (node["celluniverse4_split_sibling_rod_min_raw_shape_ratio"]) celluniverse4_split_sibling_rod_min_raw_shape_ratio = node["celluniverse4_split_sibling_rod_min_raw_shape_ratio"].as<float>();
+        if (node["celluniverse4_split_sibling_rod_max_overlap_fraction"]) celluniverse4_split_sibling_rod_max_overlap_fraction = node["celluniverse4_split_sibling_rod_max_overlap_fraction"].as<float>();
+        if (node["split_daughter_resplit_cooldown_frames"]) split_daughter_resplit_cooldown_frames = node["split_daughter_resplit_cooldown_frames"].as<int>();
+        if (node["split_birth_sibling_volume_guard_enabled"]) split_birth_sibling_volume_guard_enabled = node["split_birth_sibling_volume_guard_enabled"].as<bool>();
+        if (node["split_birth_sibling_volume_ratio_max"]) split_birth_sibling_volume_ratio_max = node["split_birth_sibling_volume_ratio_max"].as<float>();
+        if (node["split_sibling_volume_guard_recent_frames"]) split_sibling_volume_guard_recent_frames = node["split_sibling_volume_guard_recent_frames"].as<int>();
+        if (node["split_recent_daughter_volume_min_birth_factor"]) split_recent_daughter_volume_min_birth_factor = node["split_recent_daughter_volume_min_birth_factor"].as<float>();
+        if (node["split_recent_daughter_volume_max_birth_factor"]) split_recent_daughter_volume_max_birth_factor = node["split_recent_daughter_volume_max_birth_factor"].as<float>();
         if (node["split_axis_alignment_gate_enabled"]) split_axis_alignment_gate_enabled = node["split_axis_alignment_gate_enabled"].as<bool>();
         if (node["split_axis_alignment_sphere_angle_degrees"]) split_axis_alignment_sphere_angle_degrees = node["split_axis_alignment_sphere_angle_degrees"].as<float>();
         if (node["split_axis_alignment_elongation_shrink"]) split_axis_alignment_elongation_shrink = node["split_axis_alignment_elongation_shrink"].as<float>();
         if (node["split_axis_alignment_min_angle_degrees"]) split_axis_alignment_min_angle_degrees = node["split_axis_alignment_min_angle_degrees"].as<float>();
         if (node["split_daughter_overlap_gate_enabled"]) split_daughter_overlap_gate_enabled = node["split_daughter_overlap_gate_enabled"].as<bool>();
+        if (node["split_acceptance_ignore_sibling_pair_overlap_cost"]) split_acceptance_ignore_sibling_pair_overlap_cost = node["split_acceptance_ignore_sibling_pair_overlap_cost"].as<bool>();
         if (node["split_max_daughter_overlap_fraction"]) split_max_daughter_overlap_fraction = node["split_max_daughter_overlap_fraction"].as<float>();
         if (node["split_daughter_overlap_scale"]) split_daughter_overlap_scale = node["split_daughter_overlap_scale"].as<float>();
         if (node["split_parent_overlap_gate_enabled"]) split_daughter_overlap_gate_enabled = node["split_parent_overlap_gate_enabled"].as<bool>();
@@ -4307,6 +4720,22 @@ public:
         READ_PROB_FLOAT(signal_center_neighbor_parent_core_escape_scale);
         READ_PROB_FLOAT(signal_center_neighbor_closer_margin_abs);
         READ_PROB_FLOAT(signal_center_neighbor_closer_margin_scale);
+        if (node["signal_center_neighbor_claim_gate_enabled"]) signal_center_neighbor_claim_gate_enabled = node["signal_center_neighbor_claim_gate_enabled"].as<bool>();
+        if (node["celluniverse4_rod_tip_split_recovery_enabled"]) celluniverse4_rod_tip_split_recovery_enabled = node["celluniverse4_rod_tip_split_recovery_enabled"].as<bool>();
+        if (node["celluniverse4_rod_tip_hard_reject_enabled"]) celluniverse4_rod_tip_hard_reject_enabled = node["celluniverse4_rod_tip_hard_reject_enabled"].as<bool>();
+        READ_PROB_FLOAT(celluniverse4_rod_tip_min_long_short_ratio);
+        READ_PROB_FLOAT(celluniverse4_rod_tip_min_long_mid_ratio);
+        READ_PROB_FLOAT(celluniverse4_rod_tip_max_mid_short_ratio);
+        READ_PROB_FLOAT(celluniverse4_rod_tip_seed_inset_sphere_radius_fraction);
+        READ_PROB_FLOAT(celluniverse4_rod_tip_alt_seed_distance_fraction);
+        READ_PROB_FLOAT(celluniverse4_rod_tip_hard_reject_max_long_mid_ratio);
+        if (node["celluniverse4_split_daughter_background_reattach_enabled"]) celluniverse4_split_daughter_background_reattach_enabled = node["celluniverse4_split_daughter_background_reattach_enabled"].as<bool>();
+        READ_PROB_FLOAT(celluniverse4_split_daughter_background_margin);
+        READ_PROB_FLOAT(celluniverse4_split_daughter_background_probe_radius_parent_fraction);
+        READ_PROB_FLOAT(celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction);
+        READ_PROB_FLOAT(celluniverse4_split_daughter_background_reattach_min_center_brightness);
+        READ_PROB_INT(celluniverse4_split_daughter_background_reattach_min_center_boxes);
+        READ_PROB_FLOAT(celluniverse4_split_daughter_background_reattach_halfspace_tolerance_parent_radius_fraction);
         READ_PROB_FLOAT(signal_center_neighbor_claim_radius_abs);
         READ_PROB_FLOAT(signal_center_neighbor_claim_radius_scale);
         READ_PROB_FLOAT(signal_center_centered_rescue_max_sep_scale);
@@ -4824,7 +5253,13 @@ public:
         if (node["signal_center_split_min_separation_radius_scale"]) signal_center_split_min_separation_radius_scale = node["signal_center_split_min_separation_radius_scale"].as<float>();
         if (node["signal_center_split_max_separation_radius_scale"]) signal_center_split_max_separation_radius_scale = node["signal_center_split_max_separation_radius_scale"].as<float>();
         if (node["signal_center_split_max_midpoint_radius_scale"]) signal_center_split_max_midpoint_radius_scale = node["signal_center_split_max_midpoint_radius_scale"].as<float>();
+        if (node["signal_center_future_rescue_enabled"]) signal_center_future_rescue_enabled = node["signal_center_future_rescue_enabled"].as<bool>();
+        if (node["signal_center_future_rescue_min_separation_gate_enabled"]) signal_center_future_rescue_min_separation_gate_enabled = node["signal_center_future_rescue_min_separation_gate_enabled"].as<bool>();
         if (node["signal_center_future_rescue_min_separation_parent_fraction"]) signal_center_future_rescue_min_separation_parent_fraction = node["signal_center_future_rescue_min_separation_parent_fraction"].as<float>();
+        if (node["signal_center_future_rescue_max_separation_gate_enabled"]) signal_center_future_rescue_max_separation_gate_enabled = node["signal_center_future_rescue_max_separation_gate_enabled"].as<bool>();
+        if (node["signal_center_future_rescue_max_separation_parent_fraction"]) signal_center_future_rescue_max_separation_parent_fraction = node["signal_center_future_rescue_max_separation_parent_fraction"].as<float>();
+        if (node["signal_center_future_rescue_midpoint_gate_enabled"]) signal_center_future_rescue_midpoint_gate_enabled = node["signal_center_future_rescue_midpoint_gate_enabled"].as<bool>();
+        if (node["signal_center_future_rescue_max_midpoint_parent_fraction"]) signal_center_future_rescue_max_midpoint_parent_fraction = node["signal_center_future_rescue_max_midpoint_parent_fraction"].as<float>();
         if (node["signal_center_split_min_axis_alignment"]) signal_center_split_min_axis_alignment = node["signal_center_split_min_axis_alignment"].as<float>();
         if (node["signal_center_disconnected_far_pair_rescue_enabled"]) signal_center_disconnected_far_pair_rescue_enabled = node["signal_center_disconnected_far_pair_rescue_enabled"].as<bool>();
         if (node["signal_center_disconnected_far_pair_max_parent_shape"]) signal_center_disconnected_far_pair_max_parent_shape = node["signal_center_disconnected_far_pair_max_parent_shape"].as<float>();
@@ -4838,6 +5273,7 @@ public:
         if (node["signal_center_disconnected_far_pair_cost_rescue_max_overlap_fraction"]) signal_center_disconnected_far_pair_cost_rescue_max_overlap_fraction = node["signal_center_disconnected_far_pair_cost_rescue_max_overlap_fraction"].as<float>();
         if (node["signal_center_disconnected_far_pair_cost_rescue_max_gap_density"]) signal_center_disconnected_far_pair_cost_rescue_max_gap_density = node["signal_center_disconnected_far_pair_cost_rescue_max_gap_density"].as<float>();
         if (node["signal_center_disconnected_far_pair_cost_rescue_max_valley_from_bright"]) signal_center_disconnected_far_pair_cost_rescue_max_valley_from_bright = node["signal_center_disconnected_far_pair_cost_rescue_max_valley_from_bright"].as<float>();
+        if (node["signal_center_neighbor_owned_future_rescue_scope_gate_enabled"]) signal_center_neighbor_owned_future_rescue_scope_gate_enabled = node["signal_center_neighbor_owned_future_rescue_scope_gate_enabled"].as<bool>();
         if (node["signal_center_neighbor_owned_future_rescue_min_pairs"]) signal_center_neighbor_owned_future_rescue_min_pairs = node["signal_center_neighbor_owned_future_rescue_min_pairs"].as<int>();
         if (node["signal_center_neighbor_owned_future_rescue_min_fraction"]) signal_center_neighbor_owned_future_rescue_min_fraction = node["signal_center_neighbor_owned_future_rescue_min_fraction"].as<float>();
         if (node["signal_center_neighbor_owned_future_rescue_axis_fraction"]) signal_center_neighbor_owned_future_rescue_axis_fraction = node["signal_center_neighbor_owned_future_rescue_axis_fraction"].as<float>();
@@ -4895,11 +5331,28 @@ public:
         std::cout << "split_daughter_axis_parallel_angle_degrees: " << split_daughter_axis_parallel_angle_degrees << '\n';
         std::cout << "split_daughter_axis_interaction_penalty_fraction: " << split_daughter_axis_interaction_penalty_fraction << '\n';
         std::cout << "split_bio_ignore_trash_neighbors_enabled: " << split_bio_ignore_trash_neighbors_enabled << '\n';
+        std::cout << "split_separation_axis_alignment_gate_enabled: " << split_separation_axis_alignment_gate_enabled << '\n';
+        std::cout << "split_separation_axis_max_angle_degrees: " << split_separation_axis_max_angle_degrees << '\n';
+        std::cout << "celluniverse4_split_candidate_family_reserve_enabled: " << celluniverse4_split_candidate_family_reserve_enabled << '\n';
+        std::cout << "celluniverse4_split_candidate_geometry_prefilter_enabled: " << celluniverse4_split_candidate_geometry_prefilter_enabled << '\n';
+        std::cout << "celluniverse4_split_use_winner_seed_axis_gate_enabled: " << celluniverse4_split_use_winner_seed_axis_gate_enabled << '\n';
+        std::cout << "celluniverse4_split_finalist_retry_enabled: " << celluniverse4_split_finalist_retry_enabled << '\n';
+        std::cout << "celluniverse4_split_finalist_retry_limit: " << celluniverse4_split_finalist_retry_limit << '\n';
+        std::cout << "celluniverse4_split_sibling_rod_overlap_gate_enabled: " << celluniverse4_split_sibling_rod_overlap_gate_enabled << '\n';
+        std::cout << "celluniverse4_split_sibling_rod_min_raw_shape_ratio: " << celluniverse4_split_sibling_rod_min_raw_shape_ratio << '\n';
+        std::cout << "celluniverse4_split_sibling_rod_max_overlap_fraction: " << celluniverse4_split_sibling_rod_max_overlap_fraction << '\n';
+        std::cout << "split_daughter_resplit_cooldown_frames: " << split_daughter_resplit_cooldown_frames << '\n';
+        std::cout << "split_birth_sibling_volume_guard_enabled: " << split_birth_sibling_volume_guard_enabled << '\n';
+        std::cout << "split_birth_sibling_volume_ratio_max: " << split_birth_sibling_volume_ratio_max << '\n';
+        std::cout << "split_sibling_volume_guard_recent_frames: " << split_sibling_volume_guard_recent_frames << '\n';
+        std::cout << "split_recent_daughter_volume_min_birth_factor: " << split_recent_daughter_volume_min_birth_factor << '\n';
+        std::cout << "split_recent_daughter_volume_max_birth_factor: " << split_recent_daughter_volume_max_birth_factor << '\n';
         std::cout << "split_axis_alignment_gate_enabled: " << split_axis_alignment_gate_enabled << '\n';
         std::cout << "split_axis_alignment_sphere_angle_degrees: " << split_axis_alignment_sphere_angle_degrees << '\n';
         std::cout << "split_axis_alignment_elongation_shrink: " << split_axis_alignment_elongation_shrink << '\n';
         std::cout << "split_axis_alignment_min_angle_degrees: " << split_axis_alignment_min_angle_degrees << '\n';
         std::cout << "split_daughter_overlap_gate_enabled: " << split_daughter_overlap_gate_enabled << '\n';
+        std::cout << "split_acceptance_ignore_sibling_pair_overlap_cost: " << split_acceptance_ignore_sibling_pair_overlap_cost << '\n';
         std::cout << "split_max_daughter_overlap_fraction: " << split_max_daughter_overlap_fraction << '\n';
         std::cout << "split_daughter_overlap_scale: " << split_daughter_overlap_scale << '\n';
         std::cout << "split_daughter_refit_keep_seed_halfspace_enabled: " << split_daughter_refit_keep_seed_halfspace_enabled << '\n';
@@ -5222,6 +5675,31 @@ public:
         std::cout << "celluniverse2_post_pca_mild_overlap_tolerance: " << celluniverse2_post_pca_mild_overlap_tolerance << '\n';
         std::cout << "pca_bridge_middle_cut_centroids: " << pca_bridge_middle_cut_centroids << '\n';
         std::cout << "signal_center_split_enabled: " << signal_center_split_enabled << '\n';
+        std::cout << "signal_center_neighbor_claim_gate_enabled: " << signal_center_neighbor_claim_gate_enabled << '\n';
+        std::cout << "celluniverse4_rod_tip_split_recovery_enabled: " << celluniverse4_rod_tip_split_recovery_enabled << '\n';
+        std::cout << "celluniverse4_rod_tip_hard_reject_enabled: " << celluniverse4_rod_tip_hard_reject_enabled << '\n';
+        std::cout << "celluniverse4_rod_tip_min_long_short_ratio: " << celluniverse4_rod_tip_min_long_short_ratio << '\n';
+        std::cout << "celluniverse4_rod_tip_min_long_mid_ratio: " << celluniverse4_rod_tip_min_long_mid_ratio << '\n';
+        std::cout << "celluniverse4_rod_tip_max_mid_short_ratio: " << celluniverse4_rod_tip_max_mid_short_ratio << '\n';
+        std::cout << "celluniverse4_rod_tip_seed_inset_sphere_radius_fraction: " << celluniverse4_rod_tip_seed_inset_sphere_radius_fraction << '\n';
+        std::cout << "celluniverse4_rod_tip_alt_seed_distance_fraction: " << celluniverse4_rod_tip_alt_seed_distance_fraction << '\n';
+        std::cout << "celluniverse4_rod_tip_hard_reject_max_long_mid_ratio: " << celluniverse4_rod_tip_hard_reject_max_long_mid_ratio << '\n';
+        std::cout << "celluniverse4_split_daughter_background_reattach_enabled: " << celluniverse4_split_daughter_background_reattach_enabled << '\n';
+        std::cout << "celluniverse4_split_daughter_background_margin: " << celluniverse4_split_daughter_background_margin << '\n';
+        std::cout << "celluniverse4_split_daughter_background_probe_radius_parent_fraction: " << celluniverse4_split_daughter_background_probe_radius_parent_fraction << '\n';
+        std::cout << "celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction: " << celluniverse4_split_daughter_background_reattach_max_distance_parent_radius_fraction << '\n';
+        std::cout << "celluniverse4_split_daughter_background_reattach_min_center_brightness: " << celluniverse4_split_daughter_background_reattach_min_center_brightness << '\n';
+        std::cout << "celluniverse4_split_daughter_background_reattach_min_center_boxes: " << celluniverse4_split_daughter_background_reattach_min_center_boxes << '\n';
+        std::cout << "celluniverse4_split_daughter_background_reattach_halfspace_tolerance_parent_radius_fraction: " << celluniverse4_split_daughter_background_reattach_halfspace_tolerance_parent_radius_fraction << '\n';
+        std::cout << "signal_center_neighbor_owned_future_rescue_scope_gate_enabled: " << signal_center_neighbor_owned_future_rescue_scope_gate_enabled << '\n';
+        std::cout << "signal_center_neighbor_owned_future_rescue_min_pairs: " << signal_center_neighbor_owned_future_rescue_min_pairs << '\n';
+        std::cout << "signal_center_future_rescue_enabled: " << signal_center_future_rescue_enabled << '\n';
+        std::cout << "signal_center_future_rescue_min_separation_gate_enabled: " << signal_center_future_rescue_min_separation_gate_enabled << '\n';
+        std::cout << "signal_center_future_rescue_min_separation_parent_fraction: " << signal_center_future_rescue_min_separation_parent_fraction << '\n';
+        std::cout << "signal_center_future_rescue_max_separation_gate_enabled: " << signal_center_future_rescue_max_separation_gate_enabled << '\n';
+        std::cout << "signal_center_future_rescue_max_separation_parent_fraction: " << signal_center_future_rescue_max_separation_parent_fraction << '\n';
+        std::cout << "signal_center_future_rescue_midpoint_gate_enabled: " << signal_center_future_rescue_midpoint_gate_enabled << '\n';
+        std::cout << "signal_center_future_rescue_max_midpoint_parent_fraction: " << signal_center_future_rescue_max_midpoint_parent_fraction << '\n';
         std::cout << "signal_center_split_min_parent_elongation: " << signal_center_split_min_parent_elongation << '\n';
         std::cout << "signal_center_split_min_separation_radius_scale: " << signal_center_split_min_separation_radius_scale << '\n';
         std::cout << "signal_center_split_max_separation_radius_scale: " << signal_center_split_max_separation_radius_scale << '\n';
@@ -5540,6 +6018,18 @@ public:
     // (halo dilutes the core fraction), so they don't get additional
     // inflation — bounded-growth reference handles their cap separately.
     float pcaShapeRadiusInflationBright{1.15f};
+    // Optional PCA-only prepared-domain support selection. This leaves the
+    // initializer foreground reference used by split/bridge logic unchanged.
+    // Candidate weights are measured above the current physical background;
+    // the retained support is at least minMargin and at least `fraction` of a
+    // robust per-cell high-signal percentile.
+    bool pcaShapeLocalSupportEnabled{false};
+    float pcaShapeLocalSupportPeakPercentile{0.90f};
+    float pcaShapeLocalSupportFraction{0.25f};
+    float pcaShapeLocalSupportMinMargin{0.02f};
+    float pcaShapeLocalSupportMaxVolumeFactor{1.50f};
+    float pcaShapeLocalSupportMinVolumeFraction{0.10f};
+    float pcaShapeLocalSupportLowSnrCutoffFraction{0.50f};
     // Percentile for the radius computation in calibrateCellShapeViaPca.
     // For each PCA axis, the radius = Nth percentile of |projection of
     // bright pixels onto that axis|. Higher = larger radii (captures more
@@ -5547,7 +6037,19 @@ public:
     float pcaShapeRadiusPercentile{0.90f};
     bool pcaShapeFitGrowthCapEnabled{true};
     float pcaShapeFitGrowthCap{0.10f};
+    // Allow a well-supported rounder PCA fit to redistribute the ordinary
+    // temporal cap's radius product instead of remaining artificially flat.
+    // The rescue never increases capped ellipsoid volume.
+    bool pcaShapeFitRoundingRescueEnabled{false};
+    float pcaShapeFitRoundingRescueMinElongationImprovement{0.05f};
+    float pcaShapeFitRoundingRescueMaxAxisRedistributionFraction{0.15f};
     bool pcaShapeRatioBoundEnabled{false};
+    // CU4 may apply the ratio bound as an exact shrink-only projection after
+    // the final temporal shape guard.  Legacy pipelines keep the existing
+    // gradual, per-frame correction when this switch is false.
+    bool pcaShapeRatioBoundHardLimitEnabled{false};
+    bool pcaShapeRatioBoundPreserveSplitEvidence{true};
+    int pcaShapeRatioBoundMinAgeFrames{0};
     float pcaShapeMaxLongMidRatio{0.0f};
     float pcaShapeMaxMidShortRatio{0.0f};
     float pcaShapeMaxLongShortRatio{0.0f};
@@ -5662,10 +6164,23 @@ public:
         if (node["pcaShapeCoreFractionLow"]) pcaShapeCoreFractionLow = node["pcaShapeCoreFractionLow"].as<float>();
         if (node["pcaShapeCoreFractionHigh"]) pcaShapeCoreFractionHigh = node["pcaShapeCoreFractionHigh"].as<float>();
         if (node["pcaShapeRadiusInflationBright"]) pcaShapeRadiusInflationBright = node["pcaShapeRadiusInflationBright"].as<float>();
+        if (node["pcaShapeLocalSupportEnabled"]) pcaShapeLocalSupportEnabled = node["pcaShapeLocalSupportEnabled"].as<bool>();
+        if (node["pcaShapeLocalSupportPeakPercentile"]) pcaShapeLocalSupportPeakPercentile = node["pcaShapeLocalSupportPeakPercentile"].as<float>();
+        if (node["pcaShapeLocalSupportFraction"]) pcaShapeLocalSupportFraction = node["pcaShapeLocalSupportFraction"].as<float>();
+        if (node["pcaShapeLocalSupportMinMargin"]) pcaShapeLocalSupportMinMargin = node["pcaShapeLocalSupportMinMargin"].as<float>();
+        if (node["pcaShapeLocalSupportMaxVolumeFactor"]) pcaShapeLocalSupportMaxVolumeFactor = node["pcaShapeLocalSupportMaxVolumeFactor"].as<float>();
+        if (node["pcaShapeLocalSupportMinVolumeFraction"]) pcaShapeLocalSupportMinVolumeFraction = node["pcaShapeLocalSupportMinVolumeFraction"].as<float>();
+        if (node["pcaShapeLocalSupportLowSnrCutoffFraction"]) pcaShapeLocalSupportLowSnrCutoffFraction = node["pcaShapeLocalSupportLowSnrCutoffFraction"].as<float>();
         if (node["pcaShapeRadiusPercentile"]) pcaShapeRadiusPercentile = node["pcaShapeRadiusPercentile"].as<float>();
         if (node["pcaShapeFitGrowthCapEnabled"]) pcaShapeFitGrowthCapEnabled = node["pcaShapeFitGrowthCapEnabled"].as<bool>();
         if (node["pcaShapeFitGrowthCap"]) pcaShapeFitGrowthCap = node["pcaShapeFitGrowthCap"].as<float>();
+        if (node["pcaShapeFitRoundingRescueEnabled"]) pcaShapeFitRoundingRescueEnabled = node["pcaShapeFitRoundingRescueEnabled"].as<bool>();
+        if (node["pcaShapeFitRoundingRescueMinElongationImprovement"]) pcaShapeFitRoundingRescueMinElongationImprovement = node["pcaShapeFitRoundingRescueMinElongationImprovement"].as<float>();
+        if (node["pcaShapeFitRoundingRescueMaxAxisRedistributionFraction"]) pcaShapeFitRoundingRescueMaxAxisRedistributionFraction = node["pcaShapeFitRoundingRescueMaxAxisRedistributionFraction"].as<float>();
         if (node["pcaShapeRatioBoundEnabled"]) pcaShapeRatioBoundEnabled = node["pcaShapeRatioBoundEnabled"].as<bool>();
+        if (node["pcaShapeRatioBoundHardLimitEnabled"]) pcaShapeRatioBoundHardLimitEnabled = node["pcaShapeRatioBoundHardLimitEnabled"].as<bool>();
+        if (node["pcaShapeRatioBoundPreserveSplitEvidence"]) pcaShapeRatioBoundPreserveSplitEvidence = node["pcaShapeRatioBoundPreserveSplitEvidence"].as<bool>();
+        if (node["pcaShapeRatioBoundMinAgeFrames"]) pcaShapeRatioBoundMinAgeFrames = node["pcaShapeRatioBoundMinAgeFrames"].as<int>();
         if (node["pcaShapeMaxLongMidRatio"]) pcaShapeMaxLongMidRatio = node["pcaShapeMaxLongMidRatio"].as<float>();
         if (node["pcaShapeMaxMidShortRatio"]) pcaShapeMaxMidShortRatio = node["pcaShapeMaxMidShortRatio"].as<float>();
         if (node["pcaShapeMaxLongShortRatio"]) pcaShapeMaxLongShortRatio = node["pcaShapeMaxLongShortRatio"].as<float>();
@@ -5677,6 +6192,28 @@ public:
         if (node["trashRemovalBrightnessThreshold"]) trashRemovalBrightnessThreshold = node["trashRemovalBrightnessThreshold"].as<float>();
         if (node["trashRemovalConsecutiveDimFrames"]) trashRemovalConsecutiveDimFrames = node["trashRemovalConsecutiveDimFrames"].as<int>();
         if (node["trashRemovalMinFrameAge"]) trashRemovalMinFrameAge = node["trashRemovalMinFrameAge"].as<int>();
+        if (pcaShapeRatioBoundMinAgeFrames < 0) {
+            throw std::invalid_argument(
+                "cell.pcaShapeRatioBoundMinAgeFrames must be nonnegative");
+        }
+        if (pcaShapeFitRoundingRescueEnabled &&
+            (pcaShapeFitRoundingRescueMinElongationImprovement < 0.0f ||
+             pcaShapeFitRoundingRescueMaxAxisRedistributionFraction <= 0.0f ||
+             pcaShapeFitRoundingRescueMaxAxisRedistributionFraction > 1.0f)) {
+            throw std::invalid_argument(
+                "enabled cell.pcaShapeFitRoundingRescue requires a nonnegative improvement and redistribution fraction in (0, 1]");
+        }
+        if (pcaShapeRatioBoundHardLimitEnabled) {
+            const auto validHardRatio = [](float ratio) {
+                return std::isfinite(ratio) && ratio > 1.0f;
+            };
+            if (!validHardRatio(pcaShapeMaxLongMidRatio) ||
+                !validHardRatio(pcaShapeMaxMidShortRatio) ||
+                !validHardRatio(pcaShapeMaxLongShortRatio)) {
+                throw std::invalid_argument(
+                    "cell hard PCA shape ratios must all be finite and greater than one");
+            }
+        }
         if (node["perturbSigmaReferenceRadius"]) perturbSigmaReferenceRadius = node["perturbSigmaReferenceRadius"].as<float>();
         if (node["randomPerturbRadiusRatio"]) randomPerturbRadiusRatio = node["randomPerturbRadiusRatio"].as<float>();
         if (node["randomPerturbBrightCoreGuidanceEnabled"]) randomPerturbBrightCoreGuidanceEnabled = node["randomPerturbBrightCoreGuidanceEnabled"].as<bool>();
@@ -10598,6 +11135,810 @@ public:
     }
 };
 
+class CandidateBatchConfig {
+public:
+    // The feature is only active when simulation.celluniverse4_enabled is
+    // also true. Keeping the root default false preserves traditional runs;
+    // config_celluniverse4.yaml enables both switches by default.
+    bool enabled = false;
+    bool shadowMode = false;
+    bool exportDiagnostics = true;
+    // Each parent sees the same immutable evidence set. Candidate acceptance,
+    // not destructive pool depletion, resolves conflicts between parents.
+    bool perParentFreshEvidencePoolEnabled = true;
+
+    int maxCandidatesPerParent = 12;
+    int maxSnapshotAnchors = 1;
+    int maxExactChunkCenters = 6;
+    int expensiveTopK = 6;
+    int continuationRefineIterationsPerParent = 6;
+    // Keep the post-center stochastic refinement inside a fixed neighborhood
+    // of the accepted evidence center (or the immutable baseline when no
+    // center wins).  The anchor never walks after an accepted perturb, so a
+    // sequence of individually cheap moves cannot drift onto another body.
+    bool continuationRefineAnchorDistanceGateEnabled = true;
+    float continuationRefineMaxAnchorDistanceMinRadiusFraction = 1.0f;
+    int stochasticCandidatesPerParent = 0;
+
+    double absoluteImprovementMargin = 1.0e-6;
+    double fractionalImprovementMargin = 0.0;
+    double continuationRefineAbsoluteImprovementMargin = 1.0e-6;
+    double winnerReevaluationTolerance = 1.0e-6;
+
+    float deduplicationDistanceAbsolute = 0.25f;
+    float deduplicationDistanceMinRadiusFraction = 0.05f;
+    float chunkAssociationDistanceAbsolute = 0.0f;
+    float chunkAssociationDistanceMinRadiusFraction = 2.5f;
+    int chunkMinBoxes = 1;
+    float chunkMinVoxels = 0.0f;
+    float chunkMinBrightness = 0.0f;
+    float chunkMinConfidence = 0.0f;
+
+    // CU4-only pre-perturb recovery.  A cell whose measured top-signal
+    // contrast has collapsed relative to its rendered contrast is moved to
+    // the best directly probed, unclaimed signal center before any cost-based
+    // candidate search.  The rescued center is reserved for that cell for the
+    // remainder of the frame.
+    bool backgroundDropReattachEnabled = false;
+    float backgroundDropObservedTopFraction = 0.30f;
+    float backgroundDropMaxObservedModelContrastRatio = 0.25f;
+    float backgroundDropMinModelContrast = 0.05f;
+    bool backgroundDropSiblingHalfspaceEnabled = true;
+    bool backgroundDropHoldIfNoSafeCenter = false;
+    bool backgroundDropSkipCandidateBatchIfReattached = true;
+    bool backgroundDropExplicitSplitBypassHoldEnabled = false;
+    // A background-rescued parent may only split from current-frame centers
+    // local to its rescued position. Stale/future pairs are discarded.
+    bool backgroundDropCurrentLocalSplitOnlyEnabled = false;
+    // If the coarse global-center list has no valid local pair, rebuild this
+    // parent's image evidence after recovery using one live claim per other
+    // cell. The fresh centroids must remain local to the recovered anchor and
+    // straddle the parent.
+    bool backgroundDropCurrentLocalPrepassFallbackEnabled = false;
+    int backgroundDropCurrentLocalPrepassFallbackMinKeptPixels = 0;
+    int backgroundDropCurrentLocalClusterIterations = 8;
+    float backgroundDropCurrentLocalProjectedSeedDistanceRadiusFraction = 1.5f;
+    float backgroundDropCurrentLocalClusterGatherRadiusScale = 3.0f;
+    float backgroundDropCurrentLocalClusterMinWeightFraction = 0.0f;
+    float backgroundDropCurrentLocalClusterMinVarianceReduction = 0.0f;
+    float backgroundDropCurrentLocalPrepassFallbackMaxAnchorDistanceRadiusFraction = 1.0f;
+    float backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction = 1.0f;
+    float backgroundDropCurrentLocalPrepassFallbackMinCostImprovement = 0.0f;
+
+    // CU4 split-center proposal from the current image, local to one parent.
+    // This is deliberately split-only: ordinary continuation candidates still
+    // use ChunkEvidence / signal centers.  A qualifying parent gets an
+    // authoritative answer from thresholded connected components instead of
+    // inventing a split from global centers.
+    bool localComponentSplitCentersEnabled = false;
+    float localComponentSplitSphereRadiusScale = 1.25f;
+    int localComponentSplitConnectivityRadius = 1;
+    int localComponentSplitMinComponentVoxels = 20;
+    float localComponentSplitMaxMidpointRadiusScale = 0.75f;
+    float localComponentSplitMinAxisAlignment = 0.80f;
+    bool localComponentSplitNeighborOwnershipFilterEnabled = true;
+    float localComponentSplitNeighborOwnershipScale = 0.60f;
+    bool localComponentSplitSaturatedSparseFallbackEnabled = false;
+    float localComponentSplitSaturatedSparseMinThreshold = 0.995f;
+    int localComponentSplitSaturatedSparseMaxTotalVoxels = 64;
+    // A saturated, sparse threshold residue may still contain one reliable
+    // local component plus one compact current-frame signal center. This
+    // CU4-only hybrid is split-only and deliberately does not alter global
+    // signal-center pairing gates.
+    bool localComponentSplitSaturatedSparseHybridEnabled = false;
+    float localComponentSplitSaturatedSparseHybridMinSeparationRadiusScale = 0.55f;
+    float localComponentSplitSaturatedSparseHybridMaxSeparationRadiusScale = 1.0f;
+    float localComponentSplitSaturatedSparseHybridMaxMidpointRadiusScale = 0.75f;
+    int localComponentSplitSaturatedSparseHybridMinSignalBoxes = 6;
+    float localComponentSplitSaturatedSparseHybridMinSignalBrightness = 0.20f;
+    float localComponentSplitSaturatedSparseHybridMinSignalConfidence = 0.70f;
+    bool localComponentSplitSaturatedSparseHybridNeighborOwnershipFilterEnabled = true;
+    float localComponentSplitSaturatedSparseHybridNeighborOwnershipScale = 0.60f;
+    // Generate the opposite daughter from the observed merged-body centroid:
+    // R = G + scale * (G - L), where L is the local component and G is the
+    // compact current signal center.
+    float localComponentSplitSaturatedSparseHybridReflectionScale = 1.0f;
+    // Early divisions can contain two saturated cores inside one continuous
+    // bright body, so the ordinary dark-valley threshold is too strict for
+    // this one narrowly identified proposal family. The switch and limit are
+    // independent of the hybrid proposal switch for controlled rollback.
+    bool localComponentSplitSaturatedSparseHybridValleyOverrideEnabled = false;
+    float localComponentSplitSaturatedSparseHybridMaxValleyRatio = 1.0f;
+    // The hybrid already requires saturated sparse local evidence plus a
+    // compact, high-quality, unowned current-frame center. Keep a positive
+    // image-improvement gate, but configure it independently from ordinary
+    // split proposals.
+    bool localComponentSplitSaturatedSparseHybridCostOverrideEnabled = false;
+    float localComponentSplitSaturatedSparseHybridMinCostImprovement = 1500.0f;
+
+    float chunkConfidenceBrightnessWeight = 0.55f;
+    float chunkConfidenceSizeWeight = 0.30f;
+    float chunkConfidenceCompactnessWeight = 0.15f;
+    float chunkConfidenceSizeSaturationBoxes = 8.0f;
+    float chunkConfidenceCompactnessExponent = 1.0f;
+    float priorityDistanceWeight = 1.0f;
+    float priorityConfidenceWeight = 1.0f;
+    float prioritySnapshotBias = -0.25f;
+    float priorityExactCenterBias = -0.50f;
+    float priorityStochasticBias = 0.50f;
+
+    // Optional offline evidence. Future-frame centers remain ordinary
+    // proposals but pay a configurable priority penalty for every frame of
+    // lookahead. Disabled by default so streaming and legacy behavior remain
+    // unchanged.
+    bool lookaheadEvidenceEnabled = false;
+    int lookaheadFrames = 0;
+    float lookaheadPriorityPenaltyPerFrame = 0.0f;
+
+    // Keep recent split daughters on their inherited sides of the plane
+    // perpendicular to their previous-frame separation axis. This guards both
+    // exact-center selection and the small post-center refinement loop.
+    bool continuationSiblingHalfspaceEnabled = false;
+    float continuationSiblingHalfspaceToleranceMinRadiusFraction = 0.0f;
+
+    float stochasticSigmaMinRadiusFraction = 0.10f;
+    float stochasticSigmaMaxRadiusFraction = 0.50f;
+    float stochasticSigmaAbsoluteMin = 0.0f;
+    float stochasticSigmaAbsoluteMax = 1000000.0f;
+
+    std::string splitScheduleMode = "probability_equivalent_per_parent";
+    int splitScheduleReferenceIterationsPerCell = 50;
+    float splitScheduleForceProbabilityThreshold = 0.0f;
+    // Evaluate only clearly resolved two-lobe parents before continuation can
+    // move them onto one daughter. Marginal probability-only attempts retain
+    // the legacy continuation-first ordering to avoid premature divisions.
+    bool splitScheduleEvidenceFirstEnabled = false;
+    float splitScheduleEvidenceFirstMinSeparationShortRadiusFraction = 1.50f;
+    int splitScheduleEvidenceFirstMinKeptPixels = 20;
+    // A rejected split must restore the frozen parent exactly in CU4.  The
+    // legacy path can opt back into its extra random deformation via YAML.
+    bool splitRejectCompensationEnabled = false;
+    // The shared daughter cooldown remains the default hard guard.  CU4 may
+    // bypass it only for an old-enough daughter whose current image pre-pass
+    // already resolves two centers well beyond the parent's short radius.
+    // This only permits candidate generation; all normal split validators
+    // and cost gates still apply.
+    bool splitDaughterCooldownEvidenceBypassEnabled = false;
+    int splitDaughterCooldownEvidenceBypassMinAgeFrames = 6;
+    float splitDaughterCooldownEvidenceBypassMinSeparationShortRadiusFraction = 1.50f;
+    int splitDaughterCooldownEvidenceBypassMinKeptPixels = 20;
+    std::uint64_t deterministicSeed = 1;
+    std::string deterministicSeedNamespace = "candidate_batch_v1";
+
+    bool chunkEvidenceEnabled = true;
+    bool includeWeightedCenter = true;
+    bool includeGeometricCenter = true;
+    bool includeRobustCenter = true;
+    bool includePeakCenter = true;
+
+    void explodeConfig(const YAML::Node &node)
+    {
+        if (!node) return;
+#define READ_CB(name, key) if (node[key]) name = node[key].as<decltype(name)>()
+        READ_CB(enabled, "enabled");
+        READ_CB(shadowMode, "shadow_mode");
+        READ_CB(exportDiagnostics, "export_diagnostics");
+        READ_CB(perParentFreshEvidencePoolEnabled,
+                "per_parent_fresh_evidence_pool_enabled");
+        READ_CB(maxCandidatesPerParent, "max_candidates_per_parent");
+        READ_CB(maxSnapshotAnchors, "max_snapshot_anchors");
+        READ_CB(maxExactChunkCenters, "max_exact_chunk_centers");
+        READ_CB(expensiveTopK, "expensive_top_k");
+        READ_CB(continuationRefineIterationsPerParent,
+                "continuation_refine_iterations_per_parent");
+        READ_CB(continuationRefineAnchorDistanceGateEnabled,
+                "continuation_refine_anchor_distance_gate_enabled");
+        READ_CB(continuationRefineMaxAnchorDistanceMinRadiusFraction,
+                "continuation_refine_max_anchor_distance_min_radius_fraction");
+        READ_CB(stochasticCandidatesPerParent,
+                "stochastic_candidates_per_parent");
+        READ_CB(absoluteImprovementMargin, "absolute_improvement_margin");
+        READ_CB(fractionalImprovementMargin, "fractional_improvement_margin");
+        READ_CB(continuationRefineAbsoluteImprovementMargin,
+                "continuation_refine_absolute_improvement_margin");
+        READ_CB(winnerReevaluationTolerance,
+                "winner_reevaluation_tolerance");
+        READ_CB(deduplicationDistanceAbsolute,
+                "deduplication_distance_absolute");
+        READ_CB(deduplicationDistanceMinRadiusFraction,
+                "deduplication_distance_min_radius_fraction");
+        READ_CB(chunkAssociationDistanceAbsolute,
+                "chunk_association_distance_absolute");
+        READ_CB(chunkAssociationDistanceMinRadiusFraction,
+                "chunk_association_distance_min_radius_fraction");
+        READ_CB(chunkMinBoxes, "chunk_min_boxes");
+        READ_CB(chunkMinVoxels, "chunk_min_voxels");
+        READ_CB(chunkMinBrightness, "chunk_min_brightness");
+        READ_CB(chunkMinConfidence, "chunk_min_confidence");
+        READ_CB(backgroundDropReattachEnabled,
+                "background_drop_reattach_enabled");
+        READ_CB(backgroundDropObservedTopFraction,
+                "background_drop_observed_top_fraction");
+        READ_CB(backgroundDropMaxObservedModelContrastRatio,
+                "background_drop_max_observed_model_contrast_ratio");
+        READ_CB(backgroundDropMinModelContrast,
+                "background_drop_min_model_contrast");
+        READ_CB(backgroundDropSiblingHalfspaceEnabled,
+                "background_drop_sibling_halfspace_enabled");
+        READ_CB(backgroundDropHoldIfNoSafeCenter,
+                "background_drop_hold_if_no_safe_center");
+        READ_CB(backgroundDropSkipCandidateBatchIfReattached,
+                "background_drop_skip_candidate_batch_if_reattached");
+        READ_CB(backgroundDropExplicitSplitBypassHoldEnabled,
+                "background_drop_explicit_split_bypass_hold_enabled");
+        READ_CB(backgroundDropCurrentLocalSplitOnlyEnabled,
+                "background_drop_current_local_split_only_enabled");
+        READ_CB(backgroundDropCurrentLocalPrepassFallbackEnabled,
+                "background_drop_current_local_prepass_fallback_enabled");
+        READ_CB(backgroundDropCurrentLocalPrepassFallbackMinKeptPixels,
+                "background_drop_current_local_prepass_fallback_min_kept_pixels");
+        READ_CB(backgroundDropCurrentLocalClusterIterations,
+                "background_drop_current_local_cluster_iterations");
+        READ_CB(backgroundDropCurrentLocalProjectedSeedDistanceRadiusFraction,
+                "background_drop_current_local_projected_seed_distance_radius_fraction");
+        READ_CB(backgroundDropCurrentLocalClusterGatherRadiusScale,
+                "background_drop_current_local_cluster_gather_radius_scale");
+        READ_CB(backgroundDropCurrentLocalClusterMinWeightFraction,
+                "background_drop_current_local_cluster_min_weight_fraction");
+        READ_CB(backgroundDropCurrentLocalClusterMinVarianceReduction,
+                "background_drop_current_local_cluster_min_variance_reduction");
+        READ_CB(backgroundDropCurrentLocalPrepassFallbackMaxAnchorDistanceRadiusFraction,
+                "background_drop_current_local_prepass_fallback_max_anchor_distance_radius_fraction");
+        READ_CB(backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction,
+                "background_drop_current_local_prepass_fallback_max_midpoint_distance_radius_fraction");
+        READ_CB(backgroundDropCurrentLocalPrepassFallbackMinCostImprovement,
+                "background_drop_current_local_prepass_fallback_min_cost_improvement");
+        READ_CB(localComponentSplitCentersEnabled,
+                "local_component_split_centers_enabled");
+        READ_CB(localComponentSplitSphereRadiusScale,
+                "local_component_split_sphere_radius_scale");
+        READ_CB(localComponentSplitConnectivityRadius,
+                "local_component_split_connectivity_radius");
+        READ_CB(localComponentSplitMinComponentVoxels,
+                "local_component_split_min_component_voxels");
+        READ_CB(localComponentSplitMaxMidpointRadiusScale,
+                "local_component_split_max_midpoint_radius_scale");
+        READ_CB(localComponentSplitMinAxisAlignment,
+                "local_component_split_min_axis_alignment");
+        READ_CB(localComponentSplitNeighborOwnershipFilterEnabled,
+                "local_component_split_neighbor_ownership_filter_enabled");
+        READ_CB(localComponentSplitNeighborOwnershipScale,
+                "local_component_split_neighbor_ownership_scale");
+        READ_CB(localComponentSplitSaturatedSparseFallbackEnabled,
+                "local_component_split_saturated_sparse_fallback_enabled");
+        READ_CB(localComponentSplitSaturatedSparseMinThreshold,
+                "local_component_split_saturated_sparse_min_threshold");
+        READ_CB(localComponentSplitSaturatedSparseMaxTotalVoxels,
+                "local_component_split_saturated_sparse_max_total_voxels");
+        READ_CB(localComponentSplitSaturatedSparseHybridEnabled,
+                "local_component_split_saturated_sparse_hybrid_enabled");
+        READ_CB(localComponentSplitSaturatedSparseHybridMinSeparationRadiusScale,
+                "local_component_split_saturated_sparse_hybrid_min_separation_radius_scale");
+        READ_CB(localComponentSplitSaturatedSparseHybridMaxSeparationRadiusScale,
+                "local_component_split_saturated_sparse_hybrid_max_separation_radius_scale");
+        READ_CB(localComponentSplitSaturatedSparseHybridMaxMidpointRadiusScale,
+                "local_component_split_saturated_sparse_hybrid_max_midpoint_radius_scale");
+        READ_CB(localComponentSplitSaturatedSparseHybridMinSignalBoxes,
+                "local_component_split_saturated_sparse_hybrid_min_signal_boxes");
+        READ_CB(localComponentSplitSaturatedSparseHybridMinSignalBrightness,
+                "local_component_split_saturated_sparse_hybrid_min_signal_brightness");
+        READ_CB(localComponentSplitSaturatedSparseHybridMinSignalConfidence,
+                "local_component_split_saturated_sparse_hybrid_min_signal_confidence");
+        READ_CB(localComponentSplitSaturatedSparseHybridNeighborOwnershipFilterEnabled,
+                "local_component_split_saturated_sparse_hybrid_neighbor_ownership_filter_enabled");
+        READ_CB(localComponentSplitSaturatedSparseHybridNeighborOwnershipScale,
+                "local_component_split_saturated_sparse_hybrid_neighbor_ownership_scale");
+        READ_CB(localComponentSplitSaturatedSparseHybridReflectionScale,
+                "local_component_split_saturated_sparse_hybrid_reflection_scale");
+        READ_CB(localComponentSplitSaturatedSparseHybridValleyOverrideEnabled,
+                "local_component_split_saturated_sparse_hybrid_valley_override_enabled");
+        READ_CB(localComponentSplitSaturatedSparseHybridMaxValleyRatio,
+                "local_component_split_saturated_sparse_hybrid_max_valley_ratio");
+        READ_CB(localComponentSplitSaturatedSparseHybridMinCostImprovement,
+                "local_component_split_saturated_sparse_hybrid_min_cost_improvement");
+        READ_CB(localComponentSplitSaturatedSparseHybridCostOverrideEnabled,
+                "local_component_split_saturated_sparse_hybrid_cost_override_enabled");
+        READ_CB(chunkConfidenceBrightnessWeight,
+                "chunk_confidence_brightness_weight");
+        READ_CB(chunkConfidenceSizeWeight, "chunk_confidence_size_weight");
+        READ_CB(chunkConfidenceCompactnessWeight,
+                "chunk_confidence_compactness_weight");
+        READ_CB(chunkConfidenceSizeSaturationBoxes,
+                "chunk_confidence_size_saturation_boxes");
+        READ_CB(chunkConfidenceCompactnessExponent,
+                "chunk_confidence_compactness_exponent");
+        READ_CB(priorityDistanceWeight, "priority_distance_weight");
+        READ_CB(priorityConfidenceWeight, "priority_confidence_weight");
+        READ_CB(prioritySnapshotBias, "priority_snapshot_bias");
+        READ_CB(priorityExactCenterBias, "priority_exact_center_bias");
+        READ_CB(priorityStochasticBias, "priority_stochastic_bias");
+        READ_CB(lookaheadEvidenceEnabled,
+                "lookahead_evidence_enabled");
+        READ_CB(lookaheadFrames, "lookahead_frames");
+        READ_CB(lookaheadPriorityPenaltyPerFrame,
+                "lookahead_priority_penalty_per_frame");
+        READ_CB(continuationSiblingHalfspaceEnabled,
+                "continuation_sibling_halfspace_enabled");
+        READ_CB(continuationSiblingHalfspaceToleranceMinRadiusFraction,
+                "continuation_sibling_halfspace_tolerance_min_radius_fraction");
+        READ_CB(stochasticSigmaMinRadiusFraction,
+                "stochastic_sigma_min_radius_fraction");
+        READ_CB(stochasticSigmaMaxRadiusFraction,
+                "stochastic_sigma_max_radius_fraction");
+        READ_CB(stochasticSigmaAbsoluteMin,
+                "stochastic_sigma_absolute_min");
+        READ_CB(stochasticSigmaAbsoluteMax,
+                "stochastic_sigma_absolute_max");
+        READ_CB(splitScheduleMode, "split_schedule_mode");
+        READ_CB(splitScheduleReferenceIterationsPerCell,
+                "split_schedule_reference_iterations_per_cell");
+        READ_CB(splitScheduleForceProbabilityThreshold,
+                "split_schedule_force_probability_threshold");
+        READ_CB(splitScheduleEvidenceFirstEnabled,
+                "split_schedule_evidence_first_enabled");
+        READ_CB(splitScheduleEvidenceFirstMinSeparationShortRadiusFraction,
+                "split_schedule_evidence_first_min_separation_short_radius_fraction");
+        READ_CB(splitScheduleEvidenceFirstMinKeptPixels,
+                "split_schedule_evidence_first_min_kept_pixels");
+        READ_CB(splitRejectCompensationEnabled,
+                "split_reject_compensation_enabled");
+        READ_CB(splitDaughterCooldownEvidenceBypassEnabled,
+                "split_daughter_cooldown_evidence_bypass_enabled");
+        READ_CB(splitDaughterCooldownEvidenceBypassMinAgeFrames,
+                "split_daughter_cooldown_evidence_bypass_min_age_frames");
+        READ_CB(splitDaughterCooldownEvidenceBypassMinSeparationShortRadiusFraction,
+                "split_daughter_cooldown_evidence_bypass_min_separation_short_radius_fraction");
+        READ_CB(splitDaughterCooldownEvidenceBypassMinKeptPixels,
+                "split_daughter_cooldown_evidence_bypass_min_kept_pixels");
+        READ_CB(deterministicSeed, "deterministic_seed");
+        READ_CB(deterministicSeedNamespace,
+                "deterministic_seed_namespace");
+        READ_CB(chunkEvidenceEnabled, "chunk_evidence_enabled");
+        READ_CB(includeWeightedCenter, "include_weighted_center");
+        READ_CB(includeGeometricCenter, "include_geometric_center");
+        READ_CB(includeRobustCenter, "include_robust_center");
+        READ_CB(includePeakCenter, "include_peak_center");
+#undef READ_CB
+        validate();
+    }
+
+    void validate() const
+    {
+        const auto nonnegativeInt = [](int value, const char *name) {
+            if (value < 0) {
+                throw std::invalid_argument(std::string("candidate_batch.") +
+                                            name + " must be nonnegative");
+            }
+        };
+        const auto finiteNonnegative = [](double value, const char *name) {
+            if (!std::isfinite(value) || value < 0.0) {
+                throw std::invalid_argument(std::string("candidate_batch.") +
+                                            name +
+                                            " must be finite and nonnegative");
+            }
+        };
+        const auto finite = [](double value, const char *name) {
+            if (!std::isfinite(value)) {
+                throw std::invalid_argument(std::string("candidate_batch.") +
+                                            name + " must be finite");
+            }
+        };
+        nonnegativeInt(maxCandidatesPerParent, "max_candidates_per_parent");
+        nonnegativeInt(maxSnapshotAnchors, "max_snapshot_anchors");
+        nonnegativeInt(maxExactChunkCenters, "max_exact_chunk_centers");
+        nonnegativeInt(expensiveTopK, "expensive_top_k");
+        nonnegativeInt(continuationRefineIterationsPerParent,
+                       "continuation_refine_iterations_per_parent");
+        nonnegativeInt(stochasticCandidatesPerParent,
+                       "stochastic_candidates_per_parent");
+        nonnegativeInt(chunkMinBoxes, "chunk_min_boxes");
+        nonnegativeInt(lookaheadFrames, "lookahead_frames");
+        nonnegativeInt(splitScheduleReferenceIterationsPerCell,
+                       "split_schedule_reference_iterations_per_cell");
+        nonnegativeInt(splitScheduleEvidenceFirstMinKeptPixels,
+                       "split_schedule_evidence_first_min_kept_pixels");
+        nonnegativeInt(splitDaughterCooldownEvidenceBypassMinAgeFrames,
+                       "split_daughter_cooldown_evidence_bypass_min_age_frames");
+        nonnegativeInt(splitDaughterCooldownEvidenceBypassMinKeptPixels,
+                       "split_daughter_cooldown_evidence_bypass_min_kept_pixels");
+        nonnegativeInt(
+            backgroundDropCurrentLocalPrepassFallbackMinKeptPixels,
+            "background_drop_current_local_prepass_fallback_min_kept_pixels");
+        nonnegativeInt(
+            backgroundDropCurrentLocalClusterIterations,
+            "background_drop_current_local_cluster_iterations");
+        if (enabled && (maxCandidatesPerParent < 1 || expensiveTopK < 1)) {
+            throw std::invalid_argument(
+                "candidate_batch enabled mode requires max_candidates_per_parent and expensive_top_k >= 1");
+        }
+        if (expensiveTopK > maxCandidatesPerParent && maxCandidatesPerParent > 0) {
+            throw std::invalid_argument(
+                "candidate_batch.expensive_top_k cannot exceed max_candidates_per_parent");
+        }
+        finiteNonnegative(absoluteImprovementMargin,
+                          "absolute_improvement_margin");
+        finiteNonnegative(fractionalImprovementMargin,
+                          "fractional_improvement_margin");
+        finiteNonnegative(continuationRefineAbsoluteImprovementMargin,
+                          "continuation_refine_absolute_improvement_margin");
+        finiteNonnegative(
+            continuationRefineMaxAnchorDistanceMinRadiusFraction,
+            "continuation_refine_max_anchor_distance_min_radius_fraction");
+        finiteNonnegative(winnerReevaluationTolerance,
+                          "winner_reevaluation_tolerance");
+        finiteNonnegative(deduplicationDistanceAbsolute,
+                          "deduplication_distance_absolute");
+        finiteNonnegative(deduplicationDistanceMinRadiusFraction,
+                          "deduplication_distance_min_radius_fraction");
+        finiteNonnegative(chunkAssociationDistanceAbsolute,
+                          "chunk_association_distance_absolute");
+        finiteNonnegative(chunkAssociationDistanceMinRadiusFraction,
+                          "chunk_association_distance_min_radius_fraction");
+        finiteNonnegative(chunkMinVoxels, "chunk_min_voxels");
+        finiteNonnegative(chunkMinBrightness, "chunk_min_brightness");
+        finiteNonnegative(chunkMinConfidence, "chunk_min_confidence");
+        finiteNonnegative(backgroundDropObservedTopFraction,
+                          "background_drop_observed_top_fraction");
+        finiteNonnegative(backgroundDropMaxObservedModelContrastRatio,
+                          "background_drop_max_observed_model_contrast_ratio");
+        finiteNonnegative(backgroundDropMinModelContrast,
+                          "background_drop_min_model_contrast");
+        finiteNonnegative(
+            backgroundDropCurrentLocalProjectedSeedDistanceRadiusFraction,
+            "background_drop_current_local_projected_seed_distance_radius_fraction");
+        finiteNonnegative(
+            backgroundDropCurrentLocalClusterGatherRadiusScale,
+            "background_drop_current_local_cluster_gather_radius_scale");
+        finiteNonnegative(
+            backgroundDropCurrentLocalClusterMinWeightFraction,
+            "background_drop_current_local_cluster_min_weight_fraction");
+        finiteNonnegative(
+            backgroundDropCurrentLocalClusterMinVarianceReduction,
+            "background_drop_current_local_cluster_min_variance_reduction");
+        if (backgroundDropCurrentLocalClusterMinWeightFraction > 0.5f) {
+            throw std::invalid_argument(
+                "candidate_batch.background_drop_current_local_cluster_min_weight_fraction must be <= 0.5");
+        }
+        if (backgroundDropCurrentLocalClusterMinVarianceReduction > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.background_drop_current_local_cluster_min_variance_reduction must be <= 1");
+        }
+        finiteNonnegative(
+            backgroundDropCurrentLocalPrepassFallbackMaxAnchorDistanceRadiusFraction,
+            "background_drop_current_local_prepass_fallback_max_anchor_distance_radius_fraction");
+        finiteNonnegative(
+            backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction,
+            "background_drop_current_local_prepass_fallback_max_midpoint_distance_radius_fraction");
+        finiteNonnegative(
+            backgroundDropCurrentLocalPrepassFallbackMinCostImprovement,
+            "background_drop_current_local_prepass_fallback_min_cost_improvement");
+        finiteNonnegative(localComponentSplitSphereRadiusScale,
+                          "local_component_split_sphere_radius_scale");
+        nonnegativeInt(localComponentSplitMinComponentVoxels,
+                       "local_component_split_min_component_voxels");
+        finiteNonnegative(localComponentSplitMaxMidpointRadiusScale,
+                          "local_component_split_max_midpoint_radius_scale");
+        finiteNonnegative(localComponentSplitMinAxisAlignment,
+                          "local_component_split_min_axis_alignment");
+        finiteNonnegative(localComponentSplitNeighborOwnershipScale,
+                          "local_component_split_neighbor_ownership_scale");
+        finiteNonnegative(localComponentSplitSaturatedSparseMinThreshold,
+                          "local_component_split_saturated_sparse_min_threshold");
+        nonnegativeInt(localComponentSplitSaturatedSparseMaxTotalVoxels,
+                       "local_component_split_saturated_sparse_max_total_voxels");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMinSeparationRadiusScale,
+                          "local_component_split_saturated_sparse_hybrid_min_separation_radius_scale");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMaxSeparationRadiusScale,
+                          "local_component_split_saturated_sparse_hybrid_max_separation_radius_scale");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMaxMidpointRadiusScale,
+                          "local_component_split_saturated_sparse_hybrid_max_midpoint_radius_scale");
+        nonnegativeInt(localComponentSplitSaturatedSparseHybridMinSignalBoxes,
+                       "local_component_split_saturated_sparse_hybrid_min_signal_boxes");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMinSignalBrightness,
+                          "local_component_split_saturated_sparse_hybrid_min_signal_brightness");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMinSignalConfidence,
+                          "local_component_split_saturated_sparse_hybrid_min_signal_confidence");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridNeighborOwnershipScale,
+                          "local_component_split_saturated_sparse_hybrid_neighbor_ownership_scale");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridReflectionScale,
+                          "local_component_split_saturated_sparse_hybrid_reflection_scale");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMaxValleyRatio,
+                          "local_component_split_saturated_sparse_hybrid_max_valley_ratio");
+        finiteNonnegative(localComponentSplitSaturatedSparseHybridMinCostImprovement,
+                          "local_component_split_saturated_sparse_hybrid_min_cost_improvement");
+        if (localComponentSplitConnectivityRadius < 1 ||
+            localComponentSplitConnectivityRadius > 3) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_connectivity_radius must be in [1, 3]");
+        }
+        if (localComponentSplitMinAxisAlignment > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_min_axis_alignment must be <= 1");
+        }
+        if (localComponentSplitSaturatedSparseMinThreshold > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_saturated_sparse_min_threshold must be <= 1");
+        }
+        if (localComponentSplitSaturatedSparseHybridMaxSeparationRadiusScale <
+            localComponentSplitSaturatedSparseHybridMinSeparationRadiusScale) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_saturated_sparse_hybrid_max_separation_radius_scale must be >= min separation scale");
+        }
+        if (localComponentSplitSaturatedSparseHybridMinSignalConfidence > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_saturated_sparse_hybrid_min_signal_confidence must be <= 1");
+        }
+        if (localComponentSplitSaturatedSparseHybridMinSignalBrightness > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_saturated_sparse_hybrid_min_signal_brightness must be <= 1");
+        }
+        if (localComponentSplitSaturatedSparseHybridReflectionScale > 2.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_saturated_sparse_hybrid_reflection_scale must be <= 2");
+        }
+        if (localComponentSplitSaturatedSparseHybridMaxValleyRatio > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_saturated_sparse_hybrid_max_valley_ratio must be <= 1");
+        }
+        if (backgroundDropObservedTopFraction <= 0.0f ||
+            backgroundDropObservedTopFraction > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.background_drop_observed_top_fraction must be in (0, 1]");
+        }
+        if (backgroundDropMaxObservedModelContrastRatio > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.background_drop_max_observed_model_contrast_ratio cannot exceed 1");
+        }
+        finiteNonnegative(chunkConfidenceBrightnessWeight,
+                          "chunk_confidence_brightness_weight");
+        finiteNonnegative(chunkConfidenceSizeWeight,
+                          "chunk_confidence_size_weight");
+        finiteNonnegative(chunkConfidenceCompactnessWeight,
+                          "chunk_confidence_compactness_weight");
+        finiteNonnegative(chunkConfidenceSizeSaturationBoxes,
+                          "chunk_confidence_size_saturation_boxes");
+        finiteNonnegative(chunkConfidenceCompactnessExponent,
+                          "chunk_confidence_compactness_exponent");
+        finiteNonnegative(priorityDistanceWeight, "priority_distance_weight");
+        finiteNonnegative(priorityConfidenceWeight,
+                          "priority_confidence_weight");
+        finite(prioritySnapshotBias, "priority_snapshot_bias");
+        finite(priorityExactCenterBias, "priority_exact_center_bias");
+        finite(priorityStochasticBias, "priority_stochastic_bias");
+        finiteNonnegative(lookaheadPriorityPenaltyPerFrame,
+                          "lookahead_priority_penalty_per_frame");
+        finiteNonnegative(
+            continuationSiblingHalfspaceToleranceMinRadiusFraction,
+            "continuation_sibling_halfspace_tolerance_min_radius_fraction");
+        finiteNonnegative(stochasticSigmaMinRadiusFraction,
+                          "stochastic_sigma_min_radius_fraction");
+        finiteNonnegative(stochasticSigmaMaxRadiusFraction,
+                          "stochastic_sigma_max_radius_fraction");
+        finiteNonnegative(stochasticSigmaAbsoluteMin,
+                          "stochastic_sigma_absolute_min");
+        finiteNonnegative(stochasticSigmaAbsoluteMax,
+                          "stochastic_sigma_absolute_max");
+        finiteNonnegative(splitScheduleForceProbabilityThreshold,
+                          "split_schedule_force_probability_threshold");
+        finiteNonnegative(
+            splitScheduleEvidenceFirstMinSeparationShortRadiusFraction,
+            "split_schedule_evidence_first_min_separation_short_radius_fraction");
+        finiteNonnegative(
+            splitDaughterCooldownEvidenceBypassMinSeparationShortRadiusFraction,
+            "split_daughter_cooldown_evidence_bypass_min_separation_short_radius_fraction");
+        if (splitScheduleForceProbabilityThreshold > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.split_schedule_force_probability_threshold cannot exceed 1");
+        }
+        if (stochasticSigmaMinRadiusFraction >
+                stochasticSigmaMaxRadiusFraction ||
+            stochasticSigmaAbsoluteMin > stochasticSigmaAbsoluteMax) {
+            throw std::invalid_argument(
+                "candidate_batch stochastic sigma minimum cannot exceed maximum");
+        }
+        if (splitScheduleMode != "probability_equivalent_per_parent" &&
+            splitScheduleMode != "disabled") {
+            throw std::invalid_argument(
+                "candidate_batch.split_schedule_mode must be probability_equivalent_per_parent or disabled");
+        }
+        if (deterministicSeedNamespace.empty()) {
+            throw std::invalid_argument(
+                "candidate_batch.deterministic_seed_namespace cannot be empty");
+        }
+    }
+
+    void printConfig() const
+    {
+        std::cout << "Candidate Batch Config\n"
+                  << "enabled: " << enabled << '\n'
+                  << "shadow_mode: " << shadowMode << '\n'
+                  << "export_diagnostics: " << exportDiagnostics << '\n'
+                  << "max_candidates_per_parent: " << maxCandidatesPerParent << '\n'
+                  << "max_snapshot_anchors: " << maxSnapshotAnchors << '\n'
+                  << "max_exact_chunk_centers: " << maxExactChunkCenters << '\n'
+                  << "expensive_top_k: " << expensiveTopK << '\n'
+                  << "continuation_refine_iterations_per_parent: "
+                  << continuationRefineIterationsPerParent << '\n'
+                  << "continuation_refine_anchor_distance_gate_enabled: "
+                  << continuationRefineAnchorDistanceGateEnabled << '\n'
+                  << "continuation_refine_max_anchor_distance_min_radius_fraction: "
+                  << continuationRefineMaxAnchorDistanceMinRadiusFraction << '\n'
+                  << "stochastic_candidates_per_parent: "
+                  << stochasticCandidatesPerParent << '\n'
+                  << "absolute_improvement_margin: "
+                  << absoluteImprovementMargin << '\n'
+                  << "fractional_improvement_margin: "
+                  << fractionalImprovementMargin << '\n'
+                  << "continuation_refine_absolute_improvement_margin: "
+                  << continuationRefineAbsoluteImprovementMargin << '\n'
+                  << "winner_reevaluation_tolerance: "
+                  << winnerReevaluationTolerance << '\n'
+                  << "deduplication_distance_absolute: "
+                  << deduplicationDistanceAbsolute << '\n'
+                  << "deduplication_distance_min_radius_fraction: "
+                  << deduplicationDistanceMinRadiusFraction << '\n'
+                  << "chunk_association_distance_absolute: "
+                  << chunkAssociationDistanceAbsolute << '\n'
+                  << "chunk_association_distance_min_radius_fraction: "
+                  << chunkAssociationDistanceMinRadiusFraction << '\n'
+                  << "chunk_min_boxes: " << chunkMinBoxes << '\n'
+                  << "chunk_min_voxels: " << chunkMinVoxels << '\n'
+                  << "chunk_min_brightness: " << chunkMinBrightness << '\n'
+                  << "chunk_min_confidence: " << chunkMinConfidence << '\n'
+                  << "per_parent_fresh_evidence_pool_enabled: "
+                  << perParentFreshEvidencePoolEnabled << '\n'
+                  << "background_drop_reattach_enabled: "
+                  << backgroundDropReattachEnabled << '\n'
+                  << "background_drop_observed_top_fraction: "
+                  << backgroundDropObservedTopFraction << '\n'
+                  << "background_drop_max_observed_model_contrast_ratio: "
+                  << backgroundDropMaxObservedModelContrastRatio << '\n'
+                  << "background_drop_min_model_contrast: "
+                  << backgroundDropMinModelContrast << '\n'
+                  << "background_drop_sibling_halfspace_enabled: "
+                  << backgroundDropSiblingHalfspaceEnabled << '\n'
+                  << "background_drop_hold_if_no_safe_center: "
+                  << backgroundDropHoldIfNoSafeCenter << '\n'
+                  << "background_drop_skip_candidate_batch_if_reattached: "
+                  << backgroundDropSkipCandidateBatchIfReattached << '\n'
+                  << "background_drop_explicit_split_bypass_hold_enabled: "
+                  << backgroundDropExplicitSplitBypassHoldEnabled << '\n'
+                  << "background_drop_current_local_split_only_enabled: "
+                  << backgroundDropCurrentLocalSplitOnlyEnabled << '\n'
+                  << "background_drop_current_local_prepass_fallback_enabled: "
+                  << backgroundDropCurrentLocalPrepassFallbackEnabled << '\n'
+                  << "background_drop_current_local_prepass_fallback_min_kept_pixels: "
+                  << backgroundDropCurrentLocalPrepassFallbackMinKeptPixels << '\n'
+                  << "background_drop_current_local_cluster_iterations: "
+                  << backgroundDropCurrentLocalClusterIterations << '\n'
+                  << "background_drop_current_local_projected_seed_distance_radius_fraction: "
+                  << backgroundDropCurrentLocalProjectedSeedDistanceRadiusFraction << '\n'
+                  << "background_drop_current_local_cluster_gather_radius_scale: "
+                  << backgroundDropCurrentLocalClusterGatherRadiusScale << '\n'
+                  << "background_drop_current_local_cluster_min_weight_fraction: "
+                  << backgroundDropCurrentLocalClusterMinWeightFraction << '\n'
+                  << "background_drop_current_local_cluster_min_variance_reduction: "
+                  << backgroundDropCurrentLocalClusterMinVarianceReduction << '\n'
+                  << "background_drop_current_local_prepass_fallback_max_anchor_distance_radius_fraction: "
+                  << backgroundDropCurrentLocalPrepassFallbackMaxAnchorDistanceRadiusFraction << '\n'
+                  << "background_drop_current_local_prepass_fallback_max_midpoint_distance_radius_fraction: "
+                  << backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction << '\n'
+                  << "background_drop_current_local_prepass_fallback_min_cost_improvement: "
+                  << backgroundDropCurrentLocalPrepassFallbackMinCostImprovement << '\n'
+                  << "local_component_split_centers_enabled: "
+                  << localComponentSplitCentersEnabled << '\n'
+                  << "local_component_split_sphere_radius_scale: "
+                  << localComponentSplitSphereRadiusScale << '\n'
+                  << "local_component_split_connectivity_radius: "
+                  << localComponentSplitConnectivityRadius << '\n'
+                  << "local_component_split_min_component_voxels: "
+                  << localComponentSplitMinComponentVoxels << '\n'
+                  << "local_component_split_max_midpoint_radius_scale: "
+                  << localComponentSplitMaxMidpointRadiusScale << '\n'
+                  << "local_component_split_min_axis_alignment: "
+                  << localComponentSplitMinAxisAlignment << '\n'
+                  << "local_component_split_neighbor_ownership_filter_enabled: "
+                  << localComponentSplitNeighborOwnershipFilterEnabled << '\n'
+                  << "local_component_split_neighbor_ownership_scale: "
+                  << localComponentSplitNeighborOwnershipScale << '\n'
+                  << "local_component_split_saturated_sparse_fallback_enabled: "
+                  << localComponentSplitSaturatedSparseFallbackEnabled << '\n'
+                  << "local_component_split_saturated_sparse_min_threshold: "
+                  << localComponentSplitSaturatedSparseMinThreshold << '\n'
+                  << "local_component_split_saturated_sparse_max_total_voxels: "
+                  << localComponentSplitSaturatedSparseMaxTotalVoxels << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_enabled: "
+                  << localComponentSplitSaturatedSparseHybridEnabled << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_min_separation_radius_scale: "
+                  << localComponentSplitSaturatedSparseHybridMinSeparationRadiusScale << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_max_separation_radius_scale: "
+                  << localComponentSplitSaturatedSparseHybridMaxSeparationRadiusScale << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_max_midpoint_radius_scale: "
+                  << localComponentSplitSaturatedSparseHybridMaxMidpointRadiusScale << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_min_signal_boxes: "
+                  << localComponentSplitSaturatedSparseHybridMinSignalBoxes << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_min_signal_brightness: "
+                  << localComponentSplitSaturatedSparseHybridMinSignalBrightness << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_min_signal_confidence: "
+                  << localComponentSplitSaturatedSparseHybridMinSignalConfidence << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_neighbor_ownership_filter_enabled: "
+                  << localComponentSplitSaturatedSparseHybridNeighborOwnershipFilterEnabled << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_neighbor_ownership_scale: "
+                  << localComponentSplitSaturatedSparseHybridNeighborOwnershipScale << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_reflection_scale: "
+                  << localComponentSplitSaturatedSparseHybridReflectionScale << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_valley_override_enabled: "
+                  << localComponentSplitSaturatedSparseHybridValleyOverrideEnabled << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_max_valley_ratio: "
+                  << localComponentSplitSaturatedSparseHybridMaxValleyRatio << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_min_cost_improvement: "
+                  << localComponentSplitSaturatedSparseHybridMinCostImprovement << '\n'
+                  << "local_component_split_saturated_sparse_hybrid_cost_override_enabled: "
+                  << localComponentSplitSaturatedSparseHybridCostOverrideEnabled << '\n'
+                  << "chunk_confidence_brightness_weight: "
+                  << chunkConfidenceBrightnessWeight << '\n'
+                  << "chunk_confidence_size_weight: "
+                  << chunkConfidenceSizeWeight << '\n'
+                  << "chunk_confidence_compactness_weight: "
+                  << chunkConfidenceCompactnessWeight << '\n'
+                  << "chunk_confidence_size_saturation_boxes: "
+                  << chunkConfidenceSizeSaturationBoxes << '\n'
+                  << "chunk_confidence_compactness_exponent: "
+                  << chunkConfidenceCompactnessExponent << '\n'
+                  << "priority_distance_weight: " << priorityDistanceWeight << '\n'
+                  << "priority_confidence_weight: " << priorityConfidenceWeight << '\n'
+                  << "priority_snapshot_bias: " << prioritySnapshotBias << '\n'
+                  << "priority_exact_center_bias: " << priorityExactCenterBias << '\n'
+                  << "priority_stochastic_bias: " << priorityStochasticBias << '\n'
+                  << "lookahead_evidence_enabled: "
+                  << lookaheadEvidenceEnabled << '\n'
+                  << "lookahead_frames: " << lookaheadFrames << '\n'
+                  << "lookahead_priority_penalty_per_frame: "
+                  << lookaheadPriorityPenaltyPerFrame << '\n'
+                  << "continuation_sibling_halfspace_enabled: "
+                  << continuationSiblingHalfspaceEnabled << '\n'
+                  << "continuation_sibling_halfspace_tolerance_min_radius_fraction: "
+                  << continuationSiblingHalfspaceToleranceMinRadiusFraction << '\n'
+                  << "stochastic_sigma_min_radius_fraction: "
+                  << stochasticSigmaMinRadiusFraction << '\n'
+                  << "stochastic_sigma_max_radius_fraction: "
+                  << stochasticSigmaMaxRadiusFraction << '\n'
+                  << "stochastic_sigma_absolute_min: "
+                  << stochasticSigmaAbsoluteMin << '\n'
+                  << "stochastic_sigma_absolute_max: "
+                  << stochasticSigmaAbsoluteMax << '\n'
+                  << "split_schedule_mode: " << splitScheduleMode << '\n'
+                  << "split_schedule_reference_iterations_per_cell: "
+                  << splitScheduleReferenceIterationsPerCell << '\n'
+                  << "split_schedule_force_probability_threshold: "
+                  << splitScheduleForceProbabilityThreshold << '\n'
+                  << "split_schedule_evidence_first_enabled: "
+                  << splitScheduleEvidenceFirstEnabled << '\n'
+                  << "split_schedule_evidence_first_min_separation_short_radius_fraction: "
+                  << splitScheduleEvidenceFirstMinSeparationShortRadiusFraction << '\n'
+                  << "split_schedule_evidence_first_min_kept_pixels: "
+                  << splitScheduleEvidenceFirstMinKeptPixels << '\n'
+                  << "split_reject_compensation_enabled: "
+                  << splitRejectCompensationEnabled << '\n'
+                  << "split_daughter_cooldown_evidence_bypass_enabled: "
+                  << splitDaughterCooldownEvidenceBypassEnabled << '\n'
+                  << "split_daughter_cooldown_evidence_bypass_min_age_frames: "
+                  << splitDaughterCooldownEvidenceBypassMinAgeFrames << '\n'
+                  << "split_daughter_cooldown_evidence_bypass_min_separation_short_radius_fraction: "
+                  << splitDaughterCooldownEvidenceBypassMinSeparationShortRadiusFraction << '\n'
+                  << "split_daughter_cooldown_evidence_bypass_min_kept_pixels: "
+                  << splitDaughterCooldownEvidenceBypassMinKeptPixels << '\n'
+                  << "deterministic_seed: " << deterministicSeed << '\n'
+                  << "deterministic_seed_namespace: "
+                  << deterministicSeedNamespace << '\n'
+                  << "chunk_evidence_enabled: " << chunkEvidenceEnabled << '\n'
+                  << "include_weighted_center: " << includeWeightedCenter << '\n'
+                  << "include_geometric_center: " << includeGeometricCenter << '\n'
+                  << "include_robust_center: " << includeRobustCenter << '\n'
+                  << "include_peak_center: " << includePeakCenter << '\n';
+    }
+};
+
 class BaseConfig {
 public:
     std::string cellType;
@@ -10605,6 +11946,7 @@ public:
     SimulationConfig simulation;
     ProbabilityConfig prob;
     CellLumenConfig cellLumen;
+    CandidateBatchConfig candidateBatch;
     struct RuntimeDensityProfile {
         std::string name;
         float minMedianNearestNeighborPx = -1000000000.0f;
@@ -10634,6 +11976,7 @@ public:
           simulation(other.simulation),
           prob(other.prob),
           cellLumen(other.cellLumen),
+          candidateBatch(other.candidateBatch),
           runtimeDensityProfileSelectionEnabled(other.runtimeDensityProfileSelectionEnabled),
           runtimeDensityProfileMetric(other.runtimeDensityProfileMetric),
           runtimeDensityDefaultProfile(other.runtimeDensityDefaultProfile),
@@ -10647,6 +11990,7 @@ public:
             simulation = other.simulation;
             prob = other.prob;
             cellLumen = other.cellLumen;
+            candidateBatch = other.candidateBatch;
             runtimeDensityProfileSelectionEnabled = other.runtimeDensityProfileSelectionEnabled;
             runtimeDensityProfileMetric = other.runtimeDensityProfileMetric;
             runtimeDensityDefaultProfile = other.runtimeDensityDefaultProfile;
@@ -10668,7 +12012,37 @@ public:
         simulation.explodeN2V2Config(node["n2v2_preprocess"]);
         simulation.validatePreprocessingConfig();
         prob.explodeConfig(node["prob"]);
+        if (!std::isfinite(
+                prob.celluniverse4_split_sibling_rod_min_raw_shape_ratio) ||
+            prob.celluniverse4_split_sibling_rod_min_raw_shape_ratio < 1.0f) {
+            throw std::invalid_argument(
+                "prob.celluniverse4_split_sibling_rod_min_raw_shape_ratio must be finite and at least 1");
+        }
+        if (!std::isfinite(
+                prob.celluniverse4_split_sibling_rod_max_overlap_fraction) ||
+            prob.celluniverse4_split_sibling_rod_max_overlap_fraction < 0.0f ||
+            prob.celluniverse4_split_sibling_rod_max_overlap_fraction > 1.0f) {
+            throw std::invalid_argument(
+                "prob.celluniverse4_split_sibling_rod_max_overlap_fraction must be in [0, 1]");
+        }
         if (node["cell_lumen"]) cellLumen.explodeConfig(node["cell_lumen"]);
+        if (node["candidate_batch"]) {
+            candidateBatch.explodeConfig(node["candidate_batch"]);
+        }
+        if (simulation.celluniverse4_enabled) {
+            if (simulation.celluniverse2_enabled ||
+                simulation.celluniverse3_enabled || cellLumen.enabled) {
+                throw std::invalid_argument(
+                    "CellUniverse4 cannot be combined with CellUniverse2, CellUniverse3, or CellLumen");
+            }
+            if (!candidateBatch.enabled) {
+                throw std::invalid_argument(
+                    "simulation.celluniverse4_enabled requires candidate_batch.enabled=true");
+            }
+        } else if (candidateBatch.enabled) {
+            throw std::invalid_argument(
+                "candidate_batch.enabled requires simulation.celluniverse4_enabled=true");
+        }
         if (node["runtime_density_profiles"]) {
             const YAML::Node runtime = node["runtime_density_profiles"];
             if (runtime["enabled"]) {
@@ -10728,6 +12102,7 @@ public:
         simulation.printConfig();
         prob.printConfig();
         cellLumen.printConfig();
+        candidateBatch.printConfig();
         std::cout << "runtimeDensityProfileSelectionEnabled: "
                   << runtimeDensityProfileSelectionEnabled << '\n';
         if (runtimeDensityProfileSelectionEnabled) {

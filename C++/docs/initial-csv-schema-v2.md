@@ -17,13 +17,18 @@ For schema v2:
    brightness fallback.
 4. The one row with `isHotBackgroundRegion=1` is background metadata and is
    never created as a cell.
-5. That row's cold/hot levels, rotated ellipsoid, and soft margin initialize a
-   per-frame spatial background field. The cold value is also installed as the
-   scalar fallback for code that has no voxel location.
+5. That row's rotated ellipsoid and soft margin initialize a per-frame spatial
+   background field. Its cold/hot levels are fallback seeds only: on the first
+   prepared runtime frame, CellUniverse robustly re-estimates both values in
+   the runtime image's own intensity coordinate system and installs those
+   estimates directly. The accepted cold value is also installed as the scalar
+   fallback for code that has no voxel location.
 
-The current interpolation implementation requires a positive integer ratio.
-Schema-v2 input with a fractional ratio fails with a clear error rather than
-being silently truncated.
+The interpolation ratio must be finite and at least `1`; fractional ratios are
+supported. For a raw stack with `N > 1` slices, the runtime creates
+`round_to_even((N - 1) * ratio) + 1` output slices and linearly samples source
+positions from `0` through `N - 1` with both endpoints preserved. This matches
+the initializer's `round((source_depth - 1) * ratio) + 1`/`linspace` contract.
 
 The reader rejects missing or duplicate required columns, conflicting
 row-level metadata, unsupported/future schema versions, invalid radii or
@@ -54,17 +59,33 @@ center/radius changes from oriented boundary evidence in a narrow shell. It:
 - freezes the previous geometry when evidence is sparse, flat, inconsistent,
   or implausibly large;
 - robustly refreshes cold/hot levels from high-confidence interior/exterior
-  samples, retaining current/seed values when those estimates are unsafe.
+  samples, excluding expanded current-cell supports and trimming both tails;
+- snaps safe first-frame estimates into the runtime intensity scale, then uses
+  the robust current-frame estimates directly when they are within the safety
+  cap and caps larger per-frame intensity changes;
+- retains current/seed values when those estimates are unsafe.
 
-The resulting per-voxel field is installed before signal-center localization,
-PCA fitting, weighted-center pulls, synthesis, and CellUniverse3 window
-guidance. It supersedes the legacy dataset-wide maximum-intensity hot-region
-map for runs that contain schema-v2 envelope metadata. Runs without that
-metadata retain the existing scalar or configured dual-background logic.
+The runtime-recalibrated per-voxel field is the physical background used for
+synthesis, compact/full export, and CellUniverse3 window signal subtraction.
+Foreground fitting uses a separate field with the same tracked rotated
+soft-ellipsoid geometry but the initializer-confirmed cold/hot scale. This
+prevents a physical background correction from changing PCA support, split
+evidence, or weighted-center pulls. The physical field still supersedes the
+legacy dataset-wide maximum-intensity hot-region map for runs that contain
+schema-v2 envelope metadata. Runs without that metadata retain the existing
+scalar or configured dual-background logic because foreground-reference
+lookups fall back to the physical background.
+
+As a final regression guard, the first PCA fit for a cell is capped at `1.40x`
+its pre-fit radius on each axis before any weighted-center pull. The cap is
+upper-only, so legitimate first-fit shrinkage is preserved. Later fits continue
+to use the configured persistent-reference growth cap.
 
 Each processed frame appends an inspectable state row to
 `initial_csv_background_states.csv` in the output directory. The row records
-the accepted/frozen shape, levels, confidence, and evidence counts.
+the accepted/frozen shape, levels, confidence, evidence counts, raw cold/hot
+candidates, whether an intensity update was accepted, and whether the
+first-frame runtime-scale snap was used.
 
 ## Verification
 

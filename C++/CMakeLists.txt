@@ -202,9 +202,12 @@ add_executable(${PROJECT_NAME}
         ${cwd}/src/CellUniverse.cpp
         ${cwd}/src/CompactExporter.cpp
         ${cwd}/src/BackgroundRegionTracker.cpp
+        ${cwd}/src/CandidateBatch.cpp
+        ${cwd}/src/ChunkEvidence.cpp
         ${cwd}/src/EmbryoBrightTracker.cpp
         ${cwd}/src/Frame.cpp
         ${cwd}/src/ImageHandler.cpp
+        ${cwd}/src/ZInterpolation.cpp
         ${cwd}/src/LineageTreeCreator.cpp
         ${cwd}/src/LineageViewer.cpp
         ${cwd}/src/Ellipsoid.cpp
@@ -300,6 +303,69 @@ target_compile_definitions(initial_csv_background_test PRIVATE
 )
 add_test(NAME initial_csv_background_test
          COMMAND initial_csv_background_test)
+
+add_executable(z_interpolation_test EXCLUDE_FROM_ALL
+        ${cwd}/tests/ZInterpolationTest.cpp
+        ${cwd}/src/ZInterpolation.cpp
+)
+target_include_directories(z_interpolation_test PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${cwd}/includes
+)
+target_link_libraries(z_interpolation_test ${OpenCV_LIBS})
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(z_interpolation_test OpenMP::OpenMP_CXX)
+endif()
+add_test(NAME z_interpolation_test
+         COMMAND z_interpolation_test)
+
+# Focused regression coverage for the opt-in PSF/brightness objective. Keep
+# this target outside the default build so production compilation remains
+# unchanged; CI or a developer can request it explicitly.
+add_executable(psf_brightness_cost_test EXCLUDE_FROM_ALL
+        ${cwd}/tests/PsfBrightnessCostTest.cpp
+        ${cwd}/src/Frame.cpp
+        ${cwd}/src/Ellipsoid.cpp
+)
+target_include_directories(psf_brightness_cost_test PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${cwd}/includes
+        ${cwd}/src
+        lib/yaml-cpp/include
+)
+target_link_libraries(psf_brightness_cost_test
+        ${OpenCV_LIBS}
+        yaml-cpp
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(psf_brightness_cost_test OpenMP::OpenMP_CXX)
+endif()
+target_compile_definitions(psf_brightness_cost_test PRIVATE
+        CELLUNIVERSE_HAS_N2V2_PREPROCESS=0
+)
+add_test(NAME psf_brightness_cost_test
+         COMMAND psf_brightness_cost_test)
+
+add_executable(celluniverse4_candidate_batch_test EXCLUDE_FROM_ALL
+        ${cwd}/tests/CellUniverse4CandidateBatchTest.cpp
+        ${cwd}/src/CandidateBatch.cpp
+        ${cwd}/src/ChunkEvidence.cpp
+)
+target_include_directories(celluniverse4_candidate_batch_test PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${cwd}/includes
+        ${cwd}/src
+        lib/yaml-cpp/include
+)
+target_link_libraries(celluniverse4_candidate_batch_test
+        ${OpenCV_LIBS}
+        yaml-cpp
+)
+target_compile_definitions(celluniverse4_candidate_batch_test PRIVATE
+        CELLUNIVERSE_TEST_CONFIG_DIR="${cwd}/config"
+)
+add_test(NAME celluniverse4_candidate_batch_test
+         COMMAND celluniverse4_candidate_batch_test)
 
 # Tests disabled 2026-04-08: they reference SimulationConfig fields
 # (background_color, cell_color) that were removed in the sigmoid-pipeline

@@ -434,11 +434,14 @@ def _load_contract(compact: Path, selected_frame: int) -> FrameSpec:
         raise RecoveryError("unsupported compact coordinate ordering")
     if coordinates.get("space") != "interpolated":
         raise RecoveryError("frame.coordinates.space must be 'interpolated'")
-    _integer(
+    z_interpolation_ratio = _finite_number(
         coordinates.get("z_interpolation_ratio"),
         "frame.coordinates.z_interpolation_ratio",
-        minimum=1,
     )
+    if z_interpolation_ratio < 1.0:
+        raise RecoveryError(
+            "frame.coordinates.z_interpolation_ratio must be >= 1"
+        )
     _nonempty_string(
         coordinates.get("initial_z_space"), "frame.coordinates.initial_z_space"
     )

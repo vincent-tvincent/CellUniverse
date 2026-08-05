@@ -4420,6 +4420,16 @@ bool Frame::calibrateCellShapeViaPca(
     const float componentLowSnrRescueMaximumAnchorDistance =
         simulationConfig
             .celluniverse4_pca_component_low_snr_rescue_max_anchor_distance;
+    const bool iterativePcaRegatherEnabled =
+        simulationConfig.celluniverse4_enabled &&
+        componentFilterEnabled &&
+        localSupport &&
+        simulationConfig.celluniverse4_pca_iterative_regather_enabled;
+    const float iterativePcaRegatherMinimumShiftFraction =
+        simulationConfig
+            .celluniverse4_pca_iterative_regather_min_shift_radius_fraction;
+    const int iterativePcaRegatherMaximumSteps =
+        simulationConfig.celluniverse4_pca_iterative_regather_max_steps;
     const int componentConnectivityRadius =
         simulationConfig.celluniverse4_component_connectivity_radius;
     const int componentMinimumVoxels =
@@ -4481,6 +4491,7 @@ bool Frame::calibrateCellShapeViaPca(
     // extends beyond the 97% containment radius. Driven by the same
     // pCore metric as adaptive exponent.
     float cellRadiusInflation = 1.0f;
+    int iterativePcaRegatherSteps = 0;
 
     const auto updateAdaptiveShapeWeights =
         [&](const std::vector<BrightPixel> &samples) {
@@ -5003,6 +5014,32 @@ bool Frame::calibrateCellShapeViaPca(
         }
         anyUpdate = true;
 
+        const float appliedPositionShift = cv::norm(newCenter - center);
+        const bool shouldRegatherAfterPositionShift =
+            iterativePcaRegatherEnabled &&
+            updatePosition &&
+            iterativePcaRegatherSteps < iterativePcaRegatherMaximumSteps &&
+            appliedPositionShift >=
+                iterativePcaRegatherMinimumShiftFraction * maxR;
+        if (shouldRegatherAfterPositionShift) {
+            fixedComponentAnchor = newCenter;
+            cachedRaw.clear();
+            localSupportGathered = false;
+            cachedCenter = cv::Point3f(
+                std::numeric_limits<float>::quiet_NaN(),
+                std::numeric_limits<float>::quiet_NaN(),
+                std::numeric_limits<float>::quiet_NaN());
+            ++iterativePcaRegatherSteps;
+            log << "  [CU4 PCA Iterative Regather]"
+                << " cell=" << cell.getName()
+                << " iter=" << iter
+                << " shift=" << appliedPositionShift
+                << " radius=" << maxR
+                << " shiftRatio=" << (appliedPositionShift / maxR)
+                << " stepCount=" << iterativePcaRegatherSteps
+                << std::endl;
+        }
+
         // Convergence check.
         const float dA = std::abs(targetA - curA);
         const float dB = std::abs(targetB - curB);
@@ -5016,8 +5053,12 @@ bool Frame::calibrateCellShapeViaPca(
                   << " R=(" << targetA << "," << targetB << "," << targetC << ")"
                   << " dR=" << maxDR
                   << " axisAng=" << (maxAxisAngle * 180.0 / M_PI)
-                  << " posShift=" << cv::norm(newCenter - center)
+                  << " posShift=" << appliedPositionShift
                   << std::endl;
+
+        if (shouldRegatherAfterPositionShift) {
+            continue;
+        }
 
         if (maxDR < convergeRadius &&
             maxAxisAngle < convergeAngleRad) {

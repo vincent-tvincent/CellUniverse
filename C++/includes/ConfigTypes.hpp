@@ -365,6 +365,13 @@ public:
     bool celluniverse4_pca_component_low_snr_rescue_enabled = false;
     float celluniverse4_pca_component_low_snr_rescue_min_support_fraction = 0.75f;
     float celluniverse4_pca_component_low_snr_rescue_max_anchor_distance = 1.50f;
+    // CU4-only bounded restoration of legacy iterative PCA relocation. After
+    // a substantial owned-support centroid move, regather the prepared local
+    // support at the corrected center while retaining Voronoi ownership and
+    // component filtering.
+    bool celluniverse4_pca_iterative_regather_enabled = false;
+    float celluniverse4_pca_iterative_regather_min_shift_radius_fraction = 0.48f;
+    int celluniverse4_pca_iterative_regather_max_steps = 4;
     // CU4-only post-fit photometric regularizer.  It relates foreground
     // contrast to exact rasterized support rather than analytic volume: when
     // support grows, contrast is expected to fall (and vice versa), subject
@@ -1003,6 +1010,9 @@ public:
         if (node["celluniverse4_pca_component_low_snr_rescue_enabled"]) celluniverse4_pca_component_low_snr_rescue_enabled = node["celluniverse4_pca_component_low_snr_rescue_enabled"].as<bool>();
         if (node["celluniverse4_pca_component_low_snr_rescue_min_support_fraction"]) celluniverse4_pca_component_low_snr_rescue_min_support_fraction = node["celluniverse4_pca_component_low_snr_rescue_min_support_fraction"].as<float>();
         if (node["celluniverse4_pca_component_low_snr_rescue_max_anchor_distance"]) celluniverse4_pca_component_low_snr_rescue_max_anchor_distance = node["celluniverse4_pca_component_low_snr_rescue_max_anchor_distance"].as<float>();
+        if (node["celluniverse4_pca_iterative_regather_enabled"]) celluniverse4_pca_iterative_regather_enabled = node["celluniverse4_pca_iterative_regather_enabled"].as<bool>();
+        if (node["celluniverse4_pca_iterative_regather_min_shift_radius_fraction"]) celluniverse4_pca_iterative_regather_min_shift_radius_fraction = node["celluniverse4_pca_iterative_regather_min_shift_radius_fraction"].as<float>();
+        if (node["celluniverse4_pca_iterative_regather_max_steps"]) celluniverse4_pca_iterative_regather_max_steps = node["celluniverse4_pca_iterative_regather_max_steps"].as<int>();
         if (node["celluniverse4_postfit_brightness_volume_reconcile_enabled"]) celluniverse4_postfit_brightness_volume_reconcile_enabled = node["celluniverse4_postfit_brightness_volume_reconcile_enabled"].as<bool>();
         if (node["celluniverse4_postfit_brightness_volume_inverse_volume_exponent"]) celluniverse4_postfit_brightness_volume_inverse_volume_exponent = node["celluniverse4_postfit_brightness_volume_inverse_volume_exponent"].as<float>();
         if (node["celluniverse4_postfit_brightness_volume_log_deadband"]) celluniverse4_postfit_brightness_volume_log_deadband = node["celluniverse4_postfit_brightness_volume_log_deadband"].as<float>();
@@ -1066,6 +1076,16 @@ public:
             celluniverse4_pca_component_low_snr_rescue_max_anchor_distance < 0.0f) {
             throw std::invalid_argument(
                 "simulation.celluniverse4_pca_component_low_snr_rescue_max_anchor_distance must be finite and nonnegative");
+        }
+        if (!std::isfinite(
+                celluniverse4_pca_iterative_regather_min_shift_radius_fraction) ||
+            celluniverse4_pca_iterative_regather_min_shift_radius_fraction < 0.0f) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_pca_iterative_regather_min_shift_radius_fraction must be finite and nonnegative");
+        }
+        if (celluniverse4_pca_iterative_regather_max_steps <= 0) {
+            throw std::invalid_argument(
+                "simulation.celluniverse4_pca_iterative_regather_max_steps must be positive");
         }
         if (!std::isfinite(celluniverse4_postfit_brightness_volume_inverse_volume_exponent) ||
             celluniverse4_postfit_brightness_volume_inverse_volume_exponent < 0.0f) {
@@ -1678,6 +1698,9 @@ public:
         std::cout << "celluniverse4_pca_component_low_snr_rescue_enabled: " << celluniverse4_pca_component_low_snr_rescue_enabled << '\n';
         std::cout << "celluniverse4_pca_component_low_snr_rescue_min_support_fraction: " << celluniverse4_pca_component_low_snr_rescue_min_support_fraction << '\n';
         std::cout << "celluniverse4_pca_component_low_snr_rescue_max_anchor_distance: " << celluniverse4_pca_component_low_snr_rescue_max_anchor_distance << '\n';
+        std::cout << "celluniverse4_pca_iterative_regather_enabled: " << celluniverse4_pca_iterative_regather_enabled << '\n';
+        std::cout << "celluniverse4_pca_iterative_regather_min_shift_radius_fraction: " << celluniverse4_pca_iterative_regather_min_shift_radius_fraction << '\n';
+        std::cout << "celluniverse4_pca_iterative_regather_max_steps: " << celluniverse4_pca_iterative_regather_max_steps << '\n';
         std::cout << "celluniverse4_postfit_brightness_volume_reconcile_enabled: " << celluniverse4_postfit_brightness_volume_reconcile_enabled << '\n';
         std::cout << "celluniverse4_postfit_brightness_volume_inverse_volume_exponent: " << celluniverse4_postfit_brightness_volume_inverse_volume_exponent << '\n';
         std::cout << "celluniverse4_postfit_brightness_volume_log_deadband: " << celluniverse4_postfit_brightness_volume_log_deadband << '\n';

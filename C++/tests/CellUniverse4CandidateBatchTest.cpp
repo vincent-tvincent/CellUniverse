@@ -383,7 +383,6 @@ int main()
                     true, true, 24780, 1825, 18245, 0, 0.674755f,
                     0.75f, 1.50f),
                 "shape rescue must require an explicitly selected component");
-
             const std::array<std::array<float, 3>, 6> permutations{{
                 {{8.0f, 2.0f, 1.0f}}, {{8.0f, 1.0f, 2.0f}},
                 {{2.0f, 8.0f, 1.0f}}, {{1.0f, 8.0f, 2.0f}},
@@ -780,6 +779,9 @@ int main()
         require(!traditional.simulation
                      .celluniverse4_pca_component_low_snr_rescue_enabled,
                 "traditional config must not rescue CU4 component fits");
+        require(!traditional.simulation
+                     .celluniverse4_pca_iterative_regather_enabled,
+                "traditional config must not iteratively regather CU4 PCA support");
         require(
             traditional.simulation
                     .celluniverse4_pca_component_anchor_radius_scale == 0.0f,
@@ -884,6 +886,15 @@ int main()
                         .celluniverse4_pca_component_low_snr_rescue_max_anchor_distance -
                     1.50f) < 1.0e-7f,
             "CU4 must rescue only large components anchored near the tracked center");
+        require(
+            cu4.simulation.celluniverse4_pca_iterative_regather_enabled &&
+                std::abs(
+                    cu4.simulation
+                            .celluniverse4_pca_iterative_regather_min_shift_radius_fraction -
+                        0.48f) < 1.0e-7f &&
+                cu4.simulation
+                        .celluniverse4_pca_iterative_regather_max_steps == 4,
+            "CU4 must enable bounded iterative owned-support PCA regathering");
         require(
             cu4.simulation
                     .celluniverse4_postfit_brightness_volume_reconcile_enabled &&
@@ -1264,6 +1275,19 @@ int main()
             threw = true;
         }
         require(threw, "invalid CU4 component rescue support fraction must be rejected");
+
+        invalidComponentConfig = YAML::Clone(cu4Node);
+        invalidComponentConfig["simulation"]
+                              ["celluniverse4_pca_iterative_regather_min_shift_radius_fraction"] =
+            -0.1;
+        threw = false;
+        try {
+            BaseConfig rejected;
+            rejected.explodeConfig(invalidComponentConfig);
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        require(threw, "negative PCA iterative-regather shift must be rejected");
 #endif
 
         std::cout << "CellUniverse4 candidate batch tests passed\n";

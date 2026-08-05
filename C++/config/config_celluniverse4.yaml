@@ -15,6 +15,13 @@ simulation:
   celluniverse4_pca_component_low_snr_rescue_enabled: true
   celluniverse4_pca_component_low_snr_rescue_min_support_fraction: 0.75
   celluniverse4_pca_component_low_snr_rescue_max_anchor_distance: 1.50
+  # Restore bounded iterative PCA relocation using only Cell 21's currently
+  # owned support. Ownership is never bypassed: the large lower component is
+  # already owned by Cell 0. A large centroid correction regathers support at
+  # the new center, while small ordinary convergence steps reuse one gather.
+  celluniverse4_pca_iterative_regather_enabled: true
+  celluniverse4_pca_iterative_regather_min_shift_radius_fraction: 0.48
+  celluniverse4_pca_iterative_regather_max_steps: 4
   celluniverse4_postfit_brightness_volume_reconcile_enabled: true
   celluniverse4_postfit_brightness_volume_inverse_volume_exponent: 1.0
   celluniverse4_postfit_brightness_volume_log_deadband: 0.14

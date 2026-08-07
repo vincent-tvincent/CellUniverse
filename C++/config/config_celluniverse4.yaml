@@ -55,6 +55,8 @@ simulation:
   # Use the owned component's per-axis extent for a bounded shape adjustment,
   # rather than expanding every radius uniformly.
   celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled: true
+  celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled: true
+  celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio: 2.0
   celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile: 0.95
   celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction: 0.50
   celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius: 1
@@ -161,6 +163,46 @@ prob:
   signal_center_neighbor_owned_future_rescue_scope_gate_enabled: true
   signal_center_neighbor_owned_future_rescue_min_pairs: 3
 
+  # Only a synthetic, verified raw-supported parent-core pair may soften a
+  # close final daughter-axis miss; ordinary raw pairs remain ineligible.
+  raw_trusted_parent_core_axis_near_miss_enabled: true
+  raw_trusted_parent_core_axis_near_miss_max_excess_degrees: 3.0
+
+  # N2V2/Voronoi bridge pixels can miss an independently verified
+  # normalized-raw parent-core split. This exception is restricted to the
+  # synthetic parent-core route, requires both final daughters to remain on
+  # their raw seeds, and leaves all non-bridge gates unchanged.
+  raw_trusted_parent_core_dense_flat_bridge_rescue_enabled: true
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment: 0.75
+  raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match: true
+  # Keep the independently verified raw orphan fixed; permit only a small,
+  # parent-scaled PCA adjustment of the synthetic parent-core daughter.
+  raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute: 2.0
+  # Disable the fixed-pixel cap; the parent-scaled 0.35R cap remains mandatory.
+  raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute: 0.0
+  raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction: 0.35
+  raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction: 1.66
+  raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction: 0.35
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes: 1
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness: 0.09
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence: 0.42
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes: 6
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness: 0.12
+  raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence: 0.60
+  raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction: 0.15
+
+  # Direct, globally unique persistent-raw-orphan plus verified-parent-core
+  # assignments may use a bounded post-refit midpoint/seed exception. This
+  # does not apply to ordinary raw pairs or change any bridge/overlap gate.
+  raw_direct_one_sided_parent_core_bridge_rescue_enabled: true
+  raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction: 1.66
+  raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction: 0.35
+  # Direct-marker-only axis near miss; the legacy synthetic route keeps 3 degrees.
+  raw_direct_one_sided_parent_core_axis_near_miss_enabled: true
+  raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees: 8.0
+  raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment: 0.75
+  raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction: 0.20
+
 candidate_batch:
   enabled: true
   shadow_mode: false
@@ -168,6 +210,58 @@ candidate_batch:
   # Every parent evaluates the complete immutable evidence pool. Conflicts are
   # resolved by candidate validation/commit, never by removing points first.
   per_parent_fresh_evidence_pool_enabled: true
+  # N2V2 can suppress a real high-contrast body from the signal-center map.
+  # Keep N2V2 for fitting, but inspect the normalized raw stack for persistent
+  # uncovered centers and expose them only to the deterministic split pre-pass.
+  # Raw evidence never enters relocation, PCA, or CandidateBatch.
+  raw_aux_split_centers_enabled: true
+  raw_aux_split_persistence_frames: 2
+  raw_aux_split_persistence_match_distance: 12.0
+  raw_aux_split_min_box_brightness_delta: 0.0
+  raw_aux_split_min_boxes: 1
+  raw_aux_split_min_brightness: 0.08
+  raw_aux_split_min_confidence: 0.35
+  raw_aux_split_uncovered_ellipsoid_scale: 1.0
+  raw_aux_split_deduplication_distance: 8.0
+  raw_aux_split_max_centers_per_frame: 8
+  # A valid pair must retain one companion on the prior parent body. The
+  # auxiliary body may sit roughly one diameter away, but still has to align
+  # with the frozen shortest axis and pass every downstream split gate.
+  raw_aux_split_companion_max_distance_radius_scale: 0.80
+  raw_aux_split_min_separation_radius_scale: 1.0
+  raw_aux_split_max_separation_radius_scale: 3.75
+  raw_aux_split_max_midpoint_radius_scale: 1.60
+  raw_aux_split_min_axis_alignment: 0.50
+  raw_aux_split_low_shape_exception_enabled: true
+  # Raw evidence is paired only with a same-frame raw companion and assigned
+  # once to a non-ambiguous prior parent. It never joins the N2V2 center pool.
+  raw_aux_split_filter_logging_enabled: true
+  raw_aux_split_dedicated_assignment_enabled: true
+  raw_aux_split_parent_core_max_distance_radius_scale: 0.80
+  raw_aux_split_min_opposite_projection_radius_scale: 0.15
+  raw_aux_split_parent_ambiguity_margin: 0.25
+  raw_aux_split_unique_assignment_enabled: true
+  # Preserve only an exact raw-supported daughter seed from N2V2 reattachment.
+  raw_aux_split_protect_supported_daughter_from_background_reattach: true
+  raw_aux_split_protected_daughter_match_distance: 2.0
+  # A raw orphan may override only its own neighbor claim when a uniquely
+  # strong companion is inside this parent and the orphan follows its
+  # frozen shortest-axis direction. All split acceptance gates remain active.
+  raw_aux_split_one_sided_parent_assignment_enabled: true
+  raw_aux_split_one_sided_companion_core_max_distance_radius_scale: 0.55
+  raw_aux_split_one_sided_min_orphan_axis_alignment: 0.70
+  raw_aux_split_one_sided_min_orphan_projection_radius_scale: 0.35
+  raw_aux_split_parent_candidate_logging_enabled: true
+  # Last-resort raw-only path: use the still-tracked current parent body as
+  # the missing local seed, while retaining the same raw geometry and final
+  # split acceptance gates. It never joins the global center pool.
+  raw_aux_split_parent_core_seed_fallback_enabled: true
+  raw_aux_split_parent_core_seed_max_snapshot_drift_radius_scale: 0.50
+  raw_aux_split_parent_core_seed_raw_support_max_distance_radius_scale: 0.55
+  raw_aux_split_parent_core_seed_min_axis_alignment: 0.75
+  raw_aux_split_parent_core_seed_min_projection_radius_scale: 0.70
+  raw_aux_split_parent_core_seed_min_parent_shape: 1.00
+  raw_aux_split_parent_core_seed_logging_enabled: true
   max_candidates_per_parent: 12
   max_snapshot_anchors: 1
   max_exact_chunk_centers: 6
@@ -204,6 +298,14 @@ candidate_batch:
   # validated signal/rod split proposal. Daughter candidates still pass all
   # split gates and candidate-local background reattachment.
   background_drop_explicit_split_bypass_hold_enabled: true
+  # "Nearest" is evaluated only among genuinely strong probes. This keeps a
+  # dim saturated artifact from beating a slightly farther distinct cell body.
+  background_drop_rescue_strong_probe_filter_enabled: true
+  background_drop_rescue_strong_probe_min_best_mean_fraction: 0.50
+  # Initializer-labelled trash is a persistent exclusion region, even when the
+  # trash ellipsoid itself did not enter the rescue-probe list this frame.
+  background_drop_rescue_trash_occupancy_filter_enabled: true
+  background_drop_rescue_trash_occupancy_radius_scale: 1.25
   # Once the parent is rescued, discard stale/future split seeds. Recompute a
   # candidate only from current-frame centers local to the rescued position.
   background_drop_current_local_split_only_enabled: true
@@ -221,6 +323,18 @@ candidate_batch:
   background_drop_current_local_prepass_fallback_max_anchor_distance_radius_fraction: 0.75
   background_drop_current_local_prepass_fallback_max_midpoint_distance_radius_fraction: 0.75
   background_drop_current_local_prepass_fallback_min_cost_improvement: 500.0
+  # When a background-dropped daughter has no compatible global center, seed
+  # one local probe by reflecting it away from its sibling. The existing
+  # sibling half-space remains mandatory; PCA must find reliable local support.
+  background_drop_sibling_reflected_local_seed_enabled: true
+  background_drop_sibling_reflected_local_seed_body_units: 1.0
+  background_drop_sibling_reflected_local_seed_max_pca_move_body_units: 0.75
+  # If the reflected probe is unsupported, allow a small ordinary continuation
+  # perturb batch. It still uses a fresh per-cell pool, ownership checks, and
+  # the same sibling half-space.
+  background_drop_traditional_perturb_fallback_enabled: true
+  background_drop_traditional_perturb_fallback_iterations: 24
+  background_drop_traditional_perturb_fallback_max_anchor_distance_min_radius_fraction: 2.0
   # Split-only current-frame detector. Threshold at the parent's previous
   # fitted brightness inside a 1.25 x max-radius sphere, then seed daughters
   # from a geometrically valid pair of 3D connected components.
@@ -232,6 +346,65 @@ candidate_batch:
   local_component_split_min_axis_alignment: 0.80
   local_component_split_neighbor_ownership_filter_enabled: true
   local_component_split_neighbor_ownership_scale: 0.60
+  # A previous-brightness threshold can merge two real daughter bodies. Retry
+  # only this parent's local component detector at controlled higher and lower
+  # thresholds before treating the observation as a single body.
+  local_component_split_threshold_ladder_enabled: true
+  local_component_split_threshold_ladder_steps: 5
+  local_component_split_threshold_ladder_step: 0.04
+  local_component_split_threshold_ladder_min_threshold: 0.72
+  # When split geometry is inconclusive, expose only sufficiently large,
+  # unclaimed current-frame components inside the parent sphere as per-parent
+  # continuation candidates. The candidate is PCA-refit and must still improve
+  # the normal objective; ambiguous components never bypass those checks.
+  local_component_continuation_pca_enabled: true
+  local_component_continuation_pca_refit_enabled: true
+  local_component_continuation_min_component_voxels: 20
+  local_component_continuation_max_candidates: 3
+  local_component_continuation_min_distance_radius_scale: 0.15
+  local_component_continuation_max_distance_radius_scale: 1.25
+  # Default-off Cell-900 continuity rescue: search only inside the frozen
+  # prior body, require unique unclaimed support, then publish one ordinary
+  # candidate. It cannot create a split or loosen shared ownership gates.
+  local_component_owned_continuation_rescue_enabled: false
+  local_component_owned_continuation_rescue_pca_refit_enabled: false
+  local_component_owned_continuation_rescue_force_trial_enabled: true
+  local_component_owned_continuation_rescue_min_component_voxels: 64
+  local_component_owned_continuation_rescue_min_prior_body_voxels: 20
+  local_component_owned_continuation_rescue_threshold_ladder_steps: 0
+  local_component_owned_continuation_rescue_threshold_ladder_step: 0.05
+  local_component_owned_continuation_rescue_min_threshold: 0.10
+  local_component_owned_continuation_rescue_max_displacement_radius_scale: 1.20
+  local_component_owned_continuation_rescue_neighbor_ownership_scale: 0.60
+  local_component_owned_continuation_rescue_min_current_support_drift_radius_scale: 0.50
+  # Default-off: permit one exterior body only when it is uniquely dominant
+  # over one frozen-body fragment, clearly separated, unclaimed, and bounded.
+  local_component_owned_continuation_rescue_outside_prior_body_enabled: true
+  local_component_owned_continuation_rescue_outside_prior_body_min_voxel_dominance: 1.25
+  local_component_owned_continuation_rescue_outside_prior_body_min_separation_radius_scale: 0.75
+  adaptive_evidence_hypotheses_enabled: true
+  adaptive_edge_refined_hypotheses_enabled: true
+  adaptive_trial_fit_enabled: true
+  adaptive_family_diverse_beam_enabled: true
+  adaptive_family_diverse_beam_width: 3
+  adaptive_threshold_history_enabled: true
+  adaptive_threshold_history_min_trusted_acceptances: 3
+  adaptive_threshold_history_smoothing: 0.25
+  adaptive_pca_reliable_min_voxels: 64
+  # Reject a generic cost-driven split only for the combined Cell-200 failure
+  # signature: one current-frame component and daughter positions strongly
+  # asymmetric around the frozen parent. True two-component proposals and
+  # balanced generic divisions are unaffected.
+  local_component_single_body_asymmetric_split_gate_enabled: true
+  local_component_single_body_asymmetric_split_max_parent_balance: 0.35
+  # Narrow exception for a strong shortest-axis division pointing away from
+  # the nearest live sibling. All earlier geometry, overlap, rod-tip, bridge,
+  # biological, and objective gates still apply.
+  local_component_single_body_strong_split_exception_enabled: true
+  local_component_single_body_strong_split_min_total_improvement: 5000.0
+  local_component_single_body_strong_split_min_image_improvement: 5000.0
+  local_component_single_body_strong_split_min_away_alignment: 0.50
+  local_component_single_body_strong_split_max_neighbor_distance_parent_radius_fraction: 4.0
   # Saturated, sparse residue is inconclusive rather than evidence of one body.
   local_component_split_saturated_sparse_fallback_enabled: true
   local_component_split_saturated_sparse_min_threshold: 0.995

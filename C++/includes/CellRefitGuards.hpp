@@ -51,6 +51,131 @@ inline bool rejectSiblingRodOverlap(
            exactOverlapFraction > maximumOverlapFraction;
 }
 
+inline bool rejectLocalSingleBodyAsymmetricGenericSplit(
+    bool enabled,
+    bool genericProposal,
+    bool localComponentEvaluated,
+    int usableLocalComponents,
+    float parentDistanceBalance,
+    float maximumParentDistanceBalance)
+{
+    if (!enabled || !genericProposal || !localComponentEvaluated ||
+        usableLocalComponents != 1 ||
+        !std::isfinite(parentDistanceBalance) ||
+        !std::isfinite(maximumParentDistanceBalance) ||
+        parentDistanceBalance < 0.0f ||
+        maximumParentDistanceBalance < 0.0f ||
+        maximumParentDistanceBalance > 1.0f) {
+        return false;
+    }
+    return parentDistanceBalance < maximumParentDistanceBalance;
+}
+
+// Require evidence that ordinary current-frame local support has actually
+// disappeared or moved away from the prior reliable body before the owned
+// continuation path may even search. This avoids publishing an extra
+// "rescue" candidate for ordinary well-supported cells.
+inline bool shouldAttemptOwnedLocalContinuationRescue(
+    bool enabled,
+    bool ordinaryCurrentSupportLost,
+    float currentSupportDisplacement,
+    float parentMaxRadius,
+    float minimumDriftRadiusScale)
+{
+    if (!enabled || !std::isfinite(parentMaxRadius) ||
+        !std::isfinite(minimumDriftRadiusScale) ||
+        parentMaxRadius <= 0.0f || minimumDriftRadiusScale <= 0.0f) {
+        return false;
+    }
+    if (ordinaryCurrentSupportLost) {
+        return true;
+    }
+    if (!std::isfinite(currentSupportDisplacement) ||
+        currentSupportDisplacement < 0.0f) {
+        return false;
+    }
+    return currentSupportDisplacement >=
+           minimumDriftRadiusScale * parentMaxRadius;
+}
+
+// Narrow, default-off continuation-rescue predicate. This does not authorize
+// a move by itself: the ordinary candidate-batch cost, half-space, and PCA
+// reliability checks still decide whether the candidate can win.
+inline bool acceptOwnedLocalContinuationRescue(
+    bool enabled,
+    int eligibleCandidates,
+    int componentVoxels,
+    int minimumComponentVoxels,
+    int priorBodyVoxels,
+    int minimumPriorBodyVoxels,
+    bool neighborOwned,
+    bool neighborOverlap,
+    float displacement,
+    float maximumDisplacement)
+{
+    if (!enabled || eligibleCandidates != 1 || componentVoxels < minimumComponentVoxels ||
+        priorBodyVoxels < minimumPriorBodyVoxels || neighborOwned || neighborOverlap ||
+        !std::isfinite(displacement) || !std::isfinite(maximumDisplacement) ||
+        displacement < 0.0f || maximumDisplacement < 0.0f) {
+        return false;
+    }
+    return displacement <= maximumDisplacement;
+}
+
+// A detached current-frame body can be a true continuation after the parent
+// has moved off its frozen fit. This is intentionally narrower than the
+// ordinary owned rescue: it requires exactly one safe prior fragment and one
+// safe exterior component, strict voxel dominance, and clear separation.
+inline bool acceptDominantOutsidePriorLocalContinuationRescue(
+    bool enabled,
+    int eligiblePriorCandidates,
+    int eligibleExteriorCandidates,
+    int exteriorVoxels,
+    int priorVoxels,
+    float minimumVoxelDominance,
+    float separation,
+    float minimumSeparation,
+    bool neighborOwned,
+    bool neighborOverlap,
+    float displacement,
+    float maximumDisplacement)
+{
+    if (!enabled || eligiblePriorCandidates != 1 ||
+        eligibleExteriorCandidates != 1 ||
+        exteriorVoxels < 0 || priorVoxels < 0 ||
+        !std::isfinite(minimumVoxelDominance) ||
+        minimumVoxelDominance < 1.0f ||
+        !std::isfinite(separation) || !std::isfinite(minimumSeparation) ||
+        separation < 0.0f || minimumSeparation < 0.0f ||
+        neighborOwned || neighborOverlap ||
+        !std::isfinite(displacement) || !std::isfinite(maximumDisplacement) ||
+        displacement < 0.0f || maximumDisplacement < 0.0f) {
+        return false;
+    }
+    return static_cast<double>(exteriorVoxels) >=
+               static_cast<double>(minimumVoxelDominance) *
+                   static_cast<double>(priorVoxels) &&
+           separation >= minimumSeparation &&
+           displacement <= maximumDisplacement;
+}
+
+inline bool rejectBackgroundDropWeakProbe(
+    bool enabled,
+    float probeMean,
+    float bestProbeMean,
+    float minimumBestMeanFraction)
+{
+    if (!enabled) return false;
+    if (!std::isfinite(probeMean) || !std::isfinite(bestProbeMean) ||
+        !std::isfinite(minimumBestMeanFraction) ||
+        probeMean < 0.0f || bestProbeMean < 0.0f ||
+        minimumBestMeanFraction < 0.0f ||
+        minimumBestMeanFraction > 1.0f) {
+        return true;
+    }
+    return probeMean < minimumBestMeanFraction * bestProbeMean;
+}
+
 enum class LocalComponentSplitDecision {
     FallbackNoEvidence,
     VetoTooFewComponents,
@@ -763,6 +888,26 @@ inline BrightnessVolumeReconciliation reconcileIntegratedContrast(
     result.applied = std::abs(scale - 1.0) > 1.0e-9;
     result.valid = true;
     return result;
+}
+
+inline double ellipsoidAspectRatio(const std::array<float, 3> &radii)
+{
+    const float minimumRadius = std::min({radii[0], radii[1], radii[2]});
+    const float maximumRadius = std::max({radii[0], radii[1], radii[2]});
+    if (!std::isfinite(minimumRadius) || !std::isfinite(maximumRadius) ||
+        minimumRadius <= 0.0f) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return static_cast<double>(maximumRadius) /
+        static_cast<double>(minimumRadius);
+}
+
+inline bool passesAspectRatioCap(
+    const std::array<float, 3> &radii,
+    double maximumAspectRatio)
+{
+    return std::isfinite(maximumAspectRatio) && maximumAspectRatio >= 1.0 &&
+        ellipsoidAspectRatio(radii) <= maximumAspectRatio + 1.0e-6;
 }
 
 } // namespace cell_refit_guards

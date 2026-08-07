@@ -156,6 +156,13 @@ private:
    int cumulativeAcceptedSplits = 0;
    std::unordered_map<int, std::vector<Frame::SignalCenter>>
        cellUniverse3WindowCentersByFrame;
+   // CU4 split-only evidence. The complete normalized-raw center set is kept
+   // for positional persistence matching; only quality-filtered, persistent,
+   // uncovered centers are published to the deterministic split pre-pass.
+   std::unordered_map<int, std::vector<Frame::SignalCenter>>
+       cellUniverse4RawCentersByFrame;
+   std::unordered_map<int, std::vector<Frame::SignalCenter>>
+       cellUniverse4RawAuxSplitCentersByFrame;
    struct CellUniverse3WindowMapBox {
        cv::Point3f center{0.0f, 0.0f, 0.0f};
        int ix = 0;

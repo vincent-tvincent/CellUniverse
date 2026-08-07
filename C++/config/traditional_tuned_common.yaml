@@ -1,0 +1,37 @@
+base_config: config.yaml
+
+# Pos0 frames 0-21 screening profile. Keeps the production config as its base
+# while tightening only split scheduling and post-refit geometry.
+cell:
+  # Normalization followed by N2V2 changes the intensity domain relative to
+  # initial.csv. Fit PCA support against the tracked physical two-region
+  # background, with local SNR and support-volume guards.
+  pcaShapeLocalSupportEnabled: true
+
+simulation:
+  parallel_threads: 16
+  export_mode: compact
+  export_preprocessed_images: false
+
+prob:
+  P_split_base: 0.005
+  P_split_max: 0.10
+  split_candidates_per_attempt: 10
+  split_candidate_rotation_delta_degrees: 5.0
+  split_candidate_translation_delta_fraction: 0.10
+  split_geometry_gate_enabled: true
+  split_max_daughter_seed_drift_fraction: 0.60
+  split_max_daughter_axis_expansion: 1.25
+  # Do not reject a division merely because its two newborn ellipsoids overlap.
+  # Candidate search still penalizes that overlap, and all direction/drift,
+  # parent-volume, and existing-cell protections remain active.
+  split_daughter_overlap_gate_enabled: false
+  split_acceptance_ignore_sibling_pair_overlap_cost: true
+  # Retained as a diagnostic/reference value; the hard sibling gate above is
+  # disabled for this profile.
+  split_max_daughter_overlap_fraction: 0.07
+  split_daughter_refit_min_radius_fraction: 0.90
+  split_separation_axis_alignment_gate_enabled: true
+  split_separation_axis_max_angle_degrees: 30.0
+  split_daughter_resplit_cooldown_frames: 8
+  bio_max_midpoint_parent_fraction: 0.90

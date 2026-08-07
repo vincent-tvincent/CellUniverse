@@ -50,6 +50,7 @@ double sourceBias(CandidateSource source, const CandidateBatchConfig &config)
     case CandidateSource::ChunkGeometric:
     case CandidateSource::ChunkRobust:
     case CandidateSource::ChunkPeak:
+    case CandidateSource::ChunkEdgeRefined:
         return config.priorityExactCenterBias;
     case CandidateSource::Stochastic:
         return config.priorityStochasticBias;
@@ -70,6 +71,7 @@ const char *candidateSourceName(CandidateSource source)
     case CandidateSource::ChunkGeometric: return "chunk_geometric";
     case CandidateSource::ChunkRobust: return "chunk_robust";
     case CandidateSource::ChunkPeak: return "chunk_peak";
+    case CandidateSource::ChunkEdgeRefined: return "chunk_edge_refined";
     case CandidateSource::Stochastic: return "stochastic";
     }
     return "unknown";
@@ -109,9 +111,23 @@ CandidateBatch::CandidateBatch(const CandidateBatchInput &input,
                    std::uint64_t evidenceId,
                    int evidenceFrameOffset,
                    float confidence,
-                   std::uint64_t ordinal) {
-        for (const CandidateProposal &existing : proposals_) {
+                   bool pcaRefitSuggested,
+                   std::uint64_t ordinal,
+                   bool forceExpensiveTrial = false,
+                   CandidateEvidenceFamily evidenceFamily =
+                       CandidateEvidenceFamily::Component,
+                   float evidenceThreshold =
+                       std::numeric_limits<float>::quiet_NaN(),
+                   bool trustworthyForAdaptiveHistory = false) {
+        for (CandidateProposal &existing : proposals_) {
             if (pointDistance(existing.position, position) <= dedupDistance) {
+                // Preserve the stronger provenance when a qualified recovery
+                // center coincides with a generic evidence hypothesis.
+                existing.forceExpensiveTrial =
+                    existing.forceExpensiveTrial || forceExpensiveTrial;
+                existing.trustworthyForAdaptiveHistory =
+                    existing.trustworthyForAdaptiveHistory ||
+                    trustworthyForAdaptiveHistory;
                 return false;
             }
         }
@@ -135,6 +151,12 @@ CandidateBatch::CandidateBatch(const CandidateBatchInput &input,
         proposal.evidenceId = evidenceId;
         proposal.evidenceFrameOffset = evidenceFrameOffset;
         proposal.evidenceConfidence = confidence;
+        proposal.evidenceFamily = evidenceFamily;
+        proposal.evidenceThreshold = evidenceThreshold;
+        proposal.trustworthyForAdaptiveHistory =
+            trustworthyForAdaptiveHistory;
+        proposal.pcaRefitSuggested = pcaRefitSuggested;
+        proposal.forceExpensiveTrial = forceExpensiveTrial;
         proposal.cheapPriority =
             static_cast<double>(config_.priorityDistanceWeight) *
                 pointDistance(input.baselinePosition, position) / minRadius -
@@ -157,7 +179,7 @@ CandidateBatch::CandidateBatch(const CandidateBatchInput &input,
 
     if (config_.maxSnapshotAnchors > 0 && input.snapshotPosition.has_value()) {
         add(CandidateSource::Snapshot, *input.snapshotPosition,
-            0, 0, 1.0f, 1);
+            0, 0, 1.0f, false, 1);
     }
 
     int exactAdded = 0;
@@ -200,11 +222,17 @@ CandidateBatch::CandidateBatch(const CandidateBatchInput &input,
             }
             const auto addExact = [&](CandidateSource source,
                                       const cv::Point3f &position,
-                                      std::uint64_t ordinal) {
+                                      std::uint64_t ordinal,
+                                      CandidateEvidenceFamily family =
+                                          CandidateEvidenceFamily::Component) {
                 if (exactAdded >= config_.maxExactChunkCenters) return;
                 if (add(source, position, chunk.stableId,
                         chunk.sourceFrameOffset,
-                        chunk.confidence, ordinal)) {
+                        chunk.confidence, chunk.pcaRefitSuggested, ordinal,
+                        chunk.forceExpensiveTrial &&
+                            source == CandidateSource::ChunkWeighted,
+                        family, chunk.threshold,
+                        chunk.trustworthyForAdaptiveHistory)) {
                     ++exactAdded;
                 }
             };
@@ -223,6 +251,16 @@ CandidateBatch::CandidateBatch(const CandidateBatchInput &input,
             if (config_.includePeakCenter) {
                 addExact(CandidateSource::ChunkPeak,
                          chunk.peakCenter, 13);
+            }
+            // This center is derived from a resolved local-component
+            // boundary, not from a global map.  It is deliberately opt-in,
+            // remains subject to the ordinary objective, and only receives
+            // PCA when the source component already declared that reliable.
+            if (config_.adaptiveEdgeRefinedHypothesesEnabled &&
+                chunk.hasEdgeRefinedCenter) {
+                addExact(CandidateSource::ChunkEdgeRefined,
+                         chunk.edgeRefinedCenter, 14,
+                         CandidateEvidenceFamily::EdgeRefined);
             }
         }
     }
@@ -259,7 +297,7 @@ CandidateBatch::CandidateBatch(const CandidateBatchInput &input,
             static_cast<float>(radius * xy * std::sin(phi)),
             static_cast<float>(radius * z));
         add(CandidateSource::Stochastic,
-            input.baselinePosition + offset, 0, 0, 0.0f,
+            input.baselinePosition + offset, 0, 0, 0.0f, false,
             static_cast<std::uint64_t>(1000 + i));
     }
 
@@ -285,11 +323,49 @@ std::vector<std::size_t> CandidateBatch::expensiveCandidateIndices() const
     std::vector<std::size_t> result;
     if (proposals_.empty()) return result;
     result.push_back(0);
-    const std::size_t limit = std::min(
-        proposals_.size(),
-        static_cast<std::size_t>(std::max(1, config_.expensiveTopK)));
-    for (std::size_t index = 1; index < limit; ++index) {
-        result.push_back(index);
+    if (config_.adaptiveTrialFitEnabled &&
+        config_.adaptiveFamilyDiverseBeamEnabled) {
+        const std::size_t beamWidth = static_cast<std::size_t>(std::max(
+            1, config_.adaptiveFamilyDiverseBeamWidth));
+        // Coarse deterministic pass: preserve one best candidate from each
+        // image-evidence family before filling the remaining beam by the
+        // existing priority ordering. No-op remains the unchanged baseline.
+        for (const CandidateEvidenceFamily family : {
+                 CandidateEvidenceFamily::Component,
+                 CandidateEvidenceFamily::EdgeRefined}) {
+            if (result.size() > beamWidth) break;
+            for (std::size_t index = 1; index < proposals_.size(); ++index) {
+                if (proposals_[index].evidenceId == 0 ||
+                    proposals_[index].evidenceFamily != family) {
+                    continue;
+                }
+                result.push_back(index);
+                break;
+            }
+        }
+        for (std::size_t index = 1;
+             index < proposals_.size() && result.size() <= beamWidth;
+             ++index) {
+            if (std::find(result.begin(), result.end(), index) ==
+                result.end()) {
+                result.push_back(index);
+            }
+        }
+    } else {
+        const std::size_t limit = std::min(
+            proposals_.size(),
+            static_cast<std::size_t>(std::max(1, config_.expensiveTopK)));
+        for (std::size_t index = 1; index < limit; ++index) {
+            result.push_back(index);
+        }
+    }
+    // The bounded rescue path may mark at most one evidence hypothesis. Give
+    // it one ordinary trial even if broad generic candidates occupy top-K.
+    for (std::size_t index = 1; index < proposals_.size(); ++index) {
+        if (proposals_[index].forceExpensiveTrial &&
+            std::find(result.begin(), result.end(), index) == result.end()) {
+            result.push_back(index);
+        }
     }
     return result;
 }

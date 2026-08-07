@@ -3311,7 +3311,10 @@ bool bioCheckDaughters(
     bool skipExistingCellBuriedCheck = false,
     bool skipNeighborBridgeCheck = false,
     bool ignoreTrashNeighbors = false,
-    bool ignoreSuspiciousRodBlockers = false)
+    bool ignoreSuspiciousRodBlockers = false,
+    bool allowDirectCoreExistingBridge = false,
+    bool directCoreIsD1 = false,
+    const std::string &directCoreExistingBridgeBlocker = "")
 {
     const auto cellVolume = [](const Ellipsoid &c) {
         return static_cast<double>(c.getARadius()) *
@@ -3433,11 +3436,17 @@ bool bioCheckDaughters(
             const cv::Point3f oPos(other.getX(), other.getY(), other.getZ());
             const float d1ToOther = static_cast<float>(cv::norm(oPos - d1Pos));
             const float d2ToOther = static_cast<float>(cv::norm(oPos - d2Pos));
-            if (d1ToOther < siblingDist * 0.5f) {
+            const bool allowD1ExistingCoreBridge =
+                allowDirectCoreExistingBridge && directCoreIsD1 &&
+                other.getName() == directCoreExistingBridgeBlocker;
+            const bool allowD2ExistingCoreBridge =
+                allowDirectCoreExistingBridge && !directCoreIsD1 &&
+                other.getName() == directCoreExistingBridgeBlocker;
+            if (d1ToOther < siblingDist * 0.5f && !allowD1ExistingCoreBridge) {
                 reasonOut = "d1_bridging_to_" + other.getName();
                 return false;
             }
-            if (d2ToOther < siblingDist * 0.5f) {
+            if (d2ToOther < siblingDist * 0.5f && !allowD2ExistingCoreBridge) {
                 reasonOut = "d2_bridging_to_" + other.getName();
                 return false;
             }
@@ -5703,7 +5712,15 @@ CostCallbackPair Frame::trySplitCellPhased(
     bool lumenSkipExistingCellBuriedCheck,
     bool lumenSkipNeighborBridgeCheck,
     bool saturatedSparseHybridValleyOverrideEnabled,
-    float saturatedSparseHybridMaxValleyRatio)
+    float saturatedSparseHybridMaxValleyRatio,
+    bool localSingleBodyAsymmetricGenericSplitGateActive,
+    int localUsableComponentCount,
+    float localSingleBodyMaxParentDistanceBalance,
+    bool localSingleBodyStrongSplitExceptionEnabled,
+    double localSingleBodyStrongSplitMinTotalImprovement,
+    double localSingleBodyStrongSplitMinImageImprovement,
+    float localSingleBodyStrongSplitMinAwayAlignment,
+    float localSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction)
 {
     const auto noop = [](bool) {};
     if (cellIndex >= cells.size()) return {0.0, noop};
@@ -6236,6 +6253,10 @@ CostCallbackPair Frame::trySplitCellPhased(
         cv::Point3f d2Pos;
         std::string label;
         float sphereRadiusOverride = -1.0f;
+        std::uint8_t rawAuxiliarySupportedDaughterMask = 0;
+        cv::Point3f rawAuxiliaryD1Pos{0.0f, 0.0f, 0.0f};
+        cv::Point3f rawAuxiliaryD2Pos{0.0f, 0.0f, 0.0f};
+        float rawAuxiliaryDaughterMatchDistance = 0.0f;
     };
 
     // Daughter built radii = volumeScale × snapshot parent radii. Default
@@ -6367,6 +6388,12 @@ CostCallbackPair Frame::trySplitCellPhased(
         bridgeCand.d2Pos = bridgeProposal->d2Pos;
         bridgeCand.label = "bridge_primary";
         bridgeCand.sphereRadiusOverride = bridgeProposal->daughterSphereRadius;
+        bridgeCand.rawAuxiliarySupportedDaughterMask =
+            bridgeProposal->rawAuxiliarySupportedDaughterMask;
+        bridgeCand.rawAuxiliaryD1Pos = bridgeProposal->rawAuxiliaryD1Pos;
+        bridgeCand.rawAuxiliaryD2Pos = bridgeProposal->rawAuxiliaryD2Pos;
+        bridgeCand.rawAuxiliaryDaughterMatchDistance =
+            bridgeProposal->rawAuxiliaryDaughterMatchDistance;
         cleanSignalCandidateGateActive =
             simulationConfig.celluniverse3_enabled &&
             probConfig.celluniverse3_clean_signal_candidate_spacing_gate_enabled &&
@@ -6866,6 +6893,31 @@ CostCallbackPair Frame::trySplitCellPhased(
                 [&](cv::Point3f &position,
                     float expectedSide,
                     const char *daughterLabel) {
+                    const std::uint8_t daughterBit =
+                        daughterLabel[0] == '0' ? 1U : 2U;
+                    const cv::Point3f rawSupportedPosition =
+                        daughterBit == 1U
+                            ? candidate.rawAuxiliaryD1Pos
+                            : candidate.rawAuxiliaryD2Pos;
+                    const float rawSupportTolerance = std::max(
+                        0.0f, candidate.rawAuxiliaryDaughterMatchDistance);
+                    if ((candidate.rawAuxiliarySupportedDaughterMask &
+                         daughterBit) != 0U &&
+                        rawSupportTolerance > 0.0f &&
+                        cv::norm(position - rawSupportedPosition) <=
+                            rawSupportTolerance) {
+                        std::cout
+                            << "  [CU4 Raw Auxiliary Daughter Preserve] "
+                            << parentName
+                            << " candidate=" << candidateIndex
+                            << " label=" << candidate.label
+                            << " daughter=" << daughterLabel
+                            << " position=(" << position.x << ","
+                            << position.y << "," << position.z << ")"
+                            << " tolerance=" << rawSupportTolerance
+                            << std::endl;
+                        return;
+                    }
                     const float probeRadius = std::max(
                         2.0f,
                         std::max(
@@ -10786,13 +10838,66 @@ celluniverse4_retry_split_finalist:
                 static_cast<double>(
                     std::max(0.0f, worstAxisAngle - effectiveAllowedAngle)) /
                 std::max(1.0, 90.0 - static_cast<double>(effectiveAllowedAngle));
+            const bool rawTrustedParentCoreAxisNearMiss =
+                bridgeProposal != nullptr &&
+                bridgeProposal->rawAuxiliaryTrustedPair &&
+                bridgeProposal->rawAuxiliaryPersistentUncovered &&
+                bridgeProposal->rawAuxiliaryNormalizedRawCoreSupport &&
+                bridgeProposal->rawAuxiliaryParentCoreSeed &&
+                bridgeProposal->rawAuxiliarySupportedDaughterMask == 3U &&
+                probConfig.raw_trusted_parent_core_axis_near_miss_enabled &&
+                worstAxisAngle <= effectiveAllowedAngle +
+                    std::max(0.0f, probConfig.raw_trusted_parent_core_axis_near_miss_max_excess_degrees) &&
+                bridgeProposal->signalCenterAxisAlignment >= 0.75f;
+            const bool rawDirectOneSidedParentCoreAxisNearMiss =
+                bridgeProposalOnly &&
+                bridgeProposal != nullptr &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal->rawAuxiliaryTrustedPair &&
+                bridgeProposal->rawAuxiliaryPersistentUncovered &&
+                bridgeProposal->rawAuxiliaryNormalizedRawCoreSupport &&
+                !bridgeProposal->rawAuxiliaryParentCoreSeed &&
+                bridgeProposal->rawAuxiliaryDirectOneSidedParentCoreAssignment &&
+                bridgeProposal->rawAuxiliarySupportedDaughterMask == 3U &&
+                probConfig.raw_direct_one_sided_parent_core_axis_near_miss_enabled &&
+                worstAxisAngle <= effectiveAllowedAngle +
+                    std::max(0.0f, probConfig.raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees) &&
+                bridgeProposal->signalCenterAxisAlignment >=
+                    std::max(0.75f,
+                             probConfig.raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment);
             const bool deterministicAxisWaived =
                 simulationConfig.celluniverse2_enabled &&
                 bestIsDeterministicSingleProposal &&
                 (bestIsSignalCenterProposal ||
                  (bridgeProposal != nullptr &&
                   bridgeProposal->windowImmediateBothDaughtersSupported > 0));
-            if (simulationConfig.celluniverse2_enabled &&
+            if (rawDirectOneSidedParentCoreAxisNearMiss) {
+                addSplitSoftGeometryPenalty(
+                    "raw_direct_one_sided_parent_core_axis_near_miss",
+                    normalizedAxisExcess,
+                    static_cast<double>(std::max(
+                        0.0f,
+                        probConfig.raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction)));
+                std::cout << "[Split Soft Gate Waived] " << parentName
+                          << " reason=raw_direct_one_sided_parent_core_axis_near_miss"
+                          << " allowedAngleDeg=" << effectiveAllowedAngle
+                          << " worstAngleDeg=" << worstAxisAngle
+                          << " maxExcessDeg=" << probConfig.raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees
+                          << " rawMask=" << static_cast<int>(bridgeProposal->rawAuxiliarySupportedDaughterMask)
+                          << std::endl;
+            } else if (rawTrustedParentCoreAxisNearMiss) {
+                addSplitSoftGeometryPenalty(
+                    "raw_trusted_parent_core_axis_near_miss",
+                    normalizedAxisExcess,
+                    static_cast<double>(std::max(0.0f, probConfig.split_close_axis_penalty_fraction)));
+                std::cout << "[Split Soft Gate Waived] " << parentName
+                          << " reason=raw_trusted_parent_core_axis_near_miss"
+                          << " allowedAngleDeg=" << effectiveAllowedAngle
+                          << " worstAngleDeg=" << worstAxisAngle
+                          << " maxExcessDeg=" << probConfig.raw_trusted_parent_core_axis_near_miss_max_excess_degrees
+                          << " rawMask=" << static_cast<int>(bridgeProposal->rawAuxiliarySupportedDaughterMask)
+                          << std::endl;
+            } else if (simulationConfig.celluniverse2_enabled &&
                 generatedDaughtersAlignedToSplitAxis) {
                 std::cout << "[Split Soft Gate Waived] " << parentName
                           << " reason=daughter_short_axis_alignment"
@@ -11318,6 +11423,10 @@ celluniverse4_retry_split_finalist:
     float bridgeCostRescueGapDensity = 1.0f;
     float bridgeCostRescueEdgeBright = 0.0f;
     float lumenBridgeGapWidth = -std::numeric_limits<float>::infinity();
+    // The dense-bridge predicate is evaluated inside the bridge-analysis
+    // block, but the one-sided midpoint gate runs after that block.
+    bool rawTrustedParentCoreDenseFlatBridgeRescueEligible = false;
+    bool rawDirectOneSidedParentCoreBridgeRescueEligible = false;
     {
         const cv::Point3f axisVec = bestD2Pos - bestD1Pos;
         const float axisLen = static_cast<float>(cv::norm(axisVec));
@@ -11701,6 +11810,199 @@ celluniverse4_retry_split_finalist:
                           << std::endl;
             }
             const bool bridgeFlat = valleyFromBright > valleyLimit;
+            const bool rawParentCoreSeedRoute =
+                bridgeProposal != nullptr &&
+                bridgeProposal->rawAuxiliaryParentCoreSeed;
+            const bool rawDirectOneSidedParentCoreRoute =
+                bridgeProposal != nullptr &&
+                bridgeProposal->rawAuxiliaryDirectOneSidedParentCoreAssignment;
+            // The shared evidence requires exactly one route. A proposal
+            // carrying both route bits (or neither) fails closed rather than
+            // inheriting either rescue's wider limits.
+            const bool rawTrustedParentCoreBridgeCandidate =
+                bridgeProposalOnly &&
+                bestLabel == "bridge_primary" &&
+                bridgeProposal != nullptr &&
+                bridgeProposal->rawAuxiliaryTrustedPair &&
+                bridgeProposal->rawAuxiliaryPersistentUncovered &&
+                bridgeProposal->rawAuxiliaryNormalizedRawCoreSupport &&
+                bridgeProposal->rawAuxiliarySupportedDaughterMask == 3U &&
+                rawParentCoreSeedRoute != rawDirectOneSidedParentCoreRoute;
+            const bool rawSyntheticParentCoreBridgeCandidate =
+                rawTrustedParentCoreBridgeCandidate && rawParentCoreSeedRoute;
+            const float rawParentCoreFinalD1SeedDistance =
+                rawTrustedParentCoreBridgeCandidate
+                    ? static_cast<float>(cv::norm(
+                          bestD1Pos - bridgeProposal->rawAuxiliaryD1Pos))
+                    : std::numeric_limits<float>::infinity();
+            const float rawParentCoreFinalD2SeedDistance =
+                rawTrustedParentCoreBridgeCandidate
+                    ? static_cast<float>(cv::norm(
+                          bestD2Pos - bridgeProposal->rawAuxiliaryD2Pos))
+                    : std::numeric_limits<float>::infinity();
+            const float rawParentCoreOrphanSeedMatchDistance =
+                rawTrustedParentCoreBridgeCandidate
+                    ? std::max(
+                          0.0f,
+                          probConfig
+                              .raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute)
+                    : 0.0f;
+            const float rawParentCoreCoreSeedMatchAbsolute =
+                rawTrustedParentCoreBridgeCandidate
+                    ? std::max(
+                          0.0f,
+                          probConfig
+                              .raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute)
+                    : 0.0f;
+            const float rawParentCoreCoreSeedMatchFraction =
+                rawTrustedParentCoreBridgeCandidate
+                    ? std::max(
+                          0.0f,
+                          probConfig
+                              .raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction)
+                    : 0.0f;
+            const float rawParentCoreCoreSeedMatchRadiusLimit =
+                rawParentCoreCoreSeedMatchFraction *
+                parentMaxRadiusForSoftGeometry;
+            const float rawParentCoreCoreSeedMatchDistance =
+                rawParentCoreCoreSeedMatchRadiusLimit > 0.0f
+                    ? (rawParentCoreCoreSeedMatchAbsolute > 0.0f
+                           ? std::min(rawParentCoreCoreSeedMatchAbsolute,
+                                      rawParentCoreCoreSeedMatchRadiusLimit)
+                           : rawParentCoreCoreSeedMatchRadiusLimit)
+                    : rawParentCoreCoreSeedMatchAbsolute;
+            const bool rawParentCoreFinalSeedsMatch =
+                rawTrustedParentCoreBridgeCandidate &&
+                rawParentCoreOrphanSeedMatchDistance > 0.0f &&
+                rawParentCoreCoreSeedMatchDistance > 0.0f &&
+                rawParentCoreFinalD1SeedDistance <=
+                    rawParentCoreOrphanSeedMatchDistance &&
+                rawParentCoreFinalD2SeedDistance <=
+                    rawParentCoreCoreSeedMatchDistance;
+            // This marker exists only on the globally unique dedicated raw
+            // assignment that paired one persistent uncovered body with this
+            // parent's verified same-frame core. It deliberately excludes
+            // ordinary raw companion pairs.
+            const bool rawDirectOneSidedParentCoreBridgeCandidate =
+                rawTrustedParentCoreBridgeCandidate &&
+                rawDirectOneSidedParentCoreRoute;
+            const float rawDirectOneSidedSeedDriftFraction =
+                rawDirectOneSidedParentCoreBridgeCandidate
+                    ? std::max(
+                          0.0f,
+                          probConfig
+                              .raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction)
+                    : 0.0f;
+            const float rawDirectOneSidedSeedDriftLimit =
+                rawDirectOneSidedSeedDriftFraction *
+                parentMaxRadiusForSoftGeometry;
+            const bool rawDirectOneSidedFinalSeedsWithinBound =
+                rawDirectOneSidedParentCoreBridgeCandidate &&
+                rawDirectOneSidedSeedDriftLimit > 0.0f &&
+                rawParentCoreFinalD1SeedDistance <= rawDirectOneSidedSeedDriftLimit &&
+                rawParentCoreFinalD2SeedDistance <= rawDirectOneSidedSeedDriftLimit;
+            // Ordinary split attempts have no bridge proposal. Keep this
+            // whole evidence expression behind the shared verified-route
+            // predicate so they cannot dereference a null proposal.
+            const bool rawParentCoreEvidenceQuality =
+                rawTrustedParentCoreBridgeCandidate &&
+                bridgeProposal->signalCenterAxisAlignment >=
+                    std::max(0.0f,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment) &&
+                bridgeProposal->rawAuxiliaryOrphanBoxes >=
+                    std::max(0,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes) &&
+                bridgeProposal->rawAuxiliaryOrphanBrightness >=
+                    std::max(0.0f,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness) &&
+                bridgeProposal->rawAuxiliaryOrphanConfidence >=
+                    std::max(0.0f,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence) &&
+                bridgeProposal->rawAuxiliaryCoreBoxes >=
+                    std::max(0,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes) &&
+                bridgeProposal->rawAuxiliaryCoreBrightness >=
+                    std::max(0.0f,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness) &&
+                bridgeProposal->rawAuxiliaryCoreConfidence >=
+                    std::max(0.0f,
+                             probConfig
+                                 .raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence);
+            const bool rawTrustedParentCoreDenseFlatBridgeRescue =
+                rawSyntheticParentCoreBridgeCandidate &&
+                probConfig.raw_trusted_parent_core_dense_flat_bridge_rescue_enabled &&
+                (!probConfig
+                      .raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match ||
+                 rawParentCoreFinalSeedsMatch) &&
+                rawParentCoreEvidenceQuality;
+            const bool rawDirectOneSidedParentCoreBridgeRescue =
+                rawDirectOneSidedParentCoreBridgeCandidate &&
+                probConfig.raw_direct_one_sided_parent_core_bridge_rescue_enabled &&
+                rawDirectOneSidedFinalSeedsWithinBound &&
+                rawParentCoreEvidenceQuality;
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible =
+                rawTrustedParentCoreDenseFlatBridgeRescue ||
+                rawDirectOneSidedParentCoreBridgeRescue;
+            rawDirectOneSidedParentCoreBridgeRescueEligible =
+                rawDirectOneSidedParentCoreBridgeRescue;
+            if (bridgeFlat && rawTrustedParentCoreBridgeCandidate) {
+                const double normalizedExcess =
+                    static_cast<double>(valleyFromBright - valleyLimit) /
+                    std::max(0.1, static_cast<double>(valleyLimit));
+                std::cout << "[CU4 Raw Parent Core Dense Bridge Rescue] "
+                          << parentName
+                          << " action="
+                          << (rawTrustedParentCoreDenseFlatBridgeRescue
+                                  ? "allow" : "reject")
+                          << " valleyFromBright=" << valleyFromBright
+                          << " valleyLimit=" << valleyLimit
+                          << " gapDensity=" << gapDensity
+                          << " signalAxisAlignment="
+                          << bridgeProposal->signalCenterAxisAlignment
+                          << " orphan=(boxes="
+                          << bridgeProposal->rawAuxiliaryOrphanBoxes
+                          << ",brightness="
+                          << bridgeProposal->rawAuxiliaryOrphanBrightness
+                          << ",confidence="
+                          << bridgeProposal->rawAuxiliaryOrphanConfidence
+                          << ") core=(boxes="
+                          << bridgeProposal->rawAuxiliaryCoreBoxes
+                          << ",brightness="
+                          << bridgeProposal->rawAuxiliaryCoreBrightness
+                          << ",confidence="
+                          << bridgeProposal->rawAuxiliaryCoreConfidence
+                          << ") finalSeedDistance=(orphan="
+                          << rawParentCoreFinalD1SeedDistance
+                          << ",core=" << rawParentCoreFinalD2SeedDistance
+                          << ") finalSeedLimit=(orphan="
+                          << rawParentCoreOrphanSeedMatchDistance
+                          << ",core=" << rawParentCoreCoreSeedMatchDistance
+                          << ",coreAbsolute="
+                          << rawParentCoreCoreSeedMatchAbsolute
+                          << ",coreFraction="
+                          << rawParentCoreCoreSeedMatchFraction
+                          << ",parentRmax="
+                          << parentMaxRadiusForSoftGeometry
+                          << ")"
+                          << " finalSeedsMatch=" << rawParentCoreFinalSeedsMatch
+                          << " normalizedValleyExcess=" << normalizedExcess
+                          << std::endl;
+                if (rawTrustedParentCoreDenseFlatBridgeRescue) {
+                    addSplitSoftGeometryPenalty(
+                        "raw_trusted_parent_core_dense_flat_bridge",
+                        normalizedExcess,
+                        static_cast<double>(std::max(
+                            0.0f,
+                            probConfig
+                                .raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction)));
+                }
+            }
             const bool denseFlatFutureRescue =
                 bridgeProposalOnly &&
                 bridgeProposal != nullptr &&
@@ -11784,7 +12086,8 @@ celluniverse4_retry_split_finalist:
                 gapDensity >= probConfig.split_dense_flat_bridge_min_gap_density &&
                 !denseFlatFutureRescue &&
                 !denseFlatRodTipFutureRescue &&
-                !denseFlatCellUniverse3DelayedMissingRescue;
+                !denseFlatCellUniverse3DelayedMissingRescue &&
+                !rawTrustedParentCoreDenseFlatBridgeRescue;
             if (edgeCount > 0 && denseFlatDeterministicBridge) {
                 std::cout << "[Split Reject bio] " << parentName
                           << " reason=dense_flat_bridge"
@@ -12015,7 +12318,8 @@ celluniverse4_retry_split_finalist:
                 bridgeProposalOnly &&
                 bestLabel == "bridge_primary" &&
                 (!probConfig.pca_bridge_require_valley ||
-                 denseFlatRodTipFutureRescue);
+                 denseFlatRodTipFutureRescue ||
+                 rawTrustedParentCoreDenseFlatBridgeRescue);
             if (edgeCount > 0 && bridgeFlat && !bypassPcaBridgeValley) {
                 const bool impossibleValley =
                     bestIsCellLumenPrepassFallback ||
@@ -12281,6 +12585,99 @@ celluniverse4_retry_split_finalist:
         const float midpointSeedDriftLimit =
             std::max(2.0f, 0.30f * std::max(1.0f, srcMaxR));
         const float midpointMaxDaughterSeedDrift = std::max(drift1, drift2);
+        const float rawParentCoreMidpointParentFraction =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible
+                ? std::max(
+                      0.0f,
+                      rawDirectOneSidedParentCoreBridgeRescueEligible
+                          ? probConfig
+                                .raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction
+                          : probConfig
+                                .raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction)
+                : 0.0f;
+        const float rawParentCoreMidpointLimit =
+            rawParentCoreMidpointParentFraction *
+            std::max(1.0f, srcMaxR);
+        const float rawParentCoreSeedDriftParentFraction =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible
+                ? std::max(
+                      0.0f,
+                      rawDirectOneSidedParentCoreBridgeRescueEligible
+                          ? probConfig
+                                .raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction
+                          : probConfig
+                                .raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction)
+                : 0.0f;
+        const float rawParentCoreSeedDriftLimit =
+            rawParentCoreSeedDriftParentFraction > 0.0f
+                ? std::max(2.0f, rawParentCoreSeedDriftParentFraction *
+                                  std::max(1.0f, srcMaxR))
+                : midpointSeedDriftLimit;
+        const float rawParentCoreD1SeedSnapshotDistance =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible
+                ? static_cast<float>(cv::norm(
+                      bridgeProposal->rawAuxiliaryD1Pos - snapshot.position))
+                : std::numeric_limits<float>::infinity();
+        const float rawParentCoreD2SeedSnapshotDistance =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible
+                ? static_cast<float>(cv::norm(
+                      bridgeProposal->rawAuxiliaryD2Pos - snapshot.position))
+                : std::numeric_limits<float>::infinity();
+        const bool rawParentCoreD1IsCore =
+            rawParentCoreD1SeedSnapshotDistance <=
+            rawParentCoreD2SeedSnapshotDistance;
+        const cv::Point3f rawParentCoreFinalCorePosition =
+            rawParentCoreD1IsCore ? bestD1Pos : bestD2Pos;
+        const float rawParentCoreFinalCoreSnapshotDistance =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible
+                ? static_cast<float>(cv::norm(
+                      rawParentCoreFinalCorePosition - snapshot.position))
+                : std::numeric_limits<float>::infinity();
+        const float rawParentCoreSnapshotMinRadius =
+            std::max(0.0f,
+                     std::min({snapshot.aRadius,
+                               snapshot.bRadius,
+                               snapshot.cRadius}));
+        const bool rawParentCoreFinalCoreInsideSnapshot =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible &&
+            rawParentCoreFinalCoreSnapshotDistance <=
+                rawParentCoreSnapshotMinRadius;
+        const bool rawTrustedParentCoreMidpointRescue =
+            rawTrustedParentCoreDenseFlatBridgeRescueEligible &&
+            rawParentCoreMidpointParentFraction > 0.0f &&
+            midpointDistance <= rawParentCoreMidpointLimit &&
+            midpointMaxDaughterSeedDrift <= rawParentCoreSeedDriftLimit &&
+            rawParentCoreFinalCoreInsideSnapshot;
+        if (rawTrustedParentCoreDenseFlatBridgeRescueEligible &&
+            rawParentCoreMidpointParentFraction > 0.0f) {
+            std::cout << "[CU4 Raw Parent Core Midpoint Rescue] "
+                      << parentName
+                      << " action="
+                      << (midpointDistance <= midpointLimit
+                              ? "not_needed"
+                              : (rawTrustedParentCoreMidpointRescue
+                                     ? "allow"
+                                     : "reject"))
+                      << " midpointDistance=" << midpointDistance
+                      << " normalLimit=" << midpointLimit
+                      << " rawLimit=" << rawParentCoreMidpointLimit
+                      << " rawFraction="
+                      << rawParentCoreMidpointParentFraction
+                      << " parentRmax=" << srcMaxR
+                      << " maxDaughterSeedDrift="
+                      << midpointMaxDaughterSeedDrift
+                      << " seedDriftLimit=" << rawParentCoreSeedDriftLimit
+                      << " rawSeedDriftFraction="
+                      << rawParentCoreSeedDriftParentFraction
+                      << " coreIsD1=" << rawParentCoreD1IsCore
+                      << " coreSnapshotDistance="
+                      << rawParentCoreFinalCoreSnapshotDistance
+                      << " coreSnapshotMinRadius="
+                      << rawParentCoreSnapshotMinRadius
+                      << " coreInsideSnapshot="
+                      << rawParentCoreFinalCoreInsideSnapshot
+                      << std::endl;
+        }
 	        const bool cleanFutureMidpointNearMiss =
 	            futureSupportedMidpointRescue &&
 	            bridgeProposal != nullptr &&
@@ -12315,7 +12712,8 @@ celluniverse4_retry_split_finalist:
                 std::max(1.0f, midpointLimit);
 	        if (midpointDistance > midpointLimit &&
 	            !cleanFutureMidpointNearMiss &&
-	            !signalCenterMidpointNearMiss) {
+	            !signalCenterMidpointNearMiss &&
+	            !rawTrustedParentCoreMidpointRescue) {
 	            std::cout << "[Split Reject bio] " << parentName
 	                      << " reason=daughter_midpoint_parent_drift"
 	                      << " midpointDistance=" << midpointDistance
@@ -16918,6 +17316,130 @@ celluniverse4_retry_split_finalist:
                   << std::endl;
         restoreLiveParent();
         return {0.0, noop};
+    }
+
+    if (localSingleBodyAsymmetricGenericSplitGateActive) {
+        const cv::Point3f d0(
+            bestD1.getX(), bestD1.getY(), bestD1.getZ());
+        const cv::Point3f d1(
+            bestD2.getX(), bestD2.getY(), bestD2.getZ());
+        const float distance0 = static_cast<float>(
+            cv::norm(d0 - snapshot.position));
+        const float distance1 = static_cast<float>(
+            cv::norm(d1 - snapshot.position));
+        const float parentDistanceBalance =
+            std::min(distance0, distance1) /
+            std::max(1.0e-6f, std::max(distance0, distance1));
+        const bool asymmetricReject =
+            cell_refit_guards::rejectLocalSingleBodyAsymmetricGenericSplit(
+                true,
+                true,
+                true,
+                localUsableComponentCount,
+                parentDistanceBalance,
+                localSingleBodyMaxParentDistanceBalance);
+        float awayAlignment = -1.0f;
+        std::string referenceNeighborName;
+        float referenceNeighborDistance =
+            std::numeric_limits<float>::infinity();
+        const float maxReferenceNeighborDistance =
+            std::max({rA, rB, rC}) *
+            std::max(
+                0.0f,
+                localSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction);
+        const cv::Point3f farDaughter =
+            distance1 > distance0 ? d1 : d0;
+        for (const Ellipsoid &other : savedCells) {
+            if (other.getName() == parentName || other.isTrash()) continue;
+            const cv::Point3f otherPosition(
+                other.getX(), other.getY(), other.getZ());
+            const float distance = static_cast<float>(
+                cv::norm(otherPosition - snapshot.position));
+            if (distance > maxReferenceNeighborDistance) continue;
+            const cv::Point3f away = snapshot.position - otherPosition;
+            const cv::Point3f daughterDirection =
+                farDaughter - snapshot.position;
+            const float awayNorm = static_cast<float>(cv::norm(away));
+            const float daughterNorm = static_cast<float>(
+                cv::norm(daughterDirection));
+            if (awayNorm <= 1.0e-6f || daughterNorm <= 1.0e-6f) {
+                continue;
+            }
+            const float candidateAlignment =
+                away.dot(daughterDirection) / (awayNorm * daughterNorm);
+            // A closer cell on the daughter side is not the relevant
+            // directional reference. Among nearby cells on the opposite
+            // side, use the closest one whose geometry supports an outward
+            // daughter. This captures the Cell-910 reference for Cell 400
+            // without weakening any global ownership or distance gate.
+            if (candidateAlignment >=
+                    localSingleBodyStrongSplitMinAwayAlignment &&
+                distance < referenceNeighborDistance) {
+                awayAlignment = candidateAlignment;
+                referenceNeighborDistance = distance;
+                referenceNeighborName = other.getName();
+            }
+        }
+        const bool shortestAxisCandidate =
+            bestLabel.find(names3[shortIdx]) != std::string::npos;
+        // Reaching this point means the existing biological, overlap,
+        // rod-tip, bridge and objective gates have already passed. This
+        // exception only prevents the final one-component asymmetry veto
+        // from overriding a strongly supported shortest-axis division that
+        // places the far daughter away from the nearest live neighbor.
+        const bool strongSplitException =
+            asymmetricReject &&
+            localSingleBodyStrongSplitExceptionEnabled &&
+            shortestAxisCandidate &&
+            costDiff <= -localSingleBodyStrongSplitMinTotalImprovement &&
+            imageCostDiff <=
+                -localSingleBodyStrongSplitMinImageImprovement &&
+            awayAlignment >= localSingleBodyStrongSplitMinAwayAlignment;
+        if (strongSplitException) {
+            std::cout
+                << "[Split Accept CU4 local single body strong exception] cell="
+                << parentName
+                << " usableComponents=" << localUsableComponentCount
+                << " totalImprovement=" << -costDiff
+                << " imageImprovement=" << -imageCostDiff
+                << " parentDistanceBalance=" << parentDistanceBalance
+                << " referenceNeighbor=" << referenceNeighborName
+                << " referenceNeighborDistance=" << referenceNeighborDistance
+                << " maxReferenceNeighborDistance="
+                << maxReferenceNeighborDistance
+                << " awayAlignment=" << awayAlignment
+                << " minAwayAlignment="
+                << localSingleBodyStrongSplitMinAwayAlignment
+                << " bestIdx=" << bestIdx
+                << " bestLabel=" << bestLabel
+                << std::endl;
+        } else if (asymmetricReject) {
+            std::cout
+                << "[Split Reject CU4 local single body asymmetry] cell="
+                << parentName
+                << " usableComponents=" << localUsableComponentCount
+                << " parentDistance0=" << distance0
+                << " parentDistance1=" << distance1
+                << " parentDistanceBalance=" << parentDistanceBalance
+                << " maxBalance="
+                << localSingleBodyMaxParentDistanceBalance
+                << " shortestAxisCandidate="
+                << (shortestAxisCandidate ? 1 : 0)
+                << " totalImprovement=" << -costDiff
+                << " imageImprovement=" << -imageCostDiff
+                << " referenceNeighbor=" << referenceNeighborName
+                << " referenceNeighborDistance=" << referenceNeighborDistance
+                << " maxReferenceNeighborDistance="
+                << maxReferenceNeighborDistance
+                << " awayAlignment=" << awayAlignment
+                << " strongExceptionEnabled="
+                << (localSingleBodyStrongSplitExceptionEnabled ? 1 : 0)
+                << " bestIdx=" << bestIdx
+                << " bestLabel=" << bestLabel
+                << std::endl;
+            restoreLiveParent();
+            return {0.0, noop};
+        }
     }
 
     // Accept: install the best candidate state. The callback applies on

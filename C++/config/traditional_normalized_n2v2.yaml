@@ -1,0 +1,23 @@
+base_config: traditional_tuned_common.yaml
+
+# Explicit experiment outside the supported model-input contract:
+# p0.1-p99.9 normalization -> N2V2.
+simulation:
+  preprocess_mode: n2v2
+  frame_intensity_normalization_before_n2v2_enabled: true
+  frame_intensity_percentile_exclude_zeros: false
+  frame_intensity_scale_low_percentile: 0.001
+  frame_intensity_scale_high_percentile: 0.999
+  frame_intensity_hard_max: 0.0
+
+prob:
+  # Pos0 frame 6 showed cells 20 and 31 already too large relative to their
+  # respective siblings on the division frame. Keep this PAVAK comparison
+  # tighter than the general 1.25 production default.
+  split_birth_sibling_volume_ratio_max: 1.20
+  # The next-frame PCA fit otherwise permits +/-10% on every radius, which
+  # produced a 33% volume jump for cells 20 and 31 while their siblings
+  # shrank. Stabilize true recent daughters during the existing cooldown.
+  split_sibling_volume_guard_recent_frames: 8
+  split_recent_daughter_volume_min_birth_factor: 0.85
+  split_recent_daughter_volume_max_birth_factor: 1.25

@@ -1,5 +1,6 @@
 #include "CandidateBatch.hpp"
 #include "CellRefitGuards.hpp"
+#include "Frame.hpp"
 
 #include <array>
 #include <cmath>
@@ -82,6 +83,88 @@ int main()
                 !cell_refit_guards::rejectSiblingRodOverlap(
                     1.95f, 1.55f, 0.15f, 1.80f, 0.07f),
                 "one rod-like daughter alone must not reject a split");
+            require(
+                cell_refit_guards::rejectLocalSingleBodyAsymmetricGenericSplit(
+                    true, true, true, 1, 0.2947f, 0.35f),
+                "recorded Cell 200 one-body asymmetric generic split must be rejected");
+            require(
+                !cell_refit_guards::rejectLocalSingleBodyAsymmetricGenericSplit(
+                    true, true, true, 1, 0.3938f, 0.35f),
+                "recorded Cell 41 parent-distance balance must survive the narrow gate");
+            require(
+                !cell_refit_guards::rejectLocalSingleBodyAsymmetricGenericSplit(
+                    true, false, true, 1, 0.20f, 0.35f),
+                "trusted non-generic split proposals must not use the generic gate");
+            require(
+                !cell_refit_guards::rejectLocalSingleBodyAsymmetricGenericSplit(
+                    true, true, true, 2, 0.20f, 0.35f),
+                "two directly observed components must not be treated as one body");
+            require(
+                cell_refit_guards::rejectBackgroundDropWeakProbe(
+                    true, 0.159035f, 0.553023f, 0.50f),
+                "recorded dim trash-cluster probe must not win nearest-strong rescue");
+            require(
+                !cell_refit_guards::rejectBackgroundDropWeakProbe(
+                    true, 0.553023f, 0.553023f, 0.50f),
+                "recorded distinct bright-body probe must remain eligible");
+
+            require(
+                !cell_refit_guards::shouldAttemptOwnedLocalContinuationRescue(
+                    true, false, 4.0f, 22.1f, 0.50f),
+                "ordinary in-body local support must suppress owned rescue");
+            require(
+                cell_refit_guards::shouldAttemptOwnedLocalContinuationRescue(
+                    true, true, std::numeric_limits<float>::infinity(), 22.1f, 0.50f),
+                "concrete loss of ordinary local support must allow a rescue scan");
+            require(
+                cell_refit_guards::shouldAttemptOwnedLocalContinuationRescue(
+                    true, false, 12.0f, 22.1f, 0.50f),
+                "large current-support drift must allow a rescue scan");
+            require(
+                !cell_refit_guards::shouldAttemptOwnedLocalContinuationRescue(
+                    true, false, 10.9f, 22.1f, 0.50f),
+                "sub-threshold current-support drift must stay suppressed");
+            require(
+                cell_refit_guards::acceptOwnedLocalContinuationRescue(
+                    true, 1, 180, 64, 42, 20, false, false, 19.4f, 22.1f),
+                "unique prior-body-supported Cell-900-style continuation must be eligible");
+            require(
+                !cell_refit_guards::acceptOwnedLocalContinuationRescue(
+                    true, 2, 180, 64, 42, 20, false, false, 19.4f, 22.1f),
+                "ambiguous continuation components must stay rejected");
+            require(
+                !cell_refit_guards::acceptOwnedLocalContinuationRescue(
+                    true, 1, 180, 64, 42, 20, false, true, 19.4f, 22.1f),
+                "neighbor-overlapping continuation support must stay rejected");
+            require(
+                !cell_refit_guards::acceptOwnedLocalContinuationRescue(
+                    true, 1, 180, 64, 42, 20, false, false, 22.2f, 22.1f),
+                "continuation displacement beyond the independent bound must stay rejected");
+
+            require(
+                cell_refit_guards::
+                    acceptDominantOutsidePriorLocalContinuationRescue(
+                        true, 1, 1, 262, 179, 1.25f, 28.0f, 17.0f,
+                        false, false, 18.6f, 22.1f),
+                "a uniquely dominant unclaimed exterior Cell-900 component must be eligible");
+            require(
+                !cell_refit_guards::
+                    acceptDominantOutsidePriorLocalContinuationRescue(
+                        true, 1, 1, 220, 179, 1.25f, 28.0f, 17.0f,
+                        false, false, 18.6f, 22.1f),
+                "an exterior component without strict voxel dominance must stay rejected");
+            require(
+                !cell_refit_guards::
+                    acceptDominantOutsidePriorLocalContinuationRescue(
+                        true, 1, 1, 262, 179, 1.25f, 10.0f, 17.0f,
+                        false, false, 18.6f, 22.1f),
+                "an exterior component without clear separation must stay rejected");
+            require(
+                !cell_refit_guards::
+                    acceptDominantOutsidePriorLocalContinuationRescue(
+                        true, 1, 1, 262, 179, 1.25f, 28.0f, 17.0f,
+                        false, true, 18.6f, 22.1f),
+                "neighbor-overlapping exterior support must stay rejected");
 
             using LocalSplitDecision =
                 cell_refit_guards::LocalComponentSplitDecision;
@@ -548,6 +631,7 @@ int main()
         currentEvidenceInput.parentMinRadius = 5.0f;
         ChunkEvidence currentEvidence = makeChunk();
         currentEvidence.sourceFrameOffset = 0;
+        currentEvidence.pcaRefitSuggested = true;
         currentEvidenceInput.evidence = {currentEvidence};
         CandidateBatchConfig lookaheadConfig = config;
         lookaheadConfig.lookaheadEvidenceEnabled = true;
@@ -578,6 +662,9 @@ int main()
         require(currentWeighted->evidenceFrameOffset == 0 &&
                     futureWeighted->evidenceFrameOffset == 2,
                 "candidate diagnostics must retain evidence frame offset");
+        require(currentWeighted->pcaRefitSuggested &&
+                    futureWeighted->pcaRefitSuggested,
+                "parent-local component candidates must retain the PCA-refit request");
         require(std::abs(
                     (futureWeighted->cheapPriority -
                      currentWeighted->cheapPriority) - 0.80) < 1.0e-6,
@@ -608,6 +695,86 @@ int main()
                 "expensive top-k must include exactly four candidates");
         require(expensive.front() == 0,
                 "expensive set must include no-op");
+
+        CandidateBatchInput forcedTrialInput;
+        forcedTrialInput.frame = 53;
+        forcedTrialInput.parentName = "cell_900";
+        forcedTrialInput.baselinePosition = cv::Point3f(10.0f, 10.0f, 10.0f);
+        forcedTrialInput.snapshotPosition = cv::Point3f(10.0f, 10.0f, 10.0f);
+        forcedTrialInput.parentMinRadius = 5.0f;
+        ChunkEvidence nearbyEvidence = makeChunk();
+        nearbyEvidence.stableId = 9001;
+        nearbyEvidence.weightedCenter = cv::Point3f(10.2f, 10.0f, 10.0f);
+        nearbyEvidence.geometricCenter = cv::Point3f(10.3f, 10.0f, 10.0f);
+        nearbyEvidence.robustCenter = cv::Point3f(10.4f, 10.0f, 10.0f);
+        nearbyEvidence.peakCenter = cv::Point3f(10.5f, 10.0f, 10.0f);
+        ChunkEvidence forcedEvidence = makeChunk();
+        forcedEvidence.stableId = 9002;
+        forcedEvidence.weightedCenter = cv::Point3f(20.0f, 10.0f, 10.0f);
+        forcedEvidence.geometricCenter = cv::Point3f(20.2f, 10.0f, 10.0f);
+        forcedEvidence.robustCenter = cv::Point3f(20.4f, 10.0f, 10.0f);
+        forcedEvidence.peakCenter = cv::Point3f(20.6f, 10.0f, 10.0f);
+        forcedEvidence.forceExpensiveTrial = true;
+        forcedTrialInput.evidence = {nearbyEvidence, forcedEvidence};
+        CandidateBatchConfig forcedTrialConfig = config;
+        forcedTrialConfig.maxExactChunkCenters = 8;
+        forcedTrialConfig.maxCandidatesPerParent = 10;
+        forcedTrialConfig.expensiveTopK = 3;
+        forcedTrialConfig.stochasticCandidatesPerParent = 0;
+        CandidateBatch forcedTrialBatch(forcedTrialInput, forcedTrialConfig);
+        bool forcedCandidateSeen = false;
+        for (const std::size_t index : forcedTrialBatch.expensiveCandidateIndices()) {
+            if (forcedTrialBatch.candidates()[index].forceExpensiveTrial) {
+                forcedCandidateSeen = true;
+            }
+        }
+        require(forcedCandidateSeen,
+                "a uniquely qualified continuation center must receive one normal cost trial");
+
+        CandidateBatchInput adaptiveInput = currentEvidenceInput;
+        ChunkEvidence edgeEvidence = makeChunk();
+        edgeEvidence.stableId = 9100;
+        edgeEvidence.hasEdgeRefinedCenter = true;
+        edgeEvidence.edgeRefinedCenter =
+            cv::Point3f(14.0f, 10.0f, 10.0f);
+        edgeEvidence.threshold = 0.83f;
+        edgeEvidence.trustworthyForAdaptiveHistory = true;
+        adaptiveInput.evidence = {edgeEvidence};
+        CandidateBatchConfig adaptiveConfig = config;
+        adaptiveConfig.maxCandidatesPerParent = 10;
+        adaptiveConfig.maxExactChunkCenters = 8;
+        adaptiveConfig.stochasticCandidatesPerParent = 0;
+        adaptiveConfig.adaptiveEvidenceHypothesesEnabled = true;
+        adaptiveConfig.adaptiveEdgeRefinedHypothesesEnabled = true;
+        adaptiveConfig.adaptiveTrialFitEnabled = true;
+        adaptiveConfig.adaptiveFamilyDiverseBeamEnabled = true;
+        adaptiveConfig.adaptiveFamilyDiverseBeamWidth = 3;
+        CandidateBatch adaptiveBatch(adaptiveInput, adaptiveConfig);
+        const auto adaptiveExpensive =
+            adaptiveBatch.expensiveCandidateIndices();
+        bool adaptiveComponentSeen = false;
+        bool adaptiveEdgeSeen = false;
+        for (const std::size_t index : adaptiveExpensive) {
+            const CandidateProposal &candidate =
+                adaptiveBatch.candidates()[index];
+            adaptiveComponentSeen =
+                adaptiveComponentSeen ||
+                (candidate.evidenceId != 0 &&
+                 candidate.evidenceFamily ==
+                     CandidateEvidenceFamily::Component);
+            adaptiveEdgeSeen =
+                adaptiveEdgeSeen ||
+                (candidate.source == CandidateSource::ChunkEdgeRefined &&
+                 candidate.evidenceFamily ==
+                     CandidateEvidenceFamily::EdgeRefined &&
+                 std::abs(candidate.evidenceThreshold - 0.83f) < 1.0e-6f &&
+                 candidate.trustworthyForAdaptiveHistory);
+        }
+        require(adaptiveExpensive.front() == 0 &&
+                    adaptiveExpensive.size() == 4 &&
+                    adaptiveComponentSeen && adaptiveEdgeSeen,
+                "adaptive K=3 beam must retain no-op plus component and edge families");
+
         first.recordEvaluation(expensive[1], -5.0);
         first.recordEvaluation(expensive[2], -2.0);
         first.recordEvaluation(expensive[3], 1.0);
@@ -760,6 +927,27 @@ int main()
         }
         require(threw, "background-drop top fraction must be positive");
 
+        invalid = config;
+        invalid.backgroundDropRescueStrongProbeMinBestMeanFraction = 1.01f;
+        threw = false;
+        try {
+            invalid.validate();
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        require(threw, "background-drop strong-probe fraction must not exceed one");
+
+        invalid = config;
+        invalid.localComponentContinuationMinDistanceRadiusScale = 1.0f;
+        invalid.localComponentContinuationMaxDistanceRadiusScale = 0.5f;
+        threw = false;
+        try {
+            invalid.validate();
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        require(threw, "local continuation maximum distance must cover its minimum");
+
 #ifdef CELLUNIVERSE_TEST_CONFIG_DIR
         const std::string configDir = CELLUNIVERSE_TEST_CONFIG_DIR;
         const YAML::Node traditionalNode =
@@ -771,6 +959,10 @@ int main()
                 "traditional config must not silently enable CU4");
         require(!traditional.candidateBatch.enabled,
                 "traditional config must not enable candidate batches");
+        require(!traditional.candidateBatch.localComponentContinuationPcaEnabled &&
+                    !traditional.candidateBatch
+                         .localComponentSingleBodyAsymmetricSplitGateEnabled,
+                "traditional config must not enable CU4 local-component gates");
         require(!traditional.simulation.celluniverse4_component_filter_enabled,
                 "traditional config must not enable CU4 component filtering");
         require(!traditional.simulation
@@ -825,6 +1017,153 @@ int main()
                 "CU4 profile must enable CU4");
         require(cu4.candidateBatch.enabled,
                 "CU4 profile must enable candidate batches");
+        require(
+            cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_enabled &&
+                std::abs(cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction - 1.66f) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction - 0.35f) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction - 0.35f) < 1.0e-7f &&
+                cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes == 1 &&
+                std::abs(cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness - 0.09f) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence - 0.42f) < 1.0e-7f,
+            "CU4 must opt in to the bounded persistent raw parent-core rescue only");
+        {
+            const auto isCommonVerifiedRawParentCorePair =
+                [](const BridgeSplitProposal &proposal) {
+                    return proposal.rawAuxiliaryTrustedPair &&
+                           proposal.rawAuxiliaryPersistentUncovered &&
+                           proposal.rawAuxiliaryNormalizedRawCoreSupport &&
+                           proposal.rawAuxiliarySupportedDaughterMask == 3U &&
+                           proposal.rawAuxiliaryParentCoreSeed !=
+                               proposal.rawAuxiliaryDirectOneSidedParentCoreAssignment;
+                };
+            const auto isDirectOneSidedEligible =
+                [&](const BridgeSplitProposal &proposal) {
+                    return isCommonVerifiedRawParentCorePair(proposal) &&
+                           proposal.rawAuxiliaryDirectOneSidedParentCoreAssignment;
+                };
+
+            const BridgeSplitProposal *noBridgeProposal = nullptr;
+            const bool noBridgeCanUseVerifiedRawRoute =
+                noBridgeProposal != nullptr &&
+                noBridgeProposal->rawAuxiliaryTrustedPair &&
+                noBridgeProposal->rawAuxiliaryPersistentUncovered &&
+                noBridgeProposal->rawAuxiliaryNormalizedRawCoreSupport;
+            require(!noBridgeCanUseVerifiedRawRoute,
+                    "ordinary splits without a bridge proposal must fail closed before raw evidence access");
+
+            BridgeSplitProposal ordinarySymmetricRawPair;
+            ordinarySymmetricRawPair.rawAuxiliaryTrustedPair = true;
+            ordinarySymmetricRawPair.rawAuxiliaryPersistentUncovered = true;
+            ordinarySymmetricRawPair.rawAuxiliaryNormalizedRawCoreSupport = true;
+            ordinarySymmetricRawPair.rawAuxiliarySupportedDaughterMask = 3U;
+            require(!isCommonVerifiedRawParentCorePair(ordinarySymmetricRawPair),
+                    "ordinary symmetric raw pairs must fail closed without either route");
+
+            BridgeSplitProposal syntheticParentCoreFallback;
+            syntheticParentCoreFallback.rawAuxiliaryTrustedPair = true;
+            syntheticParentCoreFallback.rawAuxiliaryPersistentUncovered = true;
+            syntheticParentCoreFallback.rawAuxiliaryNormalizedRawCoreSupport = true;
+            syntheticParentCoreFallback.rawAuxiliaryParentCoreSeed = true;
+            syntheticParentCoreFallback.rawAuxiliarySupportedDaughterMask = 3U;
+            require(isCommonVerifiedRawParentCorePair(syntheticParentCoreFallback) &&
+                        !isDirectOneSidedEligible(syntheticParentCoreFallback),
+                    "synthetic parent-core fallback may use common refit evidence but not direct rescue");
+
+            BridgeSplitProposal verifiedRealOneSidedPair;
+            verifiedRealOneSidedPair.rawAuxiliaryTrustedPair = true;
+            verifiedRealOneSidedPair.rawAuxiliaryPersistentUncovered = true;
+            verifiedRealOneSidedPair.rawAuxiliaryNormalizedRawCoreSupport = true;
+            verifiedRealOneSidedPair.rawAuxiliaryDirectOneSidedParentCoreAssignment = true;
+            verifiedRealOneSidedPair.rawAuxiliarySupportedDaughterMask = 3U;
+            require(!verifiedRealOneSidedPair.rawAuxiliaryParentCoreSeed &&
+                        isDirectOneSidedEligible(verifiedRealOneSidedPair),
+                    "verified real one-sided construction must carry direct-only provenance");
+
+            BridgeSplitProposal ambiguousBothRoutes;
+            ambiguousBothRoutes.rawAuxiliaryTrustedPair = true;
+            ambiguousBothRoutes.rawAuxiliaryPersistentUncovered = true;
+            ambiguousBothRoutes.rawAuxiliaryNormalizedRawCoreSupport = true;
+            ambiguousBothRoutes.rawAuxiliaryParentCoreSeed = true;
+            ambiguousBothRoutes.rawAuxiliaryDirectOneSidedParentCoreAssignment = true;
+            ambiguousBothRoutes.rawAuxiliarySupportedDaughterMask = 3U;
+            require(!isCommonVerifiedRawParentCorePair(ambiguousBothRoutes),
+                    "a proposal carrying both raw-parent-core routes must fail closed");
+            const auto directAxisNearMissEligible =
+                [&](const BridgeSplitProposal &proposal,
+                    const float signalAxisAlignment,
+                    const float excessDegrees) {
+                    return isDirectOneSidedEligible(proposal) &&
+                           signalAxisAlignment >= 0.75f &&
+                           excessDegrees <= 8.0f;
+                };
+            require(directAxisNearMissEligible(verifiedRealOneSidedPair, 0.75f, 8.0f),
+                    "the direct-only axis near miss must accept only exact bounded evidence");
+            require(!directAxisNearMissEligible(syntheticParentCoreFallback, 1.0f, 0.0f),
+                    "the legacy synthetic route must not inherit the direct axis exception");
+            BridgeSplitProposal directButUnnormalized = verifiedRealOneSidedPair;
+            directButUnnormalized.rawAuxiliaryNormalizedRawCoreSupport = false;
+            require(!directAxisNearMissEligible(directButUnnormalized, 1.0f, 0.0f) &&
+                        !directAxisNearMissEligible(verifiedRealOneSidedPair, 0.74f, 0.0f) &&
+                        !directAxisNearMissEligible(verifiedRealOneSidedPair, 1.0f, 8.01f),
+                    "direct axis near miss must fail closed on missing raw support, weak axis, or excess angle");
+        }
+        require(
+            cu4.prob.raw_direct_one_sided_parent_core_bridge_rescue_enabled &&
+                std::abs(cu4.prob.raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction - 1.66f) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction - 0.35f) < 1.0e-7f &&
+                cu4.prob.raw_direct_one_sided_parent_core_axis_near_miss_enabled &&
+                std::abs(cu4.prob.raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees - 8.0f) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment - 0.75f) < 1.0e-7f &&
+                std::abs(cu4.prob.raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction - 0.20f) < 1.0e-7f,
+            "CU4 must opt in to the direct-marker rescue with independent midpoint and axis bounds");
+        require(
+            cu4.candidateBatch.backgroundDropRescueStrongProbeFilterEnabled &&
+                std::abs(
+                    cu4.candidateBatch
+                            .backgroundDropRescueStrongProbeMinBestMeanFraction -
+                    0.50f) < 1.0e-7f &&
+                cu4.candidateBatch
+                    .backgroundDropRescueTrashOccupancyFilterEnabled &&
+                std::abs(
+                    cu4.candidateBatch
+                            .backgroundDropRescueTrashOccupancyRadiusScale -
+                    1.25f) < 1.0e-7f,
+            "CU4 must choose nearest strong probes outside initialized trash");
+        require(
+            cu4.candidateBatch.localComponentContinuationPcaEnabled &&
+                cu4.candidateBatch.localComponentContinuationPcaRefitEnabled &&
+                cu4.candidateBatch.localComponentContinuationMinComponentVoxels == 20 &&
+                cu4.candidateBatch.localComponentContinuationMaxCandidates == 3 &&
+                std::abs(
+                    cu4.candidateBatch
+                            .localComponentContinuationMinDistanceRadiusScale -
+                    0.15f) < 1.0e-7f &&
+                std::abs(
+                    cu4.candidateBatch
+                            .localComponentContinuationMaxDistanceRadiusScale -
+                    1.25f) < 1.0e-7f &&
+                cu4.candidateBatch
+                    .localComponentSingleBodyAsymmetricSplitGateEnabled &&
+                std::abs(
+                    cu4.candidateBatch
+                            .localComponentSingleBodyAsymmetricSplitMaxParentBalance -
+                    0.35f) < 1.0e-7f,
+            "CU4 must enable bounded local-component PCA continuation and asymmetric one-body rejection");
+        require(
+            cu4.simulation
+                    .celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled &&
+                std::abs(
+                    cu4.simulation
+                            .celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio -
+                    2.0f) < 1.0e-7f,
+            "CU4 bright-cell size review must reject rod-tip growth independently");
+        require(
+            cell_refit_guards::passesAspectRatioCap(
+                {13.4061f, 10.0192f, 6.86306f}, 2.0) &&
+                !cell_refit_guards::passesAspectRatioCap(
+                    {14.4373f, 10.0192f, 6.86306f}, 2.0),
+            "bright-cell review aspect guard must keep the bounded attempt and reject the recorded frame-120 rod tip");
         require(
             cu4.candidateBatch
                 .localComponentSplitSaturatedSparseHybridValleyOverrideEnabled &&

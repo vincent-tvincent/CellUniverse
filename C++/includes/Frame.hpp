@@ -121,6 +121,36 @@ struct BridgeSplitProposal
     // connected components. Unlike the older background-drop re-ground pair,
     // it has already passed the component, midpoint, straddle, and axis gates.
     bool trustedLocalComponentPair = false;
+    // A pair selected exclusively from persistent normalized-raw centers.
+    // It remains subject to every normal split gate; this provenance only
+    // prevents N2V2 from relocating the specifically raw-supported seed.
+    bool rawAuxiliaryTrustedPair = false;
+    // Explicit provenance for the raw parent-core exception: the orphan was
+    // persistent and uncovered in normalized raw data, and the current
+    // parent-core seed had independent normalized-raw component support.
+    bool rawAuxiliaryPersistentUncovered = false;
+    bool rawAuxiliaryNormalizedRawCoreSupport = false;
+    // Published only after the dedicated one-to-one raw assignment selected a
+    // persistent uncovered orphan and this parent's independently verified raw
+    // core. Ordinary raw companion pairs must leave this false.
+    bool rawAuxiliaryDirectOneSidedParentCoreAssignment = false;
+    // True only when the inside daughter was synthesized from this parent's
+    // current core after verified normalized-raw support.
+    bool rawAuxiliaryParentCoreSeed = false;
+    std::uint8_t rawAuxiliarySupportedDaughterMask = 0;
+    cv::Point3f rawAuxiliaryD1Pos{0.0f, 0.0f, 0.0f};
+    cv::Point3f rawAuxiliaryD2Pos{0.0f, 0.0f, 0.0f};
+    float rawAuxiliaryDaughterMatchDistance = 0.0f;
+    // Quality from the normalized-raw centers used exclusively by the
+    // synthetic parent-core route. Ordinary raw companion pairs leave these
+    // values at their fail-closed defaults and therefore cannot use the
+    // parent-core bridge rescue.
+    int rawAuxiliaryOrphanBoxes = 0;
+    float rawAuxiliaryOrphanBrightness = 0.0f;
+    float rawAuxiliaryOrphanConfidence = 0.0f;
+    int rawAuxiliaryCoreBoxes = 0;
+    float rawAuxiliaryCoreBrightness = 0.0f;
+    float rawAuxiliaryCoreConfidence = 0.0f;
     // A saturated-sparse current-frame proposal made from one local
     // component and one reflected signal-center seed. This marker permits
     // only the separately configured hybrid valley limit; all other split
@@ -220,6 +250,11 @@ public:
         int boxes = 0;
         float sizeVoxels = 0.0f;
         float shapeElongation = 1.0f;
+        // Split-only evidence recovered from the normalized raw stack. This
+        // marker is never installed on Frame::_signalCenters; it lets the CU4
+        // split pre-pass require that an auxiliary pair actually uses the
+        // persistent uncovered body that justified the retry.
+        bool splitOnlyAuxiliaryRaw = false;
     };
 
     // Single-pipeline constructor — the analysis-frame / dual-pipeline
@@ -431,7 +466,15 @@ public:
         bool lumenSkipExistingCellBuriedCheck = false,
         bool lumenSkipNeighborBridgeCheck = false,
         bool saturatedSparseHybridValleyOverrideEnabled = false,
-        float saturatedSparseHybridMaxValleyRatio = 1.0f);
+        float saturatedSparseHybridMaxValleyRatio = 1.0f,
+        bool localSingleBodyAsymmetricGenericSplitGateActive = false,
+        int localUsableComponentCount = 0,
+        float localSingleBodyMaxParentDistanceBalance = 0.35f,
+        bool localSingleBodyStrongSplitExceptionEnabled = false,
+        double localSingleBodyStrongSplitMinTotalImprovement = 0.0,
+        double localSingleBodyStrongSplitMinImageImprovement = 0.0,
+        float localSingleBodyStrongSplitMinAwayAlignment = 0.0f,
+        float localSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction = 0.0f);
 
     // PCA-bridge daughter discovery. Runs the long-axis dark-bridge bin
     // analysis on the current cell and, if a valid bridge is found, returns

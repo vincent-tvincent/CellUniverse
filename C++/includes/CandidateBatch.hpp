@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@ enum class CandidateSource
     ChunkGeometric,
     ChunkRobust,
     ChunkPeak,
+    ChunkEdgeRefined,
     Stochastic
 };
 
@@ -33,6 +35,12 @@ struct CandidateProposal
     std::uint64_t evidenceId = 0;
     int evidenceFrameOffset = 0;
     float evidenceConfidence = 0.0f;
+    CandidateEvidenceFamily evidenceFamily =
+        CandidateEvidenceFamily::Component;
+    float evidenceThreshold = std::numeric_limits<float>::quiet_NaN();
+    bool trustworthyForAdaptiveHistory = false;
+    bool pcaRefitSuggested = false;
+    bool forceExpensiveTrial = false;
     double cheapPriority = 0.0;
     bool evaluated = false;
     double costDiff = 0.0;

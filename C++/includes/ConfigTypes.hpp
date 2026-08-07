@@ -406,6 +406,11 @@ public:
     bool celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled = false;
     // Grow axes independently toward the component's local-coordinate extent.
     bool celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled = false;
+    // Independently reject anisotropic growth proposals that would turn a
+    // reviewed cell into a rod-tip shape. This guards the final review stage,
+    // which runs after the ordinary PCA shape-ratio projection.
+    bool celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled = false;
+    float celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio = 2.0f;
     float celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile = 0.95f;
     float celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction = 0.50f;
     int celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius = 1;
@@ -1032,6 +1037,8 @@ public:
         if (node["celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance"]) celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance = node["celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance"].as<float>();
         if (node["celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled"]) celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled = node["celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled"].as<bool>();
         if (node["celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled"]) celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled = node["celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled"]) celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled = node["celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled"].as<bool>();
+        if (node["celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio"]) celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio = node["celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio"].as<float>();
         if (node["celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile"]) celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile = node["celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile"].as<float>();
         if (node["celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction"]) celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction = node["celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction"].as<float>();
         if (node["celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius"]) celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius = node["celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius"].as<int>();
@@ -1138,6 +1145,8 @@ public:
             !std::isfinite(celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance) ||
             celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance < 0.0f ||
             celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance >= 1.0f ||
+            !std::isfinite(celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio) ||
+            celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio < 1.0f ||
             !std::isfinite(celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile) ||
             celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile <= 0.0f ||
             celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile > 1.0f ||
@@ -1720,6 +1729,8 @@ public:
         std::cout << "celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance: " << celluniverse4_postfit_bright_cell_size_review_brightness_relative_tolerance << '\n';
         std::cout << "celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled: " << celluniverse4_postfit_bright_cell_size_review_stop_at_neighbor_surface_enabled << '\n';
         std::cout << "celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled: " << celluniverse4_postfit_bright_cell_size_review_anisotropic_shape_enabled << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled: " << celluniverse4_postfit_bright_cell_size_review_aspect_ratio_guard_enabled << '\n';
+        std::cout << "celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio: " << celluniverse4_postfit_bright_cell_size_review_max_aspect_ratio << '\n';
         std::cout << "celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile: " << celluniverse4_postfit_bright_cell_size_review_shape_extent_percentile << '\n';
         std::cout << "celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction: " << celluniverse4_postfit_bright_cell_size_review_component_anchor_radius_fraction << '\n';
         std::cout << "celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius: " << celluniverse4_postfit_bright_cell_size_review_component_connectivity_radius << '\n';
@@ -2212,6 +2223,51 @@ public:
     float split_close_axis_center_axis_alignment = 0.80f;
     float split_close_axis_max_angle_degrees = 20.0f;
     float split_close_axis_penalty_fraction = 0.20f;
+    bool raw_trusted_parent_core_axis_near_miss_enabled = false;
+    float raw_trusted_parent_core_axis_near_miss_max_excess_degrees = 0.0f;
+    // This is a distinct route from the legacy synthetic parent-core
+    // near-miss. It remains fail-closed unless a globally unique direct raw
+    // assignment carries all verified evidence bits.
+    bool raw_direct_one_sided_parent_core_axis_near_miss_enabled = false;
+    float raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees = 0.0f;
+    float raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment = 1.0f;
+    float raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction = 0.0f;
+    // A normalized-raw parent-core pair can be real even when the prepared
+    // N2V2/Voronoi bridge has no parent-owned edge samples. This narrowly
+    // scoped rescue never applies to ordinary raw pairs.
+    bool raw_trusted_parent_core_dense_flat_bridge_rescue_enabled = false;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment = 1.0f;
+    bool raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match = true;
+    // The normalized-raw orphan remains an exact seed-preservation check.
+    // The synthetic parent-core seed may move only a bounded distance during a
+    // reliable local refit. Defaults are fail-closed; CU4 opts in explicitly.
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute = 0.0f;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute = 0.0f;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction = 0.0f;
+    // Optional one-sided midpoint exception for the same fully verified
+    // parent-core route. Disabled by default; ordinary bridge candidates keep
+    // the normal midpoint-parent gate.
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction = 0.0f;
+    // The same raw-only provenance may use a separately bounded final seed
+    // adjustment. A non-positive value falls back to the ordinary cap.
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction = 0.0f;
+    int raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes = 999999;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness = 1.0f;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence = 1.0f;
+    int raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes = 999999;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness = 1.0f;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence = 1.0f;
+    float raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction = 0.0f;
+    // A more specific direct assignment: one persistent, uncovered raw body
+    // paired with this parent's verified same-frame raw core. This is kept
+    // separate from the legacy exact-seed rescue so ordinary raw pairs remain
+    // fail-closed.
+    bool raw_direct_one_sided_parent_core_bridge_rescue_enabled = false;
+    float raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction = 0.0f;
+    float raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction = 0.0f;
+    // Preserve the pre-PCA core position only when PCA moved it closer to an
+    // already-near neighbor. This is a position constraint, never a bypass of
+    // the ordinary buried, overlap, or neighbor-bridge gates.
     bool split_daughter_axis_interaction_soft_gate_enabled = true;
     float split_daughter_axis_interaction_distance_fraction = 0.35f;
     float split_daughter_axis_interaction_along_fraction = 1.60f;
@@ -3850,6 +3906,30 @@ public:
         if (node["split_close_axis_center_axis_alignment"]) split_close_axis_center_axis_alignment = node["split_close_axis_center_axis_alignment"].as<float>();
         if (node["split_close_axis_max_angle_degrees"]) split_close_axis_max_angle_degrees = node["split_close_axis_max_angle_degrees"].as<float>();
         if (node["split_close_axis_penalty_fraction"]) split_close_axis_penalty_fraction = node["split_close_axis_penalty_fraction"].as<float>();
+        if (node["raw_trusted_parent_core_axis_near_miss_enabled"]) raw_trusted_parent_core_axis_near_miss_enabled = node["raw_trusted_parent_core_axis_near_miss_enabled"].as<bool>();
+        if (node["raw_trusted_parent_core_axis_near_miss_max_excess_degrees"]) raw_trusted_parent_core_axis_near_miss_max_excess_degrees = node["raw_trusted_parent_core_axis_near_miss_max_excess_degrees"].as<float>();
+        if (node["raw_direct_one_sided_parent_core_axis_near_miss_enabled"]) raw_direct_one_sided_parent_core_axis_near_miss_enabled = node["raw_direct_one_sided_parent_core_axis_near_miss_enabled"].as<bool>();
+        if (node["raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees"]) raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees = node["raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees"].as<float>();
+        if (node["raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment"]) raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment = node["raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment"].as<float>();
+        if (node["raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction"]) raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction = node["raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_enabled"]) raw_trusted_parent_core_dense_flat_bridge_rescue_enabled = node["raw_trusted_parent_core_dense_flat_bridge_rescue_enabled"].as<bool>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match"]) raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match = node["raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match"].as<bool>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute"]) raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute = node["raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute"]) raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute = node["raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction"]) raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction = node["raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction"]) raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction = node["raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction"]) raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction = node["raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes"].as<int>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes"].as<int>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence"]) raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence = node["raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence"].as<float>();
+        if (node["raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction"]) raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction = node["raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction"].as<float>();
+        if (node["raw_direct_one_sided_parent_core_bridge_rescue_enabled"]) raw_direct_one_sided_parent_core_bridge_rescue_enabled = node["raw_direct_one_sided_parent_core_bridge_rescue_enabled"].as<bool>();
+        if (node["raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction"]) raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction = node["raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction"].as<float>();
+        if (node["raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction"]) raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction = node["raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction"].as<float>();
         if (node["split_daughter_axis_interaction_soft_gate_enabled"]) split_daughter_axis_interaction_soft_gate_enabled = node["split_daughter_axis_interaction_soft_gate_enabled"].as<bool>();
         if (node["split_daughter_axis_interaction_distance_fraction"]) split_daughter_axis_interaction_distance_fraction = node["split_daughter_axis_interaction_distance_fraction"].as<float>();
         if (node["split_daughter_axis_interaction_along_fraction"]) split_daughter_axis_interaction_along_fraction = node["split_daughter_axis_interaction_along_fraction"].as<float>();
@@ -5348,6 +5428,30 @@ public:
         std::cout << "split_close_axis_center_axis_alignment: " << split_close_axis_center_axis_alignment << '\n';
         std::cout << "split_close_axis_max_angle_degrees: " << split_close_axis_max_angle_degrees << '\n';
         std::cout << "split_close_axis_penalty_fraction: " << split_close_axis_penalty_fraction << '\n';
+        std::cout << "raw_trusted_parent_core_axis_near_miss_enabled: " << raw_trusted_parent_core_axis_near_miss_enabled << '\n';
+        std::cout << "raw_trusted_parent_core_axis_near_miss_max_excess_degrees: " << raw_trusted_parent_core_axis_near_miss_max_excess_degrees << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_axis_near_miss_enabled: " << raw_direct_one_sided_parent_core_axis_near_miss_enabled << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees: " << raw_direct_one_sided_parent_core_axis_near_miss_max_excess_degrees << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment: " << raw_direct_one_sided_parent_core_axis_near_miss_min_signal_axis_alignment << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction: " << raw_direct_one_sided_parent_core_axis_near_miss_penalty_fraction << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_enabled: " << raw_trusted_parent_core_dense_flat_bridge_rescue_enabled << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_signal_axis_alignment << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match: " << raw_trusted_parent_core_dense_flat_bridge_rescue_require_final_raw_seed_match << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute: " << raw_trusted_parent_core_dense_flat_bridge_rescue_orphan_final_seed_match_max_absolute << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute: " << raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_absolute << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction: " << raw_trusted_parent_core_dense_flat_bridge_rescue_core_final_seed_match_max_parent_radius_fraction << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction: " << raw_trusted_parent_core_dense_flat_bridge_rescue_max_midpoint_parent_fraction << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction: " << raw_trusted_parent_core_dense_flat_bridge_rescue_max_seed_drift_parent_fraction << std::endl;
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_boxes << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_brightness << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_orphan_confidence << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_boxes << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_brightness << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence: " << raw_trusted_parent_core_dense_flat_bridge_rescue_min_core_confidence << '\n';
+        std::cout << "raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction: " << raw_trusted_parent_core_dense_flat_bridge_rescue_penalty_fraction << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_bridge_rescue_enabled: " << raw_direct_one_sided_parent_core_bridge_rescue_enabled << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction: " << raw_direct_one_sided_parent_core_bridge_rescue_max_midpoint_parent_fraction << '\n';
+        std::cout << "raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction: " << raw_direct_one_sided_parent_core_bridge_rescue_max_seed_drift_parent_fraction << '\n';
         std::cout << "split_daughter_axis_interaction_soft_gate_enabled: " << split_daughter_axis_interaction_soft_gate_enabled << '\n';
         std::cout << "split_daughter_axis_interaction_distance_fraction: " << split_daughter_axis_interaction_distance_fraction << '\n';
         std::cout << "split_daughter_axis_interaction_along_fraction: " << split_daughter_axis_interaction_along_fraction << '\n';
@@ -11170,6 +11274,53 @@ public:
     // not destructive pool depletion, resolves conflicts between parents.
     bool perParentFreshEvidencePoolEnabled = true;
 
+    // CU4 split-only recovery for real bodies suppressed by N2V2. The fitting
+    // stack remains N2V2; normalized-raw centers are accepted only after
+    // temporal persistence, quality, and uncovered-body checks, then pass
+    // every ordinary split validator. Disabled outside the CU4 profile.
+    bool rawAuxSplitCentersEnabled = false;
+    int rawAuxSplitPersistenceFrames = 2;
+    float rawAuxSplitPersistenceMatchDistance = 12.0f;
+    float rawAuxSplitMinBoxBrightnessDelta = 0.0f;
+    int rawAuxSplitMinBoxes = 1;
+    float rawAuxSplitMinBrightness = 0.08f;
+    float rawAuxSplitMinConfidence = 0.35f;
+    float rawAuxSplitUncoveredEllipsoidScale = 1.0f;
+    float rawAuxSplitDeduplicationDistance = 8.0f;
+    int rawAuxSplitMaxCentersPerFrame = 8;
+    float rawAuxSplitCompanionMaxDistanceRadiusScale = 0.80f;
+    float rawAuxSplitMinSeparationRadiusScale = 1.0f;
+    float rawAuxSplitMaxSeparationRadiusScale = 3.75f;
+    float rawAuxSplitMaxMidpointRadiusScale = 1.60f;
+    float rawAuxSplitMinAxisAlignment = 0.50f;
+    bool rawAuxSplitLowShapeExceptionEnabled = true;
+    // Dedicated raw-domain assignment stays opt-in: raw centers never enter
+    // the generic N2V2 signal-center pairing path.
+    bool rawAuxSplitFilterLoggingEnabled = false;
+    bool rawAuxSplitDedicatedAssignmentEnabled = false;
+    float rawAuxSplitParentCoreMaxDistanceRadiusScale = 0.80f;
+    float rawAuxSplitMinOppositeProjectionRadiusScale = 0.15f;
+    float rawAuxSplitParentAmbiguityMargin = 0.25f;
+    bool rawAuxSplitUniqueAssignmentEnabled = true;
+    bool rawAuxSplitProtectSupportedDaughterFromBackgroundReattach = false;
+    float rawAuxSplitProtectedDaughterMatchDistance = 2.0f;
+    // An orphan outside every ellipsoid may be claimed by the parent whose
+    // core companion and frozen shortest-axis geometry are uniquely strongest.
+    bool rawAuxSplitOneSidedParentAssignmentEnabled = false;
+    float rawAuxSplitOneSidedCompanionCoreMaxDistanceRadiusScale = 0.55f;
+    float rawAuxSplitOneSidedMinOrphanAxisAlignment = 0.70f;
+    float rawAuxSplitOneSidedMinOrphanProjectionRadiusScale = 0.35f;
+    bool rawAuxSplitParentCandidateLoggingEnabled = false;
+    // A persistent uncovered raw body may pair with a tightly anchored parent
+    // body seed only after ordinary raw-companion pairing has failed.
+    bool rawAuxSplitParentCoreSeedFallbackEnabled = false;
+    float rawAuxSplitParentCoreSeedMaxSnapshotDriftRadiusScale = 0.50f;
+    float rawAuxSplitParentCoreSeedRawSupportMaxDistanceRadiusScale = 0.50f;
+    float rawAuxSplitParentCoreSeedMinAxisAlignment = 0.75f;
+    float rawAuxSplitParentCoreSeedMinProjectionRadiusScale = 0.70f;
+    float rawAuxSplitParentCoreSeedMinParentShape = 1.00f;
+    bool rawAuxSplitParentCoreSeedLoggingEnabled = false;
+
     int maxCandidatesPerParent = 12;
     int maxSnapshotAnchors = 1;
     int maxExactChunkCenters = 6;
@@ -11210,6 +11361,14 @@ public:
     bool backgroundDropHoldIfNoSafeCenter = false;
     bool backgroundDropSkipCandidateBatchIfReattached = true;
     bool backgroundDropExplicitSplitBypassHoldEnabled = false;
+    // A viable probe is "strong" only relative to the best measured probe in
+    // the same parent-local search. Then choose the nearest strong probe.
+    bool backgroundDropRescueStrongProbeFilterEnabled = false;
+    float backgroundDropRescueStrongProbeMinBestMeanFraction = 0.5f;
+    // Initializer-labelled trash remains an exclusion region even when that
+    // trash model itself does not need background-drop recovery this frame.
+    bool backgroundDropRescueTrashOccupancyFilterEnabled = false;
+    float backgroundDropRescueTrashOccupancyRadiusScale = 1.25f;
     // A background-rescued parent may only split from current-frame centers
     // local to its rescued position. Stale/future pairs are discarded.
     bool backgroundDropCurrentLocalSplitOnlyEnabled = false;
@@ -11227,12 +11386,23 @@ public:
     float backgroundDropCurrentLocalPrepassFallbackMaxAnchorDistanceRadiusFraction = 1.0f;
     float backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction = 1.0f;
     float backgroundDropCurrentLocalPrepassFallbackMinCostImprovement = 0.0f;
+    // If no compatible global center survives, probe one parent-local seed on
+    // the existing permitted sibling half-space, one body unit away from the
+    // sibling. PCA remains conditional on reliable local support.
+    bool backgroundDropSiblingReflectedLocalSeedEnabled = false;
+    float backgroundDropSiblingReflectedLocalSeedBodyUnits = 1.0f;
+    float backgroundDropSiblingReflectedLocalSeedMaxPcaMoveBodyUnits = 0.75f;
+    // Last-resort CU4 continuation path. It does not alter global evidence or
+    // ownership gates; it merely lets the held cell use its ordinary
+    // per-cell CandidateBatch and bounded traditional perturb refinements.
+    bool backgroundDropTraditionalPerturbFallbackEnabled = false;
+    int backgroundDropTraditionalPerturbFallbackIterations = 0;
+    float backgroundDropTraditionalPerturbFallbackMaxAnchorDistanceMinRadiusFraction = 1.0f;
 
-    // CU4 split-center proposal from the current image, local to one parent.
-    // This is deliberately split-only: ordinary continuation candidates still
-    // use ChunkEvidence / signal centers.  A qualifying parent gets an
-    // authoritative answer from thresholded connected components instead of
-    // inventing a split from global centers.
+    // CU4 current-image components local to one parent. The primary result is
+    // an authoritative split decision. An independently configured path below
+    // may also publish reliable components into that same parent's ordinary
+    // continuation batch; it never changes the global evidence pool.
     bool localComponentSplitCentersEnabled = false;
     float localComponentSplitSphereRadiusScale = 1.25f;
     int localComponentSplitConnectivityRadius = 1;
@@ -11241,6 +11411,68 @@ public:
     float localComponentSplitMinAxisAlignment = 0.80f;
     bool localComponentSplitNeighborOwnershipFilterEnabled = true;
     float localComponentSplitNeighborOwnershipScale = 0.60f;
+    // Retry a one-component result at controlled higher and lower normalized
+    // thresholds before treating it as authoritative evidence against split.
+    bool localComponentSplitThresholdLadderEnabled = false;
+    int localComponentSplitThresholdLadderSteps = 0;
+    float localComponentSplitThresholdLadderStep = 0.05f;
+    float localComponentSplitThresholdLadderMinThreshold = 0.70f;
+    // Reuse reliable parent-local components as continuation candidates when
+    // the split geometry is inconclusive. Each candidate remains parent-local
+    // and is discarded unless the normal image-cost and PCA support checks
+    // accept it.
+    bool localComponentContinuationPcaEnabled = false;
+    bool localComponentContinuationPcaRefitEnabled = false;
+    int localComponentContinuationMinComponentVoxels = 20;
+    int localComponentContinuationMaxCandidates = 3;
+    float localComponentContinuationMinDistanceRadiusScale = 0.15f;
+    float localComponentContinuationMaxDistanceRadiusScale = 1.25f;
+    // Separate default-off continuation recovery for a parent whose normal
+    // support disappears. It publishes one normal candidate only; it never
+    // creates a split or relaxes shared ownership and geometry gates.
+    bool localComponentOwnedContinuationRescueEnabled = false;
+    bool localComponentOwnedContinuationRescuePcaRefitEnabled = false;
+    // The qualified recovery component is guaranteed one normal cost trial;
+    // disable independently for conservative rollback.
+    bool localComponentOwnedContinuationRescueForceTrialEnabled = true;
+    int localComponentOwnedContinuationRescueMinComponentVoxels = 64;
+    int localComponentOwnedContinuationRescueMinPriorBodyVoxels = 20;
+    int localComponentOwnedContinuationRescueThresholdLadderSteps = 0;
+    float localComponentOwnedContinuationRescueThresholdLadderStep = 0.05f;
+    float localComponentOwnedContinuationRescueMinThreshold = 0.10f;
+    float localComponentOwnedContinuationRescueMaxDisplacementRadiusScale = 1.20f;
+    float localComponentOwnedContinuationRescueNeighborOwnershipScale = 0.60f;
+    // The rescue must not run for ordinary current-frame support. Permit it
+    // only after that support is absent or has drifted this far from the
+    // frozen prior body.
+    float localComponentOwnedContinuationRescueMinCurrentSupportDriftRadiusScale = 0.50f;
+    // Default-off: an exterior component may replace one smaller frozen-body
+    // fragment only when it is uniquely dominant, well separated, unclaimed,
+    // and still inside the bounded continuation radius.
+    bool localComponentOwnedContinuationRescueOutsidePriorBodyEnabled = false;
+    float localComponentOwnedContinuationRescueOutsidePriorBodyMinVoxelDominance = 1.25f;
+    float localComponentOwnedContinuationRescueOutsidePriorBodyMinSeparationRadiusScale = 0.75f;
+    // Default-off adaptive evidence is CU4-only. Legacy pipelines retain the
+    // established ranked top-K behavior unless their YAML opts in.
+    bool adaptiveEvidenceHypothesesEnabled = false;
+    bool adaptiveEdgeRefinedHypothesesEnabled = false;
+    bool adaptiveTrialFitEnabled = false;
+    bool adaptiveFamilyDiverseBeamEnabled = false;
+    int adaptiveFamilyDiverseBeamWidth = 3;
+    bool adaptiveThresholdHistoryEnabled = false;
+    int adaptiveThresholdHistoryMinTrustedAcceptances = 3;
+    float adaptiveThresholdHistorySmoothing = 0.25f;
+    int adaptivePcaReliableMinVoxels = 64;
+    // A generic split of one directly observed current-frame component is
+    // rejected only when its daughters are also strongly asymmetric around
+    // the frozen parent. The switch and balance threshold are independent.
+    bool localComponentSingleBodyAsymmetricSplitGateEnabled = false;
+    float localComponentSingleBodyAsymmetricSplitMaxParentBalance = 0.35f;
+    bool localComponentSingleBodyStrongSplitExceptionEnabled = false;
+    double localComponentSingleBodyStrongSplitMinTotalImprovement = 2500.0;
+    double localComponentSingleBodyStrongSplitMinImageImprovement = 2500.0;
+    float localComponentSingleBodyStrongSplitMinAwayAlignment = 0.50f;
+    float localComponentSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction = 4.0f;
     bool localComponentSplitSaturatedSparseFallbackEnabled = false;
     float localComponentSplitSaturatedSparseMinThreshold = 0.995f;
     int localComponentSplitSaturatedSparseMaxTotalVoxels = 64;
@@ -11343,6 +11575,77 @@ public:
         READ_CB(exportDiagnostics, "export_diagnostics");
         READ_CB(perParentFreshEvidencePoolEnabled,
                 "per_parent_fresh_evidence_pool_enabled");
+        READ_CB(rawAuxSplitCentersEnabled,
+                "raw_aux_split_centers_enabled");
+        READ_CB(rawAuxSplitPersistenceFrames,
+                "raw_aux_split_persistence_frames");
+        READ_CB(rawAuxSplitPersistenceMatchDistance,
+                "raw_aux_split_persistence_match_distance");
+        READ_CB(rawAuxSplitMinBoxBrightnessDelta,
+                "raw_aux_split_min_box_brightness_delta");
+        READ_CB(rawAuxSplitMinBoxes, "raw_aux_split_min_boxes");
+        READ_CB(rawAuxSplitMinBrightness,
+                "raw_aux_split_min_brightness");
+        READ_CB(rawAuxSplitMinConfidence,
+                "raw_aux_split_min_confidence");
+        READ_CB(rawAuxSplitUncoveredEllipsoidScale,
+                "raw_aux_split_uncovered_ellipsoid_scale");
+        READ_CB(rawAuxSplitDeduplicationDistance,
+                "raw_aux_split_deduplication_distance");
+        READ_CB(rawAuxSplitMaxCentersPerFrame,
+                "raw_aux_split_max_centers_per_frame");
+        READ_CB(rawAuxSplitCompanionMaxDistanceRadiusScale,
+                "raw_aux_split_companion_max_distance_radius_scale");
+        READ_CB(rawAuxSplitMinSeparationRadiusScale,
+                "raw_aux_split_min_separation_radius_scale");
+        READ_CB(rawAuxSplitMaxSeparationRadiusScale,
+                "raw_aux_split_max_separation_radius_scale");
+        READ_CB(rawAuxSplitMaxMidpointRadiusScale,
+                "raw_aux_split_max_midpoint_radius_scale");
+        READ_CB(rawAuxSplitMinAxisAlignment,
+                "raw_aux_split_min_axis_alignment");
+        READ_CB(rawAuxSplitLowShapeExceptionEnabled,
+                "raw_aux_split_low_shape_exception_enabled");
+        READ_CB(rawAuxSplitFilterLoggingEnabled,
+                "raw_aux_split_filter_logging_enabled");
+        READ_CB(rawAuxSplitDedicatedAssignmentEnabled,
+                "raw_aux_split_dedicated_assignment_enabled");
+        READ_CB(rawAuxSplitParentCoreMaxDistanceRadiusScale,
+                "raw_aux_split_parent_core_max_distance_radius_scale");
+        READ_CB(rawAuxSplitMinOppositeProjectionRadiusScale,
+                "raw_aux_split_min_opposite_projection_radius_scale");
+        READ_CB(rawAuxSplitParentAmbiguityMargin,
+                "raw_aux_split_parent_ambiguity_margin");
+        READ_CB(rawAuxSplitUniqueAssignmentEnabled,
+                "raw_aux_split_unique_assignment_enabled");
+        READ_CB(rawAuxSplitProtectSupportedDaughterFromBackgroundReattach,
+                "raw_aux_split_protect_supported_daughter_from_background_reattach");
+        READ_CB(rawAuxSplitProtectedDaughterMatchDistance,
+                "raw_aux_split_protected_daughter_match_distance");
+        READ_CB(rawAuxSplitOneSidedParentAssignmentEnabled,
+                "raw_aux_split_one_sided_parent_assignment_enabled");
+        READ_CB(rawAuxSplitOneSidedCompanionCoreMaxDistanceRadiusScale,
+                "raw_aux_split_one_sided_companion_core_max_distance_radius_scale");
+        READ_CB(rawAuxSplitOneSidedMinOrphanAxisAlignment,
+                "raw_aux_split_one_sided_min_orphan_axis_alignment");
+        READ_CB(rawAuxSplitOneSidedMinOrphanProjectionRadiusScale,
+                "raw_aux_split_one_sided_min_orphan_projection_radius_scale");
+        READ_CB(rawAuxSplitParentCandidateLoggingEnabled,
+                "raw_aux_split_parent_candidate_logging_enabled");
+        READ_CB(rawAuxSplitParentCoreSeedFallbackEnabled,
+                "raw_aux_split_parent_core_seed_fallback_enabled");
+        READ_CB(rawAuxSplitParentCoreSeedMaxSnapshotDriftRadiusScale,
+                "raw_aux_split_parent_core_seed_max_snapshot_drift_radius_scale");
+        READ_CB(rawAuxSplitParentCoreSeedRawSupportMaxDistanceRadiusScale,
+                "raw_aux_split_parent_core_seed_raw_support_max_distance_radius_scale");
+        READ_CB(rawAuxSplitParentCoreSeedMinAxisAlignment,
+                "raw_aux_split_parent_core_seed_min_axis_alignment");
+        READ_CB(rawAuxSplitParentCoreSeedMinProjectionRadiusScale,
+                "raw_aux_split_parent_core_seed_min_projection_radius_scale");
+        READ_CB(rawAuxSplitParentCoreSeedMinParentShape,
+                "raw_aux_split_parent_core_seed_min_parent_shape");
+        READ_CB(rawAuxSplitParentCoreSeedLoggingEnabled,
+                "raw_aux_split_parent_core_seed_logging_enabled");
         READ_CB(maxCandidatesPerParent, "max_candidates_per_parent");
         READ_CB(maxSnapshotAnchors, "max_snapshot_anchors");
         READ_CB(maxExactChunkCenters, "max_exact_chunk_centers");
@@ -11389,6 +11692,14 @@ public:
                 "background_drop_skip_candidate_batch_if_reattached");
         READ_CB(backgroundDropExplicitSplitBypassHoldEnabled,
                 "background_drop_explicit_split_bypass_hold_enabled");
+        READ_CB(backgroundDropRescueStrongProbeFilterEnabled,
+                "background_drop_rescue_strong_probe_filter_enabled");
+        READ_CB(backgroundDropRescueStrongProbeMinBestMeanFraction,
+                "background_drop_rescue_strong_probe_min_best_mean_fraction");
+        READ_CB(backgroundDropRescueTrashOccupancyFilterEnabled,
+                "background_drop_rescue_trash_occupancy_filter_enabled");
+        READ_CB(backgroundDropRescueTrashOccupancyRadiusScale,
+                "background_drop_rescue_trash_occupancy_radius_scale");
         READ_CB(backgroundDropCurrentLocalSplitOnlyEnabled,
                 "background_drop_current_local_split_only_enabled");
         READ_CB(backgroundDropCurrentLocalPrepassFallbackEnabled,
@@ -11411,6 +11722,18 @@ public:
                 "background_drop_current_local_prepass_fallback_max_midpoint_distance_radius_fraction");
         READ_CB(backgroundDropCurrentLocalPrepassFallbackMinCostImprovement,
                 "background_drop_current_local_prepass_fallback_min_cost_improvement");
+        READ_CB(backgroundDropSiblingReflectedLocalSeedEnabled,
+                "background_drop_sibling_reflected_local_seed_enabled");
+        READ_CB(backgroundDropSiblingReflectedLocalSeedBodyUnits,
+                "background_drop_sibling_reflected_local_seed_body_units");
+        READ_CB(backgroundDropSiblingReflectedLocalSeedMaxPcaMoveBodyUnits,
+                "background_drop_sibling_reflected_local_seed_max_pca_move_body_units");
+        READ_CB(backgroundDropTraditionalPerturbFallbackEnabled,
+                "background_drop_traditional_perturb_fallback_enabled");
+        READ_CB(backgroundDropTraditionalPerturbFallbackIterations,
+                "background_drop_traditional_perturb_fallback_iterations");
+        READ_CB(backgroundDropTraditionalPerturbFallbackMaxAnchorDistanceMinRadiusFraction,
+                "background_drop_traditional_perturb_fallback_max_anchor_distance_min_radius_fraction");
         READ_CB(localComponentSplitCentersEnabled,
                 "local_component_split_centers_enabled");
         READ_CB(localComponentSplitSphereRadiusScale,
@@ -11427,6 +11750,86 @@ public:
                 "local_component_split_neighbor_ownership_filter_enabled");
         READ_CB(localComponentSplitNeighborOwnershipScale,
                 "local_component_split_neighbor_ownership_scale");
+        READ_CB(localComponentSplitThresholdLadderEnabled,
+                "local_component_split_threshold_ladder_enabled");
+        READ_CB(localComponentSplitThresholdLadderSteps,
+                "local_component_split_threshold_ladder_steps");
+        READ_CB(localComponentSplitThresholdLadderStep,
+                "local_component_split_threshold_ladder_step");
+        READ_CB(localComponentSplitThresholdLadderMinThreshold,
+                "local_component_split_threshold_ladder_min_threshold");
+        READ_CB(localComponentContinuationPcaEnabled,
+                "local_component_continuation_pca_enabled");
+        READ_CB(localComponentContinuationPcaRefitEnabled,
+                "local_component_continuation_pca_refit_enabled");
+        READ_CB(localComponentContinuationMinComponentVoxels,
+                "local_component_continuation_min_component_voxels");
+        READ_CB(localComponentContinuationMaxCandidates,
+                "local_component_continuation_max_candidates");
+        READ_CB(localComponentContinuationMinDistanceRadiusScale,
+                "local_component_continuation_min_distance_radius_scale");
+        READ_CB(localComponentContinuationMaxDistanceRadiusScale,
+                "local_component_continuation_max_distance_radius_scale");
+        READ_CB(localComponentOwnedContinuationRescueEnabled,
+                "local_component_owned_continuation_rescue_enabled");
+        READ_CB(localComponentOwnedContinuationRescuePcaRefitEnabled,
+                "local_component_owned_continuation_rescue_pca_refit_enabled");
+        READ_CB(localComponentOwnedContinuationRescueForceTrialEnabled,
+                "local_component_owned_continuation_rescue_force_trial_enabled");
+        READ_CB(localComponentOwnedContinuationRescueMinComponentVoxels,
+                "local_component_owned_continuation_rescue_min_component_voxels");
+        READ_CB(localComponentOwnedContinuationRescueMinPriorBodyVoxels,
+                "local_component_owned_continuation_rescue_min_prior_body_voxels");
+        READ_CB(localComponentOwnedContinuationRescueThresholdLadderSteps,
+                "local_component_owned_continuation_rescue_threshold_ladder_steps");
+        READ_CB(localComponentOwnedContinuationRescueThresholdLadderStep,
+                "local_component_owned_continuation_rescue_threshold_ladder_step");
+        READ_CB(localComponentOwnedContinuationRescueMinThreshold,
+                "local_component_owned_continuation_rescue_min_threshold");
+        READ_CB(localComponentOwnedContinuationRescueMaxDisplacementRadiusScale,
+                "local_component_owned_continuation_rescue_max_displacement_radius_scale");
+        READ_CB(localComponentOwnedContinuationRescueNeighborOwnershipScale,
+                "local_component_owned_continuation_rescue_neighbor_ownership_scale");
+        READ_CB(localComponentOwnedContinuationRescueMinCurrentSupportDriftRadiusScale,
+                "local_component_owned_continuation_rescue_min_current_support_drift_radius_scale");
+        READ_CB(localComponentOwnedContinuationRescueOutsidePriorBodyEnabled,
+                "local_component_owned_continuation_rescue_outside_prior_body_enabled");
+        READ_CB(localComponentOwnedContinuationRescueOutsidePriorBodyMinVoxelDominance,
+                "local_component_owned_continuation_rescue_outside_prior_body_min_voxel_dominance");
+        READ_CB(localComponentOwnedContinuationRescueOutsidePriorBodyMinSeparationRadiusScale,
+                "local_component_owned_continuation_rescue_outside_prior_body_min_separation_radius_scale");
+        READ_CB(adaptiveEvidenceHypothesesEnabled,
+                "adaptive_evidence_hypotheses_enabled");
+        READ_CB(adaptiveEdgeRefinedHypothesesEnabled,
+                "adaptive_edge_refined_hypotheses_enabled");
+        READ_CB(adaptiveTrialFitEnabled,
+                "adaptive_trial_fit_enabled");
+        READ_CB(adaptiveFamilyDiverseBeamEnabled,
+                "adaptive_family_diverse_beam_enabled");
+        READ_CB(adaptiveFamilyDiverseBeamWidth,
+                "adaptive_family_diverse_beam_width");
+        READ_CB(adaptiveThresholdHistoryEnabled,
+                "adaptive_threshold_history_enabled");
+        READ_CB(adaptiveThresholdHistoryMinTrustedAcceptances,
+                "adaptive_threshold_history_min_trusted_acceptances");
+        READ_CB(adaptiveThresholdHistorySmoothing,
+                "adaptive_threshold_history_smoothing");
+        READ_CB(adaptivePcaReliableMinVoxels,
+                "adaptive_pca_reliable_min_voxels");
+        READ_CB(localComponentSingleBodyAsymmetricSplitGateEnabled,
+                "local_component_single_body_asymmetric_split_gate_enabled");
+        READ_CB(localComponentSingleBodyAsymmetricSplitMaxParentBalance,
+                "local_component_single_body_asymmetric_split_max_parent_balance");
+        READ_CB(localComponentSingleBodyStrongSplitExceptionEnabled,
+                "local_component_single_body_strong_split_exception_enabled");
+        READ_CB(localComponentSingleBodyStrongSplitMinTotalImprovement,
+                "local_component_single_body_strong_split_min_total_improvement");
+        READ_CB(localComponentSingleBodyStrongSplitMinImageImprovement,
+                "local_component_single_body_strong_split_min_image_improvement");
+        READ_CB(localComponentSingleBodyStrongSplitMinAwayAlignment,
+                "local_component_single_body_strong_split_min_away_alignment");
+        READ_CB(localComponentSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction,
+                "local_component_single_body_strong_split_max_neighbor_distance_parent_radius_fraction");
         READ_CB(localComponentSplitSaturatedSparseFallbackEnabled,
                 "local_component_split_saturated_sparse_fallback_enabled");
         READ_CB(localComponentSplitSaturatedSparseMinThreshold,
@@ -11570,6 +11973,11 @@ public:
         nonnegativeInt(
             backgroundDropCurrentLocalClusterIterations,
             "background_drop_current_local_cluster_iterations");
+        nonnegativeInt(
+            backgroundDropTraditionalPerturbFallbackIterations,
+            "background_drop_traditional_perturb_fallback_iterations");
+        nonnegativeInt(localComponentSplitThresholdLadderSteps,
+                       "local_component_split_threshold_ladder_steps");
         if (enabled && (maxCandidatesPerParent < 1 || expensiveTopK < 1)) {
             throw std::invalid_argument(
                 "candidate_batch enabled mode requires max_candidates_per_parent and expensive_top_k >= 1");
@@ -11607,6 +12015,16 @@ public:
         finiteNonnegative(backgroundDropMinModelContrast,
                           "background_drop_min_model_contrast");
         finiteNonnegative(
+            backgroundDropRescueStrongProbeMinBestMeanFraction,
+            "background_drop_rescue_strong_probe_min_best_mean_fraction");
+        if (backgroundDropRescueStrongProbeMinBestMeanFraction > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.background_drop_rescue_strong_probe_min_best_mean_fraction must be <= 1");
+        }
+        finiteNonnegative(
+            backgroundDropRescueTrashOccupancyRadiusScale,
+            "background_drop_rescue_trash_occupancy_radius_scale");
+        finiteNonnegative(
             backgroundDropCurrentLocalProjectedSeedDistanceRadiusFraction,
             "background_drop_current_local_projected_seed_distance_radius_fraction");
         finiteNonnegative(
@@ -11635,6 +12053,13 @@ public:
         finiteNonnegative(
             backgroundDropCurrentLocalPrepassFallbackMinCostImprovement,
             "background_drop_current_local_prepass_fallback_min_cost_improvement");
+        finiteNonnegative(backgroundDropSiblingReflectedLocalSeedBodyUnits,
+                          "background_drop_sibling_reflected_local_seed_body_units");
+        finiteNonnegative(backgroundDropSiblingReflectedLocalSeedMaxPcaMoveBodyUnits,
+                          "background_drop_sibling_reflected_local_seed_max_pca_move_body_units");
+        finiteNonnegative(
+            backgroundDropTraditionalPerturbFallbackMaxAnchorDistanceMinRadiusFraction,
+            "background_drop_traditional_perturb_fallback_max_anchor_distance_min_radius_fraction");
         finiteNonnegative(localComponentSplitSphereRadiusScale,
                           "local_component_split_sphere_radius_scale");
         nonnegativeInt(localComponentSplitMinComponentVoxels,
@@ -11645,6 +12070,94 @@ public:
                           "local_component_split_min_axis_alignment");
         finiteNonnegative(localComponentSplitNeighborOwnershipScale,
                           "local_component_split_neighbor_ownership_scale");
+        finiteNonnegative(localComponentSplitThresholdLadderStep,
+                          "local_component_split_threshold_ladder_step");
+        finiteNonnegative(localComponentSplitThresholdLadderMinThreshold,
+                          "local_component_split_threshold_ladder_min_threshold");
+        if (localComponentSplitThresholdLadderMinThreshold > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_split_threshold_ladder_min_threshold must be <= 1");
+        }
+        nonnegativeInt(localComponentContinuationMinComponentVoxels,
+                       "local_component_continuation_min_component_voxels");
+        nonnegativeInt(localComponentContinuationMaxCandidates,
+                       "local_component_continuation_max_candidates");
+        finiteNonnegative(localComponentContinuationMinDistanceRadiusScale,
+                          "local_component_continuation_min_distance_radius_scale");
+        finiteNonnegative(localComponentContinuationMaxDistanceRadiusScale,
+                          "local_component_continuation_max_distance_radius_scale");
+        nonnegativeInt(localComponentOwnedContinuationRescueMinComponentVoxels,
+                       "local_component_owned_continuation_rescue_min_component_voxels");
+        nonnegativeInt(localComponentOwnedContinuationRescueMinPriorBodyVoxels,
+                       "local_component_owned_continuation_rescue_min_prior_body_voxels");
+        nonnegativeInt(localComponentOwnedContinuationRescueThresholdLadderSteps,
+                       "local_component_owned_continuation_rescue_threshold_ladder_steps");
+        finiteNonnegative(localComponentOwnedContinuationRescueThresholdLadderStep,
+                          "local_component_owned_continuation_rescue_threshold_ladder_step");
+        finiteNonnegative(localComponentOwnedContinuationRescueMinThreshold,
+                          "local_component_owned_continuation_rescue_min_threshold");
+        finiteNonnegative(localComponentOwnedContinuationRescueMaxDisplacementRadiusScale,
+                          "local_component_owned_continuation_rescue_max_displacement_radius_scale");
+        finiteNonnegative(localComponentOwnedContinuationRescueNeighborOwnershipScale,
+                          "local_component_owned_continuation_rescue_neighbor_ownership_scale");
+        if (!std::isfinite(localComponentOwnedContinuationRescueMinCurrentSupportDriftRadiusScale) ||
+            localComponentOwnedContinuationRescueMinCurrentSupportDriftRadiusScale <= 0.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_owned_continuation_rescue_min_current_support_drift_radius_scale must be finite and > 0");
+        }
+        if (localComponentOwnedContinuationRescueMinThreshold > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_owned_continuation_rescue_min_threshold must be <= 1");
+        }
+        if (!std::isfinite(
+                localComponentOwnedContinuationRescueOutsidePriorBodyMinVoxelDominance) ||
+            localComponentOwnedContinuationRescueOutsidePriorBodyMinVoxelDominance < 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_owned_continuation_rescue_outside_prior_body_min_voxel_dominance must be finite and >= 1");
+        }
+        finiteNonnegative(
+            localComponentOwnedContinuationRescueOutsidePriorBodyMinSeparationRadiusScale,
+            "local_component_owned_continuation_rescue_outside_prior_body_min_separation_radius_scale");
+        nonnegativeInt(adaptiveFamilyDiverseBeamWidth,
+                       "adaptive_family_diverse_beam_width");
+        nonnegativeInt(adaptiveThresholdHistoryMinTrustedAcceptances,
+                       "adaptive_threshold_history_min_trusted_acceptances");
+        finiteNonnegative(adaptiveThresholdHistorySmoothing,
+                          "adaptive_threshold_history_smoothing");
+        nonnegativeInt(adaptivePcaReliableMinVoxels,
+                       "adaptive_pca_reliable_min_voxels");
+        if (adaptiveFamilyDiverseBeamWidth < 1) {
+            throw std::invalid_argument(
+                "candidate_batch.adaptive_family_diverse_beam_width must be >= 1");
+        }
+        if (adaptiveThresholdHistorySmoothing > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.adaptive_threshold_history_smoothing must be <= 1");
+        }
+        finiteNonnegative(localComponentSingleBodyAsymmetricSplitMaxParentBalance,
+                          "local_component_single_body_asymmetric_split_max_parent_balance");
+        if (localComponentContinuationMaxDistanceRadiusScale <
+            localComponentContinuationMinDistanceRadiusScale) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_continuation_max_distance_radius_scale must be >= min distance scale");
+        }
+        if (localComponentSingleBodyAsymmetricSplitMaxParentBalance > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_single_body_asymmetric_split_max_parent_balance must be <= 1");
+        }
+        finiteNonnegative(localComponentSingleBodyStrongSplitMinTotalImprovement,
+                          "local_component_single_body_strong_split_min_total_improvement");
+        finiteNonnegative(localComponentSingleBodyStrongSplitMinImageImprovement,
+                          "local_component_single_body_strong_split_min_image_improvement");
+        finiteNonnegative(localComponentSingleBodyStrongSplitMinAwayAlignment,
+                          "local_component_single_body_strong_split_min_away_alignment");
+        finiteNonnegative(
+            localComponentSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction,
+            "local_component_single_body_strong_split_max_neighbor_distance_parent_radius_fraction");
+        if (localComponentSingleBodyStrongSplitMinAwayAlignment > 1.0f) {
+            throw std::invalid_argument(
+                "candidate_batch.local_component_single_body_strong_split_min_away_alignment must be <= 1");
+        }
         finiteNonnegative(localComponentSplitSaturatedSparseMinThreshold,
                           "local_component_split_saturated_sparse_min_threshold");
         nonnegativeInt(localComponentSplitSaturatedSparseMaxTotalVoxels,
@@ -11810,6 +12323,77 @@ public:
                   << "chunk_min_confidence: " << chunkMinConfidence << '\n'
                   << "per_parent_fresh_evidence_pool_enabled: "
                   << perParentFreshEvidencePoolEnabled << '\n'
+                  << "raw_aux_split_centers_enabled: "
+                  << rawAuxSplitCentersEnabled << '\n'
+                  << "raw_aux_split_persistence_frames: "
+                  << rawAuxSplitPersistenceFrames << '\n'
+                  << "raw_aux_split_persistence_match_distance: "
+                  << rawAuxSplitPersistenceMatchDistance << '\n'
+                  << "raw_aux_split_min_box_brightness_delta: "
+                  << rawAuxSplitMinBoxBrightnessDelta << '\n'
+                  << "raw_aux_split_min_boxes: " << rawAuxSplitMinBoxes << '\n'
+                  << "raw_aux_split_min_brightness: "
+                  << rawAuxSplitMinBrightness << '\n'
+                  << "raw_aux_split_min_confidence: "
+                  << rawAuxSplitMinConfidence << '\n'
+                  << "raw_aux_split_uncovered_ellipsoid_scale: "
+                  << rawAuxSplitUncoveredEllipsoidScale << '\n'
+                  << "raw_aux_split_deduplication_distance: "
+                  << rawAuxSplitDeduplicationDistance << '\n'
+                  << "raw_aux_split_max_centers_per_frame: "
+                  << rawAuxSplitMaxCentersPerFrame << '\n'
+                  << "raw_aux_split_companion_max_distance_radius_scale: "
+                  << rawAuxSplitCompanionMaxDistanceRadiusScale << '\n'
+                  << "raw_aux_split_min_separation_radius_scale: "
+                  << rawAuxSplitMinSeparationRadiusScale << '\n'
+                  << "raw_aux_split_max_separation_radius_scale: "
+                  << rawAuxSplitMaxSeparationRadiusScale << '\n'
+                  << "raw_aux_split_max_midpoint_radius_scale: "
+                  << rawAuxSplitMaxMidpointRadiusScale << '\n'
+                  << "raw_aux_split_min_axis_alignment: "
+                  << rawAuxSplitMinAxisAlignment << '\n'
+                  << "raw_aux_split_low_shape_exception_enabled: "
+                  << rawAuxSplitLowShapeExceptionEnabled << '\n'
+                  << "raw_aux_split_filter_logging_enabled: "
+                  << rawAuxSplitFilterLoggingEnabled << '\n'
+                  << "raw_aux_split_dedicated_assignment_enabled: "
+                  << rawAuxSplitDedicatedAssignmentEnabled << '\n'
+                  << "raw_aux_split_parent_core_max_distance_radius_scale: "
+                  << rawAuxSplitParentCoreMaxDistanceRadiusScale << '\n'
+                  << "raw_aux_split_min_opposite_projection_radius_scale: "
+                  << rawAuxSplitMinOppositeProjectionRadiusScale << '\n'
+                  << "raw_aux_split_parent_ambiguity_margin: "
+                  << rawAuxSplitParentAmbiguityMargin << '\n'
+                  << "raw_aux_split_unique_assignment_enabled: "
+                  << rawAuxSplitUniqueAssignmentEnabled << '\n'
+                  << "raw_aux_split_protect_supported_daughter_from_background_reattach: "
+                  << rawAuxSplitProtectSupportedDaughterFromBackgroundReattach << '\n'
+                  << "raw_aux_split_protected_daughter_match_distance: "
+                  << rawAuxSplitProtectedDaughterMatchDistance << '\n'
+                  << "raw_aux_split_one_sided_parent_assignment_enabled: "
+                  << rawAuxSplitOneSidedParentAssignmentEnabled << '\n'
+                  << "raw_aux_split_one_sided_companion_core_max_distance_radius_scale: "
+                  << rawAuxSplitOneSidedCompanionCoreMaxDistanceRadiusScale << '\n'
+                  << "raw_aux_split_one_sided_min_orphan_axis_alignment: "
+                  << rawAuxSplitOneSidedMinOrphanAxisAlignment << '\n'
+                  << "raw_aux_split_one_sided_min_orphan_projection_radius_scale: "
+                  << rawAuxSplitOneSidedMinOrphanProjectionRadiusScale << '\n'
+                  << "raw_aux_split_parent_candidate_logging_enabled: "
+                  << rawAuxSplitParentCandidateLoggingEnabled << '\n'
+                  << "raw_aux_split_parent_core_seed_fallback_enabled: "
+                  << rawAuxSplitParentCoreSeedFallbackEnabled << '\n'
+                  << "raw_aux_split_parent_core_seed_max_snapshot_drift_radius_scale: "
+                  << rawAuxSplitParentCoreSeedMaxSnapshotDriftRadiusScale << '\n'
+                  << "raw_aux_split_parent_core_seed_raw_support_max_distance_radius_scale: "
+                  << rawAuxSplitParentCoreSeedRawSupportMaxDistanceRadiusScale << '\n'
+                  << "raw_aux_split_parent_core_seed_min_axis_alignment: "
+                  << rawAuxSplitParentCoreSeedMinAxisAlignment << '\n'
+                  << "raw_aux_split_parent_core_seed_min_projection_radius_scale: "
+                  << rawAuxSplitParentCoreSeedMinProjectionRadiusScale << '\n'
+                  << "raw_aux_split_parent_core_seed_min_parent_shape: "
+                  << rawAuxSplitParentCoreSeedMinParentShape << '\n'
+                  << "raw_aux_split_parent_core_seed_logging_enabled: "
+                  << rawAuxSplitParentCoreSeedLoggingEnabled << '\n'
                   << "background_drop_reattach_enabled: "
                   << backgroundDropReattachEnabled << '\n'
                   << "background_drop_observed_top_fraction: "
@@ -11826,6 +12410,14 @@ public:
                   << backgroundDropSkipCandidateBatchIfReattached << '\n'
                   << "background_drop_explicit_split_bypass_hold_enabled: "
                   << backgroundDropExplicitSplitBypassHoldEnabled << '\n'
+                  << "background_drop_rescue_strong_probe_filter_enabled: "
+                  << backgroundDropRescueStrongProbeFilterEnabled << '\n'
+                  << "background_drop_rescue_strong_probe_min_best_mean_fraction: "
+                  << backgroundDropRescueStrongProbeMinBestMeanFraction << '\n'
+                  << "background_drop_rescue_trash_occupancy_filter_enabled: "
+                  << backgroundDropRescueTrashOccupancyFilterEnabled << '\n'
+                  << "background_drop_rescue_trash_occupancy_radius_scale: "
+                  << backgroundDropRescueTrashOccupancyRadiusScale << '\n'
                   << "background_drop_current_local_split_only_enabled: "
                   << backgroundDropCurrentLocalSplitOnlyEnabled << '\n'
                   << "background_drop_current_local_prepass_fallback_enabled: "
@@ -11848,6 +12440,18 @@ public:
                   << backgroundDropCurrentLocalPrepassFallbackMaxMidpointDistanceRadiusFraction << '\n'
                   << "background_drop_current_local_prepass_fallback_min_cost_improvement: "
                   << backgroundDropCurrentLocalPrepassFallbackMinCostImprovement << '\n'
+                  << "background_drop_sibling_reflected_local_seed_enabled: "
+                  << backgroundDropSiblingReflectedLocalSeedEnabled << '\n'
+                  << "background_drop_sibling_reflected_local_seed_body_units: "
+                  << backgroundDropSiblingReflectedLocalSeedBodyUnits << '\n'
+                  << "background_drop_sibling_reflected_local_seed_max_pca_move_body_units: "
+                  << backgroundDropSiblingReflectedLocalSeedMaxPcaMoveBodyUnits << '\n'
+                  << "background_drop_traditional_perturb_fallback_enabled: "
+                  << backgroundDropTraditionalPerturbFallbackEnabled << '\n'
+                  << "background_drop_traditional_perturb_fallback_iterations: "
+                  << backgroundDropTraditionalPerturbFallbackIterations << '\n'
+                  << "background_drop_traditional_perturb_fallback_max_anchor_distance_min_radius_fraction: "
+                  << backgroundDropTraditionalPerturbFallbackMaxAnchorDistanceMinRadiusFraction << '\n'
                   << "local_component_split_centers_enabled: "
                   << localComponentSplitCentersEnabled << '\n'
                   << "local_component_split_sphere_radius_scale: "
@@ -11864,6 +12468,86 @@ public:
                   << localComponentSplitNeighborOwnershipFilterEnabled << '\n'
                   << "local_component_split_neighbor_ownership_scale: "
                   << localComponentSplitNeighborOwnershipScale << '\n'
+                  << "local_component_split_threshold_ladder_enabled: "
+                  << localComponentSplitThresholdLadderEnabled << '\n'
+                  << "local_component_split_threshold_ladder_steps: "
+                  << localComponentSplitThresholdLadderSteps << '\n'
+                  << "local_component_split_threshold_ladder_step: "
+                  << localComponentSplitThresholdLadderStep << '\n'
+                  << "local_component_split_threshold_ladder_min_threshold: "
+                  << localComponentSplitThresholdLadderMinThreshold << '\n'
+                  << "local_component_continuation_pca_enabled: "
+                  << localComponentContinuationPcaEnabled << '\n'
+                  << "local_component_continuation_pca_refit_enabled: "
+                  << localComponentContinuationPcaRefitEnabled << '\n'
+                  << "local_component_continuation_min_component_voxels: "
+                  << localComponentContinuationMinComponentVoxels << '\n'
+                  << "local_component_continuation_max_candidates: "
+                  << localComponentContinuationMaxCandidates << '\n'
+                  << "local_component_continuation_min_distance_radius_scale: "
+                  << localComponentContinuationMinDistanceRadiusScale << '\n'
+                  << "local_component_continuation_max_distance_radius_scale: "
+                  << localComponentContinuationMaxDistanceRadiusScale << '\n'
+                  << "local_component_owned_continuation_rescue_enabled: "
+                  << localComponentOwnedContinuationRescueEnabled << '\n'
+                  << "local_component_owned_continuation_rescue_pca_refit_enabled: "
+                  << localComponentOwnedContinuationRescuePcaRefitEnabled << '\n'
+                  << "local_component_owned_continuation_rescue_force_trial_enabled: "
+                  << localComponentOwnedContinuationRescueForceTrialEnabled << '\n'
+                  << "local_component_owned_continuation_rescue_min_component_voxels: "
+                  << localComponentOwnedContinuationRescueMinComponentVoxels << '\n'
+                  << "local_component_owned_continuation_rescue_min_prior_body_voxels: "
+                  << localComponentOwnedContinuationRescueMinPriorBodyVoxels << '\n'
+                  << "local_component_owned_continuation_rescue_threshold_ladder_steps: "
+                  << localComponentOwnedContinuationRescueThresholdLadderSteps << '\n'
+                  << "local_component_owned_continuation_rescue_threshold_ladder_step: "
+                  << localComponentOwnedContinuationRescueThresholdLadderStep << '\n'
+                  << "local_component_owned_continuation_rescue_min_threshold: "
+                  << localComponentOwnedContinuationRescueMinThreshold << '\n'
+                  << "local_component_owned_continuation_rescue_max_displacement_radius_scale: "
+                  << localComponentOwnedContinuationRescueMaxDisplacementRadiusScale << '\n'
+                  << "local_component_owned_continuation_rescue_neighbor_ownership_scale: "
+                  << localComponentOwnedContinuationRescueNeighborOwnershipScale << '\n'
+                  << "local_component_owned_continuation_rescue_min_current_support_drift_radius_scale: "
+                  << localComponentOwnedContinuationRescueMinCurrentSupportDriftRadiusScale << '\n'
+                  << "local_component_owned_continuation_rescue_outside_prior_body_enabled: "
+                  << localComponentOwnedContinuationRescueOutsidePriorBodyEnabled << '\n'
+                  << "local_component_owned_continuation_rescue_outside_prior_body_min_voxel_dominance: "
+                  << localComponentOwnedContinuationRescueOutsidePriorBodyMinVoxelDominance << '\n'
+                  << "local_component_owned_continuation_rescue_outside_prior_body_min_separation_radius_scale: "
+                  << localComponentOwnedContinuationRescueOutsidePriorBodyMinSeparationRadiusScale << '\n'
+                  << "adaptive_evidence_hypotheses_enabled: "
+                  << adaptiveEvidenceHypothesesEnabled << '\n'
+                  << "adaptive_edge_refined_hypotheses_enabled: "
+                  << adaptiveEdgeRefinedHypothesesEnabled << '\n'
+                  << "adaptive_trial_fit_enabled: "
+                  << adaptiveTrialFitEnabled << '\n'
+                  << "adaptive_family_diverse_beam_enabled: "
+                  << adaptiveFamilyDiverseBeamEnabled << '\n'
+                  << "adaptive_family_diverse_beam_width: "
+                  << adaptiveFamilyDiverseBeamWidth << '\n'
+                  << "adaptive_threshold_history_enabled: "
+                  << adaptiveThresholdHistoryEnabled << '\n'
+                  << "adaptive_threshold_history_min_trusted_acceptances: "
+                  << adaptiveThresholdHistoryMinTrustedAcceptances << '\n'
+                  << "adaptive_threshold_history_smoothing: "
+                  << adaptiveThresholdHistorySmoothing << '\n'
+                  << "adaptive_pca_reliable_min_voxels: "
+                  << adaptivePcaReliableMinVoxels << '\n'
+                  << "local_component_single_body_asymmetric_split_gate_enabled: "
+                  << localComponentSingleBodyAsymmetricSplitGateEnabled << '\n'
+                  << "local_component_single_body_asymmetric_split_max_parent_balance: "
+                  << localComponentSingleBodyAsymmetricSplitMaxParentBalance << '\n'
+                  << "local_component_single_body_strong_split_exception_enabled: "
+                  << localComponentSingleBodyStrongSplitExceptionEnabled << '\n'
+                  << "local_component_single_body_strong_split_min_total_improvement: "
+                  << localComponentSingleBodyStrongSplitMinTotalImprovement << '\n'
+                  << "local_component_single_body_strong_split_min_image_improvement: "
+                  << localComponentSingleBodyStrongSplitMinImageImprovement << '\n'
+                  << "local_component_single_body_strong_split_min_away_alignment: "
+                  << localComponentSingleBodyStrongSplitMinAwayAlignment << '\n'
+                  << "local_component_single_body_strong_split_max_neighbor_distance_parent_radius_fraction: "
+                  << localComponentSingleBodyStrongSplitMaxNeighborDistanceParentRadiusFraction << '\n'
                   << "local_component_split_saturated_sparse_fallback_enabled: "
                   << localComponentSplitSaturatedSparseFallbackEnabled << '\n'
                   << "local_component_split_saturated_sparse_min_threshold: "
